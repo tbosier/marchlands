@@ -250,6 +250,17 @@ func _relayout(rect: Vector2) -> void:
 		icon_rect.visible = button_w >= 82.0 and icon_rect.texture != null
 		icon_rect.custom_minimum_size = Vector2(icon_size, icon_size)
 
+		# Fit the price to the column rather than letting it clip. At the
+		# widest the tray ever gets, "26 Timber, 14 Stone" is a few pixels
+		# wider than the text column, so every card with a two-resource price
+		# read "14 Stor" — in the one place the player goes to find out what
+		# something costs.
+		if cost_label.visible:
+			var text_w: float = button_w - 16.0
+			if icon_rect.visible:
+				text_w -= icon_size + 8.0
+			_fit_label(cost_label, text_w, [F_MICRO, 10, 9])
+
 	if _selection_panel:
 		var panel_w: float = clampf(width * 0.34, 208.0, 306.0)
 		_selection_panel.offset_left = -panel_w - 12.0
@@ -716,6 +727,22 @@ func _build_card(type_id: String, def) -> Button:
 		"name": name_label, "cost": cost_label, "icon": icon,
 	}
 	return b
+
+
+## Step a label's font down until its text fits `available` pixels, so a price
+## shrinks rather than losing its last characters. Returns nothing: the label
+## keeps the largest size in `sizes` that fits, or the smallest if none does.
+func _fit_label(label: Label, available: float, sizes: Array) -> void:
+	var font := label.get_theme_font("font")
+	if font == null or available <= 0.0:
+		return
+	for size in sizes:
+		var w: float = font.get_string_size(label.text,
+				HORIZONTAL_ALIGNMENT_LEFT, -1, int(size)).x
+		if w <= available:
+			label.add_theme_font_size_override("font_size", int(size))
+			return
+	label.add_theme_font_size_override("font_size", int(sizes[-1]))
 
 
 func _on_build_tray_toggled(pressed: bool) -> void:

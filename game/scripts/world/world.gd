@@ -111,7 +111,7 @@ func generate(registry: AssetRegistry, seed_value: int) -> void:
 ## from pixels, not from a meter — if thatch
 ## still clips, or if the ground has gone muddy, this is the one number to
 ## move, and everything else in this file is scaled relative to it.
-const EXPOSURE := 0.66
+const EXPOSURE := 0.92
 
 ## How far shadows are drawn.
 ##
@@ -249,9 +249,16 @@ func set_time_of_day(fraction: float, year_fraction: float = -1.0) -> void:
 	# Days are longer in summer and shorter in winter. It is a small thing, but
 	# it is the difference between four palettes and four seasons: winter is
 	# not merely bluer, the light also stays lower all day.
+	#
+	# Two terms, and both are needed. `arc` is how high the sun climbs; the
+	# seasonal *offset* is what moves sunrise and sunset, by lifting the whole
+	# curve so it crosses zero later in summer and earlier in winter. Scaling
+	# the amplitude alone — which is what this did — changed only the noon
+	# elevation and left the sun setting at 17:17 every day of the year,
+	# midsummer included, while this comment claimed otherwise.
 	var summer: float = cos((_year_fraction - 0.375) * TAU)   # +1 midsummer
 	var arc := 56.0 + summer * 13.0
-	var elevation: float = sin((t - 0.22) * TAU) * arc
+	var elevation: float = sin((t - 0.22) * TAU) * arc + summer * 16.0
 
 	# The sun is never allowed to graze the horizon. At a few degrees of
 	# elevation every building throws a shadow across half the map, which
@@ -272,8 +279,15 @@ func set_time_of_day(fraction: float, year_fraction: float = -1.0) -> void:
 	# Night never falls all the way. This is a strategy game before it is a
 	# simulation of daylight: the board has to stay readable at 03:00, so the
 	# darkest hour is a cool moonlit blue rather than actual darkness.
-	var day_amount := clampf((elevation + 20.0) / 55.0, 0.26, 1.0)
-	var golden := 1.0 - smoothstep(0.30, 0.66, day_amount)
+	var day_amount := clampf((elevation + 20.0) / 55.0, 0.34, 1.0)
+
+	# Golden hour is the sun sitting *near* the horizon, not merely a dim sky.
+	# Driving it from `day_amount` alone gave midnight exactly the same warm
+	# cast as sunset — both sit on the floor of that curve — so the small hours
+	# came out brown instead of the moonlit blue two comments in this file
+	# promise. Fade it out once the sun is well down.
+	var golden := (1.0 - smoothstep(0.30, 0.66, day_amount)) \
+			* smoothstep(-26.0, -6.0, elevation)
 
 	const NIGHT := Color(0.52, 0.66, 1.0)
 	const GOLDEN := Color(1.0, 0.74, 0.47)
@@ -309,7 +323,13 @@ func set_time_of_day(fraction: float, year_fraction: float = -1.0) -> void:
 	# Twilight: the ambient goes blue and comparatively strong, because at dusk
 	# the sky really is the main light. At noon it steps back and lets the key
 	# do the work, which is what keeps the shadows crisp.
-	env.ambient_light_energy = lerpf(0.52, 0.32, day_amount)
+	# The night end of this curve is doing a different job from the day end.
+	# By day the ambient deliberately steps back so the key light does the
+	# modelling; after dark there is no key, so the ambient *is* the light, and
+	# taking it down to daylight levels left the foreground at a fifteenth of
+	# the luminance of the lit scene — unreadable, and flatly contrary to the
+	# promise two comments above that the board stays legible at 03:00.
+	env.ambient_light_energy = lerpf(0.82, 0.32, day_amount)
 	env.ambient_light_color = Color(0.34, 0.46, 0.80).lerp(
 			Color(0.44, 0.58, 0.82), day_amount)
 
