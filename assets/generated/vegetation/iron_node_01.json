@@ -1,0 +1,38 @@
+{
+  "asset_id": "iron_node_01",
+  "category": "resource_node",
+  "footprint_m": [
+    4.2,
+    4.2
+  ],
+  "bounds_min": [
+    -1.8548,
+    -1.9381,
+    -0.264
+  ],
+  "bounds_max": [
+    1.4973,
+    1.7686,
+    2.1241
+  ],
+  "height_m": 2.388,
+  "materials": [
+    "stone_grey",
+    "brick_red"
+  ],
+  "triangles": {
+    "lod0": 144,
+    "lod1": 56,
+    "lod2": 24
+  },
+  "triangle_budget": 900,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {
+    "att_worksite": [
+      0.0,
+      -2.0,
+      0.0
+    ]
+  }
+}

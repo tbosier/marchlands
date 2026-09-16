@@ -1,0 +1,32 @@
+{
+  "asset_id": "grain_sack",
+  "category": "prop",
+  "footprint_m": [
+    0.5,
+    0.5
+  ],
+  "bounds_min": [
+    -0.24,
+    -0.24,
+    0.0
+  ],
+  "bounds_max": [
+    0.24,
+    0.24,
+    0.72
+  ],
+  "height_m": 0.72,
+  "materials": [
+    "fabric_muted",
+    "timber_dark"
+  ],
+  "triangles": {
+    "lod0": 68,
+    "lod1": 68,
+    "lod2": 68
+  },
+  "triangle_budget": 900,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {}
+}

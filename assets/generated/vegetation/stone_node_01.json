@@ -1,0 +1,37 @@
+{
+  "asset_id": "stone_node_01",
+  "category": "resource_node",
+  "footprint_m": [
+    5.0,
+    5.0
+  ],
+  "bounds_min": [
+    -2.0616,
+    -2.4204,
+    -0.2303
+  ],
+  "bounds_max": [
+    2.2699,
+    2.1068,
+    1.0225
+  ],
+  "height_m": 1.253,
+  "materials": [
+    "stone_grey"
+  ],
+  "triangles": {
+    "lod0": 132,
+    "lod1": 52,
+    "lod2": 22
+  },
+  "triangle_budget": 900,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {
+    "att_worksite": [
+      0.0,
+      -2.4,
+      0.0
+    ]
+  }
+}

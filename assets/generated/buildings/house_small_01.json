@@ -1,0 +1,47 @@
+{
+  "asset_id": "house_small_01",
+  "category": "building",
+  "footprint_m": [
+    8.4,
+    10.4
+  ],
+  "bounds_min": [
+    -4.25,
+    -5.25,
+    -0.105
+  ],
+  "bounds_max": [
+    4.85,
+    4.02,
+    7.904
+  ],
+  "height_m": 8.009,
+  "materials": [
+    "stone_dark",
+    "plaster_warm",
+    "timber_dark",
+    "thatch",
+    "glass",
+    "timber_light"
+  ],
+  "triangles": {
+    "lod0": 1428,
+    "lod1": 924,
+    "lod2": 204
+  },
+  "triangle_budget": 4000,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {
+    "att_entrance": [
+      -1.4,
+      -6.0,
+      0.0
+    ],
+    "att_smoke": [
+      1.9,
+      -1.7,
+      7.994
+    ]
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "asset_id": "crate",
+  "category": "prop",
+  "footprint_m": [
+    0.8,
+    0.8
+  ],
+  "bounds_min": [
+    -0.3785,
+    -0.3785,
+    0.0
+  ],
+  "bounds_max": [
+    0.3785,
+    0.3785,
+    0.713
+  ],
+  "height_m": 0.713,
+  "materials": [
+    "timber_light",
+    "timber_dark"
+  ],
+  "triangles": {
+    "lod0": 156,
+    "lod1": 156,
+    "lod2": 156
+  },
+  "triangle_budget": 900,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {}
+}

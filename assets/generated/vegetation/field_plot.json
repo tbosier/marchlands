@@ -1,0 +1,31 @@
+{
+  "asset_id": "field_plot",
+  "category": "vegetation",
+  "footprint_m": [
+    4.0,
+    4.0
+  ],
+  "bounds_min": [
+    -2.02,
+    -2.02,
+    -0.05
+  ],
+  "bounds_max": [
+    2.02,
+    2.02,
+    0.1805
+  ],
+  "height_m": 0.23,
+  "materials": [
+    "soil_dark"
+  ],
+  "triangles": {
+    "lod0": 84,
+    "lod1": 32,
+    "lod2": 14
+  },
+  "triangle_budget": 1200,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {}
+}

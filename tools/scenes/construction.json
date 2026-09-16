@@ -1,0 +1,62 @@
+[
+  {
+    "op": "focus_keep",
+    "distance": 70,
+    "yaw": 1.1
+  },
+  {
+    "op": "speed",
+    "rate": 16.0
+  },
+  {
+    "op": "build",
+    "type": "stockpile",
+    "offset": [
+      -26,
+      -4
+    ],
+    "radius": 40,
+    "pay": true
+  },
+  {
+    "op": "build",
+    "type": "house",
+    "offset": [
+      -34,
+      16
+    ],
+    "radius": 40,
+    "pay": true
+  },
+  {
+    "op": "shot",
+    "name": "c1_blueprints"
+  },
+  {
+    "op": "run",
+    "days": 0.6
+  },
+  {
+    "op": "shot",
+    "name": "c2_materials_arriving"
+  },
+  {
+    "op": "run",
+    "days": 4.5
+  },
+  {
+    "op": "shot",
+    "name": "c3_built"
+  },
+  {
+    "op": "assert",
+    "check": "buildings_complete",
+    "value": 8
+  },
+  {
+    "op": "report"
+  },
+  {
+    "op": "quit"
+  }
+]

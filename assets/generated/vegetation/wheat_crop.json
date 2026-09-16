@@ -1,0 +1,32 @@
+{
+  "asset_id": "wheat_crop",
+  "category": "vegetation",
+  "footprint_m": [
+    4.0,
+    4.0
+  ],
+  "bounds_min": [
+    -2.095,
+    -1.9297,
+    -0.0127
+  ],
+  "bounds_max": [
+    2.0031,
+    1.9616,
+    1.0017
+  ],
+  "height_m": 1.014,
+  "materials": [
+    "foliage_green",
+    "grain_gold"
+  ],
+  "triangles": {
+    "lod0": 864,
+    "lod1": 344,
+    "lod2": 144
+  },
+  "triangle_budget": 1200,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {}
+}

@@ -1,0 +1,121 @@
+[
+  {
+    "op": "focus_keep",
+    "distance": 96,
+    "yaw": 0.55
+  },
+  {
+    "op": "shot",
+    "name": "01_the_keep"
+  },
+  {
+    "op": "build",
+    "type": "logging_camp",
+    "near": "trees",
+    "radius": 170,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "farm",
+    "offset": [
+      0,
+      55
+    ],
+    "radius": 60,
+    "instant": true
+  },
+  {
+    "op": "shot",
+    "name": "02_camp_placed"
+  },
+  {
+    "op": "speed",
+    "rate": 16.0
+  },
+  {
+    "op": "run",
+    "days": 1.0
+  },
+  {
+    "op": "shot",
+    "name": "03_first_trips"
+  },
+  {
+    "op": "assert",
+    "check": "wear_above",
+    "value": 100
+  },
+  {
+    "op": "run",
+    "days": 2.0
+  },
+  {
+    "op": "shot",
+    "name": "04_path_forming"
+  },
+  {
+    "op": "assert",
+    "check": "road_level_at_least",
+    "value": 2
+  },
+  {
+    "op": "assert",
+    "check": "resource_above",
+    "res": 1,
+    "value": 60
+  },
+  {
+    "op": "run",
+    "days": 6.0
+  },
+  {
+    "op": "shot",
+    "name": "05_track_worn_in"
+  },
+  {
+    "op": "assert",
+    "check": "road_level_at_least",
+    "value": 2
+  },
+  {
+    "op": "assert",
+    "check": "population_at_least",
+    "value": 22
+  },
+  {
+    "op": "upgrade_route",
+    "at": "busiest"
+  },
+  {
+    "op": "assert",
+    "check": "nav_matches_roads"
+  },
+  {
+    "op": "assert",
+    "check": "road_level_at_least",
+    "value": 3
+  },
+  {
+    "op": "run",
+    "days": 0.2
+  },
+  {
+    "op": "shot",
+    "name": "06_road_upgraded"
+  },
+  {
+    "op": "run",
+    "days": 6.0
+  },
+  {
+    "op": "shot",
+    "name": "07_settlement"
+  },
+  {
+    "op": "report"
+  },
+  {
+    "op": "quit"
+  }
+]

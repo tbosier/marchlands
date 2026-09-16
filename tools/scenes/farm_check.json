@@ -1,0 +1,62 @@
+[
+  {
+    "op": "note",
+    "text": "fields follow the workforce, and refuse to record a track"
+  },
+  {
+    "op": "build",
+    "type": "farm",
+    "offset": [
+      0,
+      46
+    ],
+    "radius": 60,
+    "instant": true
+  },
+  {
+    "op": "speed",
+    "rate": 16
+  },
+  {
+    "op": "run",
+    "days": 5.0
+  },
+  {
+    "op": "assert",
+    "check": "farm_plots_match_workers"
+  },
+  {
+    "op": "note",
+    "text": "grind a road straight across a worked plot"
+  },
+  {
+    "op": "stamp_wear",
+    "on_field": true,
+    "level": 3,
+    "radius": 4.0
+  },
+  {
+    "op": "assert",
+    "check": "fields_refuse_wear"
+  },
+  {
+    "op": "camera",
+    "at": [
+      384,
+      432
+    ],
+    "distance": 62,
+    "yaw": 0.5
+  },
+  {
+    "op": "run",
+    "days": 0.05
+  },
+  {
+    "op": "shot",
+    "name": "f_fields"
+  },
+  {
+    "op": "quit"
+  }
+]

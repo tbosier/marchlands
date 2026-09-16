@@ -1,0 +1,92 @@
+# Marchlands — shared material library.
+# Values are linear-ish sRGB hex + PBR scalars. Keep this list SMALL.
+# Any asset referencing a material not listed here fails validation.
+
+version: 1
+
+materials:
+  timber_dark:
+    base_color: "#4a3526"
+    roughness: 0.82
+    metallic: 0.0
+  timber_light:
+    base_color: "#9a7550"
+    roughness: 0.78
+    metallic: 0.0
+  plaster_warm:
+    base_color: "#bcb096"
+    roughness: 0.92
+    metallic: 0.0
+  stone_grey:
+    base_color: "#63605a"
+    roughness: 0.88
+    metallic: 0.0
+  stone_dark:
+    base_color: "#403e39"
+    roughness: 0.90
+    metallic: 0.0
+  brick_red:
+    base_color: "#9a5a45"
+    roughness: 0.85
+    metallic: 0.0
+  iron_dark:
+    base_color: "#3b3f44"
+    roughness: 0.45
+    metallic: 0.85
+  roof_tile_red:
+    base_color: "#8c4a37"
+    roughness: 0.76
+    metallic: 0.0
+  roof_slate:
+    base_color: "#3d434a"
+    roughness: 0.70
+    metallic: 0.0
+  thatch:
+    base_color: "#b79556"
+    roughness: 0.95
+    metallic: 0.0
+  glass:
+    base_color: "#6d8894"
+    roughness: 0.12
+    metallic: 0.0
+  fabric_muted:
+    base_color: "#7b5f52"
+    roughness: 0.90
+    metallic: 0.0
+  foliage_green:
+    base_color: "#4d6b39"
+    roughness: 0.90
+    metallic: 0.0
+  foliage_autumn:
+    base_color: "#7d6329"
+    roughness: 0.90
+    metallic: 0.0
+  # The shaded interior of a canopy. A tree built from one flat green reads as
+  # a lollipop from the play camera: there is nothing between the lobes for the
+  # eye to separate them by. These are the mass the light does not reach, and
+  # they are what give a low-poly canopy depth without a single extra triangle
+  # of silhouette.
+  foliage_deep:
+    base_color: "#32462a"
+    roughness: 0.92
+    metallic: 0.0
+  foliage_autumn_deep:
+    base_color: "#55401c"
+    roughness: 0.92
+    metallic: 0.0
+  soil_dark:
+    base_color: "#5b4634"
+    roughness: 0.95
+    metallic: 0.0
+  grain_gold:
+    base_color: "#c9a545"
+    roughness: 0.88
+    metallic: 0.0
+  skin_light:
+    base_color: "#d2a27f"
+    roughness: 0.75
+    metallic: 0.0
+  skin_mid:
+    base_color: "#a87a55"
+    roughness: 0.75
+    metallic: 0.0

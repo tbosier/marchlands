@@ -1,0 +1,39 @@
+{
+  "asset_id": "pine_tree_01",
+  "category": "vegetation",
+  "footprint_m": [
+    6.9,
+    6.9
+  ],
+  "bounds_min": [
+    -2.9399,
+    -3.0068,
+    0.0
+  ],
+  "bounds_max": [
+    3.1074,
+    3.0406,
+    12.5341
+  ],
+  "height_m": 12.534,
+  "materials": [
+    "timber_dark",
+    "foliage_deep",
+    "foliage_green"
+  ],
+  "triangles": {
+    "lod0": 202,
+    "lod1": 79,
+    "lod2": 30
+  },
+  "triangle_budget": 1200,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {
+    "att_worksite": [
+      3.105,
+      -3.105,
+      0.0
+    ]
+  }
+}

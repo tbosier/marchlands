@@ -1,0 +1,5 @@
+[
+  {"op": "focus_keep", "distance": 90, "yaw": 0.55},
+  {"op": "shot", "name": "smoke"},
+  {"op": "quit"}
+]

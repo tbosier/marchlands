@@ -1,0 +1,32 @@
+{
+  "asset_id": "barrel",
+  "category": "prop",
+  "footprint_m": [
+    0.7,
+    0.7
+  ],
+  "bounds_min": [
+    -0.3468,
+    -0.3298,
+    0.0
+  ],
+  "bounds_max": [
+    0.3468,
+    0.3298,
+    0.86
+  ],
+  "height_m": 0.86,
+  "materials": [
+    "timber_light",
+    "iron_dark"
+  ],
+  "triangles": {
+    "lod0": 180,
+    "lod1": 180,
+    "lod2": 180
+  },
+  "triangle_budget": 900,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {}
+}

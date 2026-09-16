@@ -1,0 +1,58 @@
+[
+  {
+    "op": "note",
+    "text": "iron -> tools production chain"
+  },
+  {
+    "op": "build",
+    "type": "logging_camp",
+    "near": "trees",
+    "radius": 200,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "mine",
+    "near": "iron",
+    "radius": 400,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "stockpile",
+    "offset": [
+      -28,
+      10
+    ],
+    "radius": 40,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "blacksmith",
+    "offset": [
+      30,
+      -12
+    ],
+    "radius": 60,
+    "instant": true
+  },
+  {
+    "op": "simulate",
+    "days": 14.0
+  },
+  {
+    "op": "inspect",
+    "type": "blacksmith"
+  },
+  {
+    "op": "report"
+  },
+  {
+    "op": "assert",
+    "check": "tools_being_made"
+  },
+  {
+    "op": "quit"
+  }
+]

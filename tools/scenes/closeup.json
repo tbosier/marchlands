@@ -1,0 +1,54 @@
+[
+  {
+    "op": "build",
+    "type": "logging_camp",
+    "near": "trees",
+    "radius": 170,
+    "instant": true
+  },
+  {
+    "op": "speed",
+    "rate": 8.0
+  },
+  {
+    "op": "run",
+    "days": 2.5
+  },
+  {
+    "op": "speed",
+    "rate": 1.0
+  },
+  {
+    "op": "focus_keep",
+    "distance": 34,
+    "yaw": 0.9
+  },
+  {
+    "op": "run",
+    "days": 0.05
+  },
+  {
+    "op": "shot",
+    "name": "z_closeup_keep"
+  },
+  {
+    "op": "camera",
+    "at": [
+      411,
+      391
+    ],
+    "distance": 30,
+    "yaw": 2.2
+  },
+  {
+    "op": "run",
+    "days": 0.05
+  },
+  {
+    "op": "shot",
+    "name": "z_closeup_camp"
+  },
+  {
+    "op": "quit"
+  }
+]

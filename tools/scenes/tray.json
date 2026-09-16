@@ -1,0 +1,9 @@
+[
+  {"op": "build", "type": "logging_camp", "near": "trees", "radius": 190, "instant": true},
+  {"op": "simulate", "days": 6.0},
+  {"op": "open_build_tray"},
+  {"op": "camera", "at": [372, 368], "distance": 38, "yaw": 0.75},
+  {"op": "run", "days": 0.06},
+  {"op": "shot", "name": "z_tray"},
+  {"op": "quit"}
+]

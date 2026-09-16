@@ -1,0 +1,39 @@
+{
+  "asset_id": "oak_tree_01",
+  "category": "vegetation",
+  "footprint_m": [
+    9.412,
+    9.412
+  ],
+  "bounds_min": [
+    -3.8655,
+    -4.458,
+    0.0
+  ],
+  "bounds_max": [
+    3.3071,
+    2.9728,
+    8.488
+  ],
+  "height_m": 8.488,
+  "materials": [
+    "timber_dark",
+    "foliage_deep",
+    "foliage_green"
+  ],
+  "triangles": {
+    "lod0": 398,
+    "lod1": 158,
+    "lod2": 58
+  },
+  "triangle_budget": 1200,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {
+    "att_worksite": [
+      4.2352,
+      -4.2352,
+      0.0
+    ]
+  }
+}

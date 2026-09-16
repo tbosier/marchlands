@@ -1,0 +1,68 @@
+{
+  "asset_id": "farmhouse",
+  "category": "building",
+  "footprint_m": [
+    10.0,
+    9.5
+  ],
+  "bounds_min": [
+    -5.06,
+    -5.8,
+    -0.105
+  ],
+  "bounds_max": [
+    6.25,
+    4.15,
+    7.76
+  ],
+  "height_m": 7.865,
+  "materials": [
+    "stone_grey",
+    "plaster_warm",
+    "timber_dark",
+    "glass",
+    "timber_light",
+    "thatch",
+    "stone_dark"
+  ],
+  "triangles": {
+    "lod0": 1224,
+    "lod1": 768,
+    "lod2": 240
+  },
+  "triangle_budget": 4000,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {
+    "att_entrance": [
+      -2.6,
+      -5.25,
+      0.0
+    ],
+    "att_worksite": [
+      3.5,
+      -4.35,
+      0.0
+    ],
+    "att_cart_bay": [
+      1.0,
+      -6.35,
+      0.0
+    ],
+    "att_smoke": [
+      -4.0,
+      1.2,
+      7.85
+    ],
+    "att_stock_0": [
+      0.9,
+      -4.65,
+      0.0
+    ],
+    "att_stock_1": [
+      2.2,
+      -4.65,
+      0.0
+    ]
+  }
+}

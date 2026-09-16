@@ -1,0 +1,65 @@
+{
+  "asset_id": "stockpile",
+  "category": "building",
+  "footprint_m": [
+    8.0,
+    8.0
+  ],
+  "bounds_min": [
+    -4.05,
+    -4.05,
+    -0.02
+  ],
+  "bounds_max": [
+    4.05,
+    4.05,
+    2.86
+  ],
+  "height_m": 2.88,
+  "materials": [
+    "timber_light",
+    "stone_grey",
+    "timber_dark",
+    "roof_tile_red"
+  ],
+  "triangles": {
+    "lod0": 396,
+    "lod1": 228,
+    "lod2": 228
+  },
+  "triangle_budget": 4000,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {
+    "att_entrance": [
+      0.0,
+      -5.4,
+      0.0
+    ],
+    "att_cart_bay": [
+      2.4,
+      -5.8,
+      0.0
+    ],
+    "att_stock_0": [
+      -2.2,
+      -1.6,
+      0.18
+    ],
+    "att_stock_1": [
+      0.6,
+      -1.6,
+      0.18
+    ],
+    "att_stock_2": [
+      -2.2,
+      1.6,
+      0.18
+    ],
+    "att_stock_3": [
+      0.6,
+      1.6,
+      0.18
+    ]
+  }
+}

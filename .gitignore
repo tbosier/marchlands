@@ -1,0 +1,39 @@
+# Vendored toolchain (Blender + Godot). Prefer `pacman -S blender godot`;
+# tools/build.sh falls back to these when the tools are not on PATH.
+/tools/vendor/
+
+# Godot's import cache and the repo-local HOME the wrapper script uses.
+/game/.godot/
+/.godot-home/
+
+# Assets are generated from tools/blender/, so only the specs are source.
+# The .glb files are kept under assets/generated/ deliberately (they are the
+# build product the game loads); the copy inside the Godot project is not.
+/game/assets/generated/
+# Same reasoning for the icon copies the sync step makes: assets/icons/ is the
+# build product, game/assets/icons/ is a copy of it plus Godot's sidecars.
+/game/assets/icons/
+
+# Harness output. Images kept for documentation are copied into
+# design/screenshots/, which is committed.
+/artifacts/
+/assets/previews/.frames/
+
+*.tmp
+__pycache__/
+*.pyc
+
+# Editor, shell and agent files that live in the working directory but are not
+# part of the project. Several of these exist here only as empty placeholders.
+/.claude/
+/.idea
+/.vscode
+/.mcp.json
+/.ripgreprc
+/.bashrc
+/.bash_profile
+/.zshrc
+/.zprofile
+/.profile
+/.gitconfig
+/.gitmodules

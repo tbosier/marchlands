@@ -1,0 +1,160 @@
+[
+  {
+    "op": "note",
+    "text": "a settlement grows what it has rather than replacing it (design doc 6.4)"
+  },
+  {
+    "op": "build",
+    "type": "logging_camp",
+    "near": "trees",
+    "radius": 200,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "quarry",
+    "near": "stone",
+    "radius": 260,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "granary",
+    "offset": [
+      26,
+      24
+    ],
+    "radius": 40,
+    "instant": true
+  },
+  {
+    "op": "simulate",
+    "days": 8.0
+  },
+  {
+    "op": "note",
+    "text": "the granary becomes a grain warehouse, in place"
+  },
+  {
+    "op": "upgrade_building",
+    "type": "granary"
+  },
+  {
+    "op": "note",
+    "text": "it is a building site now, not a new building elsewhere"
+  },
+  {
+    "op": "simulate",
+    "days": 6.0
+  },
+  {
+    "op": "assert",
+    "check": "building_is",
+    "type": "grain_warehouse"
+  },
+  {
+    "op": "assert",
+    "check": "no_stale_reservations"
+  },
+  {
+    "op": "note",
+    "text": "and it survives a save"
+  },
+  {
+    "op": "save",
+    "slot": "upgrade"
+  },
+  {
+    "op": "simulate",
+    "days": 1.0
+  },
+  {
+    "op": "load",
+    "slot": "upgrade"
+  },
+  {
+    "op": "assert",
+    "check": "save_round_trip"
+  },
+  {
+    "op": "assert",
+    "check": "building_is",
+    "type": "grain_warehouse"
+  },
+  {
+    "op": "note",
+    "text": "and the same for the smithy, which needs iron for it"
+  },
+  {
+    "op": "build",
+    "type": "mine",
+    "near": "iron",
+    "radius": 300,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "blacksmith",
+    "offset": [
+      -46,
+      34
+    ],
+    "radius": 70,
+    "instant": true,
+    "note": "far enough out that the Forge it grows into (16.2 x 16.0 m, against the Blacksmith's 10.4 x 12.5) still has room \u2014 upgrades are now refused when the larger footprint would overlap a neighbour"
+  },
+  {
+    "op": "build",
+    "type": "stockpile",
+    "offset": [
+      18,
+      30
+    ],
+    "radius": 40,
+    "instant": true
+  },
+  {
+    "op": "simulate",
+    "days": 10.0
+  },
+  {
+    "op": "upgrade_building",
+    "type": "blacksmith"
+  },
+  {
+    "op": "simulate",
+    "days": 8.0
+  },
+  {
+    "op": "assert",
+    "check": "building_is",
+    "type": "forge"
+  },
+  {
+    "op": "assert",
+    "check": "no_stale_reservations"
+  },
+  {
+    "op": "camera",
+    "at": [
+      410,
+      408
+    ],
+    "distance": 55,
+    "yaw": 0.6
+  },
+  {
+    "op": "run",
+    "days": 0.05
+  },
+  {
+    "op": "shot",
+    "name": "u_upgrade"
+  },
+  {
+    "op": "report"
+  },
+  {
+    "op": "quit"
+  }
+]

@@ -1,0 +1,9 @@
+[
+  {"op": "build", "type": "logging_camp", "near": "trees", "radius": 190, "instant": true},
+  {"op": "build", "type": "farm", "offset": [0, 44], "radius": 60, "instant": true},
+  {"op": "simulate", "days": 8.0},
+  {"op": "focus_keep", "distance": 74, "yaw": 0.62},
+  {"op": "run", "days": 0.06},
+  {"op": "shot", "name": "z_showcase"},
+  {"op": "quit"}
+]

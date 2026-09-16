@@ -1,0 +1,68 @@
+{
+  "asset_id": "forge",
+  "category": "building",
+  "footprint_m": [
+    16.2,
+    16.0
+  ],
+  "bounds_min": [
+    -9.75,
+    -9.0,
+    -0.119
+  ],
+  "bounds_max": [
+    6.0,
+    6.5,
+    12.1
+  ],
+  "height_m": 12.219,
+  "materials": [
+    "stone_dark",
+    "plaster_warm",
+    "timber_dark",
+    "glass",
+    "roof_tile_red",
+    "iron_dark",
+    "timber_light"
+  ],
+  "triangles": {
+    "lod0": 1726,
+    "lod1": 1194,
+    "lod2": 210
+  },
+  "triangle_budget": 4000,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {
+    "att_entrance": [
+      -2.6,
+      -9.6,
+      0.0
+    ],
+    "att_worksite": [
+      0.4,
+      -8.2,
+      0.0
+    ],
+    "att_cart_bay": [
+      4.2,
+      -9.4,
+      0.0
+    ],
+    "att_smoke": [
+      -3.3,
+      4.3,
+      12.19
+    ],
+    "att_stock_0": [
+      4.4,
+      -1.4,
+      0.0
+    ],
+    "att_stock_1": [
+      4.4,
+      1.2,
+      0.0
+    ]
+  }
+}

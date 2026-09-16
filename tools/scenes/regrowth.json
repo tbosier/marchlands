@@ -1,0 +1,64 @@
+[
+  {
+    "op": "note",
+    "text": "wear a track into empty ground far from the town"
+  },
+  {
+    "op": "stamp_wear",
+    "at": [
+      560,
+      560
+    ],
+    "level": 3,
+    "radius": 5.0
+  },
+  {
+    "op": "camera",
+    "at": [
+      560,
+      560
+    ],
+    "distance": 55,
+    "yaw": 0.5
+  },
+  {
+    "op": "run",
+    "days": 0.05
+  },
+  {
+    "op": "shot",
+    "name": "g_track_fresh"
+  },
+  {
+    "op": "speed",
+    "rate": 16
+  },
+  {
+    "op": "simulate",
+    "days": 14.0
+  },
+  {
+    "op": "shot",
+    "name": "g_track_fading"
+  },
+  {
+    "op": "simulate",
+    "days": 26.0
+  },
+  {
+    "op": "shot",
+    "name": "g_track_regrown"
+  },
+  {
+    "op": "assert",
+    "check": "road_level_at_most_here",
+    "at": [
+      560,
+      560
+    ],
+    "value": 1
+  },
+  {
+    "op": "quit"
+  }
+]

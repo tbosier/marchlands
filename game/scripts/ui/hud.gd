@@ -1,0 +1,1291 @@
+class_name HUD
+extends Control
+
+## The whole prototype interface, built in code so there is no .tscn to keep
+## in sync with the scripts.
+##
+## Four regions: a resource bar across the top, the build bar along the bottom,
+## a selection panel on the right, and an alert feed on the left.
+##
+## Everything is drawn from one small design system declared at the top of this
+## file — a five-step type scale, a palette of warm near-blacks and inks, and a
+## handful of shared style boxes — rather than from Godot's stock control theme.
+## That is the difference between an interface and a debug harness: stock Button
+## chrome is a grey bevel that belongs to no game, and six of them in a row over
+## a sunlit landscape look exactly like what they are. The bars here are ink and
+## iron with a single gilt accent, which is the same material language as the
+## settlement underneath them.
+
+signal build_requested(type_id: String)
+signal build_cancelled()
+signal speed_requested(index: int)
+signal upgrade_route_requested()
+signal demolish_requested(building: Building)
+signal upgrade_requested(building: Building)
+signal clear_ground_requested()
+signal focus_requested(position: Vector3)
+
+# --- The design system -------------------------------------------------------
+
+## Type scale. Five steps, each used for one job, so the interface has a
+## rhythm instead of eleven arbitrary sizes.
+const F_MICRO := 11     ## costs, captions, the hint line
+const F_SMALL := 12     ## body copy, button labels
+const F_BODY := 13      ## readouts — the numbers you scan
+const F_LEAD := 15      ## panel titles
+const F_TITLE := 16     ## the wordmark
+
+## Palette. Warm near-blacks rather than neutral grey, because the world below
+## is warm and a neutral chrome floats off it.
+const BG := Color(0.086, 0.082, 0.076, 0.965)
+const BG_PANEL := Color(0.105, 0.100, 0.092, 0.975)
+const BG_SUNK := Color(0.052, 0.050, 0.046, 0.92)
+const BG_RAISED := Color(0.158, 0.150, 0.138, 1.0)
+const LINE := Color(0.27, 0.25, 0.22, 0.95)
+const LINE_SOFT := Color(0.20, 0.19, 0.17, 0.75)
+
+const INK := Color(0.93, 0.90, 0.84)
+const INK_DIM := Color(0.63, 0.60, 0.55)
+const INK_FAINT := Color(0.44, 0.42, 0.39)
+const WARN := Color(0.90, 0.69, 0.35)
+const BAD := Color(0.86, 0.45, 0.39)
+const ACCENT := Color(0.83, 0.71, 0.43)
+const ACCENT_DEEP := Color(0.46, 0.38, 0.22)
+
+## Bar and tray metrics, in one place so the panels that have to clear them can
+## be derived rather than guessed.
+##
+## The top bar has to be tall enough for the tallest thing in it, which is the
+## speed control: 26 px of button inside 3 px of well on each side is 32, and
+## the holder that carries it clips its contents, so anything less would
+## silently shave the top and bottom off every rate button.
+const TOP_BAR_H := 46.0
+const TOP_BAR_INNER_H := 34.0
+const TRAY_CARD_H := 54.0
+const BAR_OPEN_H := 78.0
+const BAR_CLOSED_H := 46.0
+
+var _res_labels: Array[Label] = []
+var _res_name_labels: Array[Label] = []
+var _clock_label: Label
+var _pop_label: Label
+var _speed_buttons: Array[Button] = []
+var _build_buttons: Dictionary = {}
+## type_id -> { "name": Label, "cost": Label, "icon": TextureRect }.
+## The build tray's cards are laid out by hand inside the buttons, because a
+## stock Button can only colour its whole label at once and the name and the
+## price want to read differently.
+var _build_cards: Dictionary = {}
+var _selection_panel: PanelContainer
+var _selection_title: Label
+var _selection_rule: HSeparator
+var _selection_body: RichTextLabel
+var _selection_actions: VBoxContainer
+var _alert_box: VBoxContainer
+var _hint_label: Label
+var _tooltip: PanelContainer
+var _tooltip_label: RichTextLabel
+
+var _title_label: Label
+var _date_label: Label
+var _top_row: HBoxContainer
+var _build_toggle: Button
+var _build_tray: HBoxContainer
+var _clear_button: Button
+var _build_bar: PanelContainer
+var _controls_row: HBoxContainer
+var _speed_group: PanelContainer
+var _sim: Simulation
+## Set once the widgets exist, so a rebind after a load does not build them
+## a second time.
+var _built := false
+var _clock: Clock
+var _active_build := ""
+var _compact := false
+var _selection_scroll_limit := 600.0
+var _idle_reason := ""
+var _base_hint := ""
+var _hint_room := true
+## What the selection panel's action buttons currently represent. See
+## _actions_changed: this is what stops a periodic refresh from destroying a
+## button the player is in the middle of pressing.
+var _actions_signature := ""
+
+# Shared style boxes. Built once and handed to every control that wants them:
+# a StyleBox is a resource, so one instance can dress thirty buttons.
+var _sb_btn: StyleBoxFlat
+var _sb_btn_hover: StyleBoxFlat
+var _sb_btn_pressed: StyleBoxFlat
+var _sb_btn_disabled: StyleBoxFlat
+var _sb_card: StyleBoxFlat
+var _sb_card_hover: StyleBoxFlat
+var _sb_card_pressed: StyleBoxFlat
+var _sb_chip: StyleBoxFlat
+var _sb_chip_hover: StyleBoxFlat
+var _sb_chip_pressed: StyleBoxFlat
+
+
+## Point the interface at a simulation and build the widgets.
+##
+## Loading a save replaces the world and the simulation beneath a HUD that
+## outlives both, so this is called more than once per session. Everything it
+## does past the rebind is guarded accordingly — building the bars twice would
+## stack two of every readout, and connecting to `size_changed` twice is an
+## error Godot reports and then ignores.
+func setup(sim: Simulation, clock: Clock) -> void:
+	_sim = sim
+	_clock = clock
+	if _built:
+		clear_alerts()
+		clear_selection()
+		refresh()
+		return
+	_built = true
+
+	# Anchors alone do not size a Control that hangs off a CanvasLayer: it
+	# stays zero-sized, every anchored child lands somewhere meaningless, and
+	# the selection panel ends up off the left edge of the screen where a
+	# player clicking a building never sees it. Offsets have to be set too,
+	# and the whole thing re-fitted whenever the window changes.
+	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	get_viewport().size_changed.connect(_fit_to_viewport)
+
+	_build_styles()
+	_build_top_bar()
+	_build_bottom_bar()
+	_build_selection_panel()
+	_build_alerts()
+	_build_tooltip()
+	_fit_to_viewport()
+	refresh()
+
+
+func _fit_to_viewport() -> void:
+	var rect := get_viewport_rect().size
+	position = Vector2.ZERO
+	size = rect
+	_relayout(rect)
+
+
+## Keep the interface usable in a narrow window.
+##
+## Nothing here is cosmetic: at 793 px the speed controls were pushed clean off
+## the right-hand edge, and a control the player cannot reach is a broken game.
+## The rule is that the things you act on — speed, build buttons — survive, and
+## the things you only read — the title, the date, the cost text — are what get
+## dropped.
+##
+## The decision is made by measuring, not by guessing a breakpoint: the bar is
+## laid out at full dress and then degraded a step at a time until it fits.
+## Every hand-picked threshold here was wrong at some window size.
+func _relayout(rect: Vector2) -> void:
+	var width := rect.x
+
+	# Start at full dress, then fill the labels in before measuring anything.
+	# Measuring first used stale widths — "Population 0" rather than
+	# "Population 24 (0 homeless, 24 idle)" — so the bar was sized for text it
+	# was about to replace, and the two groups overlapped by a hundred pixels.
+	for b in _speed_buttons:
+		b.custom_minimum_size = Vector2(42, 26)
+		b.add_theme_font_size_override("font_size", F_SMALL)
+	if _title_label:
+		_title_label.visible = true
+	if _date_label:
+		_date_label.visible = true
+	_compact = false
+	_apply_top_spacing()
+	_refresh_readouts()
+
+	# Degrade until the top bar fits, cheapest loss first. The resource names
+	# go before the wordmark does: at that width the coloured tick and the
+	# number still say which store is which.
+	for stage in 3:
+		if _top_fits(width):
+			break
+		match stage:
+			0:
+				if _date_label:
+					_date_label.visible = false
+			1:
+				_compact = true
+				_apply_top_spacing()
+				_refresh_readouts()
+			2:
+				if _title_label:
+					_title_label.visible = false
+
+	# Below this there is no room for both a name and a price on a build
+	# card; the price stays reachable on the tooltip.
+	var tight := width < 1180.0
+	_hint_room = width >= 1180.0
+	_apply_hint_visibility()
+	for type_id in _build_buttons:
+		var b: Button = _build_buttons[type_id]
+		var def := BuildingDefs.get_def(type_id)
+		b.tooltip_text = "%s\n%s\n\n%s" % [def.display_name,
+				def.cost_text(), def.description]
+		# The cards share out whatever width is left after the Build toggle and
+		# the Clear tool, down to a floor of 64 px each. Be honest about the
+		# limit: eight cards at that floor plus the two fixed controls need
+		# about 710 px, so below roughly 760 px the right-hand end of the tray
+		# is off the screen and there is nothing here that recovers it. A
+		# horizontal ScrollContainer is the fix and is not attempted blind.
+		var per: float = (width - 268.0) / float(maxi(1, _build_buttons.size()))
+		var button_w: float = clampf(per, 64.0, 152.0 if not tight else 116.0)
+		b.custom_minimum_size = Vector2(button_w, TRAY_CARD_H)
+
+		var parts: Dictionary = _build_cards[type_id]
+		var name_label: Label = parts["name"]
+		var cost_label: Label = parts["cost"]
+		var icon_rect: TextureRect = parts["icon"]
+		name_label.text = def.display_name
+		cost_label.text = def.cost_text()
+		name_label.add_theme_font_size_override("font_size",
+				F_MICRO if button_w < 98.0 else F_SMALL)
+		# The card sheds its parts in order of how little they cost to lose:
+		# the price first, then the icon, and the name never.
+		cost_label.visible = not tight and button_w >= 106.0
+		var icon_size := 32.0 if button_w >= 124.0 else 26.0
+		icon_rect.visible = button_w >= 82.0 and icon_rect.texture != null
+		icon_rect.custom_minimum_size = Vector2(icon_size, icon_size)
+
+	if _selection_panel:
+		var panel_w: float = clampf(width * 0.34, 208.0, 306.0)
+		_selection_panel.offset_left = -panel_w - 12.0
+		_selection_panel.offset_right = -12.0
+		_selection_panel.offset_bottom = _selection_panel.offset_top
+		if _selection_body:
+			_selection_body.custom_minimum_size = Vector2(panel_w - 30.0, 0)
+		# How much room the panel has between the top bar and the build bar.
+		# Note that this is a measurement, not yet an enforcement: the body has
+		# scroll_active off and fit_content on, so a very long selection — a
+		# workshop with a full staff list — still grows past this rather than
+		# scrolling inside it.
+		var avail: float = rect.y - _selection_panel.offset_top - 96.0
+		_selection_panel.custom_minimum_size = Vector2(0, 0)
+		_selection_scroll_limit = maxf(120.0, avail)
+		if _selection_body:
+			_selection_body.custom_minimum_size.y = 0
+			_selection_body.fit_content = true
+		_selection_panel.size.y = minf(_selection_panel.size.y,
+				_selection_scroll_limit)
+	if _alert_box:
+		var alert_w: float = clampf(width * 0.40, 220.0, 330.0)
+		_alert_box.custom_minimum_size = Vector2(alert_w, 0)
+		_alert_box.offset_right = _alert_box.offset_left + alert_w
+
+	refresh()
+
+
+func _apply_top_spacing() -> void:
+	if _top_row:
+		_top_row.add_theme_constant_override(
+				"separation", 9 if _compact else 18)
+	for label in _res_name_labels:
+		label.visible = not _compact
+
+
+## Would the readouts run into the speed controls? Asked after each step of the
+## degrade loop. Both groups are measured from their own minimum sizes, which
+## for a container is derived from its children and so is valid before layout.
+func _top_fits(width: float) -> bool:
+	if _top_row == null or _controls_row == null:
+		return true
+	var left := _top_row.get_combined_minimum_size().x
+	var right := _controls_row.get_combined_minimum_size().x
+	return left + right + 90.0 <= width
+
+
+# --- Construction of the interface ------------------------------------------
+
+## One style box, described the way the rest of this file wants to ask for one.
+func _box(color: Color, radius: int, border: Color = LINE,
+		  border_width: int = 1) -> StyleBoxFlat:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = color
+	sb.corner_radius_top_left = radius
+	sb.corner_radius_top_right = radius
+	sb.corner_radius_bottom_left = radius
+	sb.corner_radius_bottom_right = radius
+	sb.border_color = border
+	sb.set_border_width_all(border_width)
+	return sb
+
+
+## The shared chrome, built once.
+##
+## Three button families — chip, button, card — sharing one language for the
+## three states that matter. At rest the surface sits a step above the bar it
+## is on. Hovered, it lifts another step and its border brightens. Pressed,
+## which in this interface means *armed*, it turns to the gilt accent: that
+## colour appears nowhere else except the wordmark and panel titles, so a
+## player can always find what is currently armed by looking for the only
+## warm thing on the screen.
+##
+## The bar and panel backgrounds are built elsewhere, by _bar_box and _panel.
+func _build_styles() -> void:
+	_sb_btn = _box(BG_RAISED, 3, LINE)
+	_sb_btn.content_margin_left = 10
+	_sb_btn.content_margin_right = 10
+	_sb_btn.content_margin_top = 5
+	_sb_btn.content_margin_bottom = 5
+
+	_sb_btn_hover = _sb_btn.duplicate() as StyleBoxFlat
+	_sb_btn_hover.bg_color = Color(0.215, 0.203, 0.184, 1.0)
+	_sb_btn_hover.border_color = Color(0.40, 0.36, 0.29, 1.0)
+
+	_sb_btn_pressed = _sb_btn.duplicate() as StyleBoxFlat
+	_sb_btn_pressed.bg_color = Color(0.255, 0.208, 0.118, 1.0)
+	_sb_btn_pressed.border_color = ACCENT
+
+	_sb_btn_disabled = _sb_btn.duplicate() as StyleBoxFlat
+	_sb_btn_disabled.bg_color = Color(0.115, 0.110, 0.104, 1.0)
+	_sb_btn_disabled.border_color = LINE_SOFT
+
+	_sb_card = _box(Color(0.140, 0.133, 0.122, 1.0), 4, LINE_SOFT)
+	_sb_card.content_margin_left = 8
+	_sb_card.content_margin_right = 8
+	_sb_card.content_margin_top = 6
+	_sb_card.content_margin_bottom = 6
+
+	_sb_card_hover = _sb_card.duplicate() as StyleBoxFlat
+	_sb_card_hover.bg_color = Color(0.205, 0.194, 0.176, 1.0)
+	_sb_card_hover.border_color = Color(0.42, 0.37, 0.29, 1.0)
+
+	_sb_card_pressed = _sb_card.duplicate() as StyleBoxFlat
+	_sb_card_pressed.bg_color = Color(0.250, 0.204, 0.116, 1.0)
+	_sb_card_pressed.border_color = ACCENT
+	_sb_card_pressed.border_width_left = 2
+
+	_sb_chip = _box(Color(0.0, 0.0, 0.0, 0.0), 2, Color(0, 0, 0, 0), 0)
+	_sb_chip.content_margin_left = 6
+	_sb_chip.content_margin_right = 6
+	_sb_chip.content_margin_top = 3
+	_sb_chip.content_margin_bottom = 3
+
+	_sb_chip_hover = _sb_chip.duplicate() as StyleBoxFlat
+	_sb_chip_hover.bg_color = Color(0.22, 0.21, 0.19, 0.9)
+
+	_sb_chip_pressed = _sb_chip.duplicate() as StyleBoxFlat
+	_sb_chip_pressed.bg_color = Color(0.255, 0.208, 0.118, 1.0)
+	_sb_chip_pressed.border_color = ACCENT_DEEP
+	_sb_chip_pressed.set_border_width_all(1)
+
+
+## A bar flush to an edge of the screen: square, opaque, with one bright
+## hairline along the side that faces the game.
+func _bar_box(edge_top: bool) -> StyleBoxFlat:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = BG
+	sb.content_margin_left = 14
+	sb.content_margin_right = 14
+	sb.content_margin_top = 6
+	sb.content_margin_bottom = 6
+	sb.border_color = Color(0.30, 0.27, 0.22, 0.95)
+	if edge_top:
+		sb.border_width_bottom = 1
+	else:
+		sb.border_width_top = 1
+	return sb
+
+
+## A panel that floats over the world: rounded, bordered and shadowed, so it
+## stays legible over grass, roof and sky alike.
+func _panel(color: Color) -> StyleBoxFlat:
+	var sb := _box(color, 4, LINE)
+	sb.content_margin_left = 13
+	sb.content_margin_right = 13
+	sb.content_margin_top = 10
+	sb.content_margin_bottom = 11
+	sb.shadow_color = Color(0, 0, 0, 0.45)
+	sb.shadow_size = 7
+	sb.shadow_offset = Vector2(0, 2)
+	return sb
+
+
+func _make_label(text: String, size: int, color: Color) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_color_override("font_color", color)
+	return l
+
+
+## Dress a button in the shared chrome. `family` picks the size and weight.
+func _style_button(b: Button, family: String = "button") -> void:
+	var normal := _sb_btn
+	var hover := _sb_btn_hover
+	var pressed := _sb_btn_pressed
+	match family:
+		"card":
+			normal = _sb_card
+			hover = _sb_card_hover
+			pressed = _sb_card_pressed
+		"chip":
+			normal = _sb_chip
+			hover = _sb_chip_hover
+			pressed = _sb_chip_pressed
+	b.add_theme_stylebox_override("normal", normal)
+	b.add_theme_stylebox_override("hover", hover)
+	b.add_theme_stylebox_override("pressed", pressed)
+	b.add_theme_stylebox_override("hover_pressed", pressed)
+	b.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	b.add_theme_stylebox_override("disabled", _sb_btn_disabled)
+	b.add_theme_color_override("font_color", INK_DIM)
+	b.add_theme_color_override("font_hover_color", INK)
+	b.add_theme_color_override("font_pressed_color", ACCENT)
+	b.add_theme_color_override("font_hover_pressed_color", ACCENT)
+	b.add_theme_color_override("font_focus_color", INK)
+	b.add_theme_color_override("font_disabled_color", INK_FAINT)
+	b.focus_mode = Control.FOCUS_NONE
+
+
+func _build_top_bar() -> void:
+	var bar := PanelContainer.new()
+	bar.name = "top_bar"
+	bar.add_theme_stylebox_override("panel", _bar_box(true))
+	bar.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	bar.offset_bottom = TOP_BAR_H
+	bar.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(bar)
+
+	# Two independently anchored groups rather than one row.
+	#
+	# With a single flow the speed controls were whatever fell off the end:
+	# add one more resource, or run the game in a narrow window, and they left
+	# the screen. Anchoring them to the right edge makes that structurally
+	# impossible — the readouts on the left clip instead, which costs nothing
+	# you cannot get elsewhere.
+	var holder := Control.new()
+	holder.name = "top_holder"
+	holder.custom_minimum_size.y = TOP_BAR_INNER_H
+	holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	holder.clip_contents = true
+	bar.add_child(holder)
+
+	_top_row = HBoxContainer.new()
+	_top_row.name = "readouts"
+	_top_row.set_anchors_preset(Control.PRESET_LEFT_WIDE)
+	_top_row.grow_horizontal = Control.GROW_DIRECTION_END
+	_top_row.add_theme_constant_override("separation", 18)
+	_top_row.alignment = BoxContainer.ALIGNMENT_BEGIN
+	_top_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	holder.add_child(_top_row)
+
+	# A wordmark is not a readout: it is the only thing in the bar set in the
+	# largest step of the scale, and the gilt belongs to it and to armed
+	# controls and to nothing else.
+	_title_label = _make_label("MARCHLANDS", F_TITLE, ACCENT)
+	_title_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_top_row.add_child(_title_label)
+	_top_row.add_child(_rule())
+
+	for i in Config.RES_COUNT:
+		_top_row.add_child(_build_resource_chip(i))
+
+	_top_row.add_child(_rule())
+	_pop_label = _make_label("Population 0", F_BODY, INK)
+	_pop_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	# Labels ignore the mouse by default, which quietly meant the tooltip
+	# explaining *why* nobody is working never appeared.
+	_pop_label.mouse_filter = Control.MOUSE_FILTER_STOP
+	_top_row.add_child(_pop_label)
+
+	_controls_row = HBoxContainer.new()
+	_controls_row.name = "controls"
+	_controls_row.set_anchors_preset(Control.PRESET_RIGHT_WIDE)
+	_controls_row.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	_controls_row.add_theme_constant_override("separation", 12)
+	_controls_row.alignment = BoxContainer.ALIGNMENT_END
+	holder.add_child(_controls_row)
+
+	_date_label = _make_label("", F_BODY, INK_DIM)
+	_date_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_controls_row.add_child(_date_label)
+	_clock_label = _date_label
+
+	# The rates are one control with several positions, not seven buttons that
+	# happen to be adjacent. Sinking them into a shared well says so.
+	_speed_group = PanelContainer.new()
+	_speed_group.name = "speeds"
+	var well := _box(BG_SUNK, 4, LINE_SOFT)
+	well.content_margin_left = 3
+	well.content_margin_right = 3
+	well.content_margin_top = 3
+	well.content_margin_bottom = 3
+	_speed_group.add_theme_stylebox_override("panel", well)
+	_speed_group.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_controls_row.add_child(_speed_group)
+
+	var speed_row := HBoxContainer.new()
+	speed_row.add_theme_constant_override("separation", 2)
+	_speed_group.add_child(speed_row)
+
+	for i in Config.SPEED_LABELS.size():
+		var b := Button.new()
+		b.text = "II" if i == 0 else Config.SPEED_LABELS[i]
+		b.custom_minimum_size = Vector2(42, 26)
+		b.toggle_mode = true
+		b.add_theme_font_size_override("font_size", F_SMALL)
+		b.tooltip_text = "Pause" if i == 0 \
+				else "Run at %s" % Config.SPEED_LABELS[i]
+		_style_button(b, "chip")
+		b.pressed.connect(func(): speed_requested.emit(i))
+		speed_row.add_child(b)
+		_speed_buttons.append(b)
+
+
+## A hairline between groups in the top bar. Godot's stock VSeparator draws a
+## grey line at full height; this one is short, dim and centred, which is what
+## separates without shouting.
+func _rule() -> VSeparator:
+	var sep := VSeparator.new()
+	var line := StyleBoxLine.new()
+	line.color = LINE
+	line.thickness = 1
+	line.vertical = true
+	line.grow_begin = -5.0
+	line.grow_end = -5.0
+	sep.add_theme_stylebox_override("separator", line)
+	sep.add_theme_constant_override("separation", 6)
+	return sep
+
+
+## A resource readout: a coloured tick, the store's name, and the number.
+##
+## The name is dim and the number is bright, so a glance along the bar reads
+## the quantities and only a deliberate look reads the labels. That ordering is
+## the whole job of a resource bar and the previous one — five identical
+## "Food 211" strings in one weight — did not do it.
+func _build_resource_chip(index: int) -> Control:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var tick := ColorRect.new()
+	tick.color = Res.colour(index)
+	tick.custom_minimum_size = Vector2(3, 15)
+	tick.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	tick.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(tick)
+
+	var name_label := _make_label(Res.display(index), F_SMALL, INK_DIM)
+	name_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	row.add_child(name_label)
+	_res_name_labels.append(name_label)
+
+	var value := _make_label("0", F_BODY, INK)
+	value.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	value.mouse_filter = Control.MOUSE_FILTER_STOP
+	row.add_child(value)
+	_res_labels.append(value)
+	return row
+
+
+func _build_bottom_bar() -> void:
+	# The bar is a tray that opens, not a permanent shelf. It keeps the bottom
+	# of the screen clear while playing, and it gives the build options room to
+	# be legible when they are actually wanted.
+	var bar := PanelContainer.new()
+	bar.name = "build_bar"
+	bar.add_theme_stylebox_override("panel", _bar_box(false))
+	bar.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
+	bar.offset_top = -BAR_CLOSED_H
+	bar.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_build_bar = bar
+	bar.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(bar)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	bar.add_child(row)
+
+	_build_toggle = Button.new()
+	_build_toggle.text = "▲  Build"
+	_build_toggle.toggle_mode = true
+	_build_toggle.custom_minimum_size = Vector2(106, 32)
+	_build_toggle.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_build_toggle.add_theme_font_size_override("font_size", F_BODY)
+	_build_toggle.tooltip_text = "Show the build options   (B)"
+	_style_button(_build_toggle)
+	_build_toggle.add_theme_color_override("font_color", INK)
+	_build_toggle.toggled.connect(_on_build_tray_toggled)
+	row.add_child(_build_toggle)
+
+	_build_tray = HBoxContainer.new()
+	_build_tray.add_theme_constant_override("separation", 6)
+	_build_tray.visible = false
+	row.add_child(_build_tray)
+
+	for type_id in BuildingDefs.buildable():
+		var def := BuildingDefs.get_def(type_id)
+		_build_tray.add_child(_build_card(type_id, def))
+
+	# Clearing ground is a tool, not a building, so it sits apart from them.
+	_build_tray.add_child(_rule())
+	_clear_button = Button.new()
+	_clear_button.text = "Clear\nGround"
+	_clear_button.custom_minimum_size = Vector2(88, TRAY_CARD_H)
+	_clear_button.toggle_mode = true
+	_clear_button.add_theme_font_size_override("font_size", F_SMALL)
+	_clear_button.tooltip_text = ("Order trees felled. The timber is carried "
+			+ "to your stores.   (C)")
+	_style_button(_clear_button, "card")
+	_clear_button.add_theme_color_override("font_color", INK)
+	_clear_button.pressed.connect(func(): clear_ground_requested.emit())
+	_build_tray.add_child(_clear_button)
+
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(spacer)
+
+	_hint_label = _make_label("", F_MICRO, INK_FAINT)
+	_hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_hint_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	# It is the last thing in the row and the first thing that should give way:
+	# clipping it beats pushing the tray off the screen, which is what the
+	# unclipped label used to do at 1400 px with the tray open.
+	_hint_label.clip_text = true
+	_hint_label.size_flags_horizontal = Control.SIZE_SHRINK_END
+	row.add_child(_hint_label)
+	set_hint("WASD pan · wheel zoom · middle-drag rotate · click to select")
+
+
+## One building in the tray.
+##
+## Laid out by hand inside the Button because a stock Button gives its whole
+## label one colour, and the name and the price want different weights — and
+## because the price has to be able to turn red on its own when the settlement
+## cannot afford it, without dragging the name down with it.
+func _build_card(type_id: String, def) -> Button:
+	var b := Button.new()
+	b.custom_minimum_size = Vector2(150, TRAY_CARD_H)
+	b.toggle_mode = true
+	b.tooltip_text = def.description
+	_style_button(b, "card")
+	b.pressed.connect(_on_build_pressed.bind(type_id))
+
+	# Anchored rather than parented to a container: a Button is not a
+	# container, but anchors resolve against any Control parent.
+	var pad := MarginContainer.new()
+	pad.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	pad.add_theme_constant_override("margin_left", 8)
+	pad.add_theme_constant_override("margin_right", 8)
+	pad.add_theme_constant_override("margin_top", 5)
+	pad.add_theme_constant_override("margin_bottom", 5)
+	pad.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	b.add_child(pad)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	pad.add_child(row)
+
+	var icon := TextureRect.new()
+	icon.texture = def.icon()
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.custom_minimum_size = Vector2(32, 32)
+	icon.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	icon.visible = icon.texture != null
+	row.add_child(icon)
+
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 1)
+	col.alignment = BoxContainer.ALIGNMENT_CENTER
+	col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(col)
+
+	var name_label := _make_label(def.display_name, F_SMALL, INK)
+	name_label.clip_text = true
+	name_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(name_label)
+
+	var cost_label := _make_label(def.cost_text(), F_MICRO, INK_DIM)
+	cost_label.clip_text = true
+	cost_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(cost_label)
+
+	_build_buttons[type_id] = b
+	_build_cards[type_id] = {
+		"name": name_label, "cost": cost_label, "icon": icon,
+	}
+	return b
+
+
+func _on_build_tray_toggled(pressed: bool) -> void:
+	_build_tray.visible = pressed
+	_build_toggle.text = "▼  Build" if pressed else "▲  Build"
+	if _build_bar:
+		_build_bar.offset_top = -BAR_OPEN_H if pressed else -BAR_CLOSED_H
+	_apply_hint_visibility()
+	if not pressed:
+		set_active_build("")
+		build_cancelled.emit()
+
+
+func _apply_hint_visibility() -> void:
+	if _hint_label == null:
+		return
+	# The hint shares its row with the tray. While the tray is open there is
+	# only room for both on a wide window, and the tray wins.
+	var open := _build_toggle != null and _build_toggle.button_pressed
+	_hint_label.visible = _hint_room and (not open or size.x >= 1480.0)
+
+
+func set_tray_open(open: bool) -> void:
+	_build_toggle.button_pressed = open
+	_on_build_tray_toggled(open)
+
+
+func tray_is_open() -> bool:
+	return _build_toggle != null and _build_toggle.button_pressed
+
+
+func set_clear_tool_active(active: bool) -> void:
+	if _clear_button:
+		_clear_button.button_pressed = active
+
+
+func _build_selection_panel() -> void:
+	_selection_panel = PanelContainer.new()
+	_selection_panel.name = "selection"
+	_selection_panel.add_theme_stylebox_override("panel", _panel(BG_PANEL))
+	_selection_panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	_selection_panel.offset_left = -318
+	_selection_panel.offset_right = -12
+	_selection_panel.offset_top = TOP_BAR_H + 12.0
+	# offset_bottom is the one that matters: without it the panel is a
+	# zero-height box anchored to the top right and clicking a building looks
+	# like nothing happening at all. grow_horizontal has to be flipped so it
+	# opens leftward from the right edge; grow_vertical is already END by
+	# default and is set here only so the pair reads together.
+	_selection_panel.offset_bottom = _selection_panel.offset_top
+	_selection_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	_selection_panel.grow_vertical = Control.GROW_DIRECTION_END
+	_selection_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	_selection_panel.visible = false
+	add_child(_selection_panel)
+
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 7)
+	_selection_panel.add_child(col)
+
+	_selection_title = _make_label("", F_LEAD, ACCENT)
+	col.add_child(_selection_title)
+
+	# A rule under the title, so the panel has a head and a body rather than
+	# one undifferentiated block of text.
+	_selection_rule = HSeparator.new()
+	var line := StyleBoxLine.new()
+	line.color = ACCENT_DEEP
+	line.thickness = 1
+	_selection_rule.add_theme_stylebox_override("separator", line)
+	_selection_rule.add_theme_constant_override("separation", 3)
+	col.add_child(_selection_rule)
+
+	_selection_body = RichTextLabel.new()
+	_selection_body.bbcode_enabled = true
+	_selection_body.fit_content = true
+	_selection_body.custom_minimum_size = Vector2(280, 0)
+	_selection_body.add_theme_font_size_override("normal_font_size", F_SMALL)
+	_selection_body.add_theme_font_size_override("bold_font_size", F_SMALL)
+	_selection_body.add_theme_color_override("default_color", INK)
+	# Air between the lines. A dense block of statistics is unreadable at
+	# 12 px over a moving scene, and this costs nothing but pixels.
+	_selection_body.add_theme_constant_override("line_separation", 3)
+	_selection_body.scroll_active = false
+	col.add_child(_selection_body)
+
+	_selection_actions = VBoxContainer.new()
+	_selection_actions.add_theme_constant_override("separation", 5)
+	col.add_child(_selection_actions)
+
+
+## An action button in the selection panel: full width, so the panel reads as a
+## stack of one decision per row.
+func _action_button(text: String) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.add_theme_font_size_override("font_size", F_SMALL)
+	b.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	b.custom_minimum_size = Vector2(0, 30)
+	_style_button(b)
+	b.add_theme_color_override("font_color", INK)
+	return b
+
+
+func _build_alerts() -> void:
+	_alert_box = VBoxContainer.new()
+	_alert_box.name = "alerts"
+	_alert_box.set_anchors_preset(Control.PRESET_CENTER_LEFT)
+	_alert_box.offset_left = 12
+	_alert_box.offset_top = -140
+	_alert_box.offset_right = 342
+	_alert_box.offset_bottom = -140
+	_alert_box.grow_vertical = Control.GROW_DIRECTION_END
+	_alert_box.custom_minimum_size = Vector2(320, 0)
+	_alert_box.add_theme_constant_override("separation", 6)
+	_alert_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(_alert_box)
+
+
+func _build_tooltip() -> void:
+	_tooltip = PanelContainer.new()
+	_tooltip.name = "cursor_tooltip"
+	var sb := _panel(Color(0.078, 0.074, 0.070, 0.97))
+	sb.content_margin_top = 9
+	sb.content_margin_bottom = 9
+	# The cursor tooltip is the one panel that is always over the landscape and
+	# never over chrome, so it gets the accent edge and the deepest shadow.
+	sb.border_color = ACCENT_DEEP
+	sb.border_width_left = 2
+	_tooltip.add_theme_stylebox_override("panel", sb)
+	_tooltip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_tooltip.visible = false
+	add_child(_tooltip)
+
+	_tooltip_label = RichTextLabel.new()
+	_tooltip_label.bbcode_enabled = true
+	_tooltip_label.fit_content = true
+	_tooltip_label.custom_minimum_size = Vector2(212, 0)
+	_tooltip_label.add_theme_font_size_override("normal_font_size", F_SMALL)
+	_tooltip_label.add_theme_font_size_override("bold_font_size", F_SMALL)
+	_tooltip_label.add_theme_color_override("default_color", INK)
+	_tooltip_label.add_theme_constant_override("line_separation", 2)
+	_tooltip_label.scroll_active = false
+	_tooltip.add_child(_tooltip_label)
+
+
+# --- Behaviour --------------------------------------------------------------
+
+func _on_build_pressed(type_id: String) -> void:
+	if _active_build == type_id:
+		set_active_build("")
+		build_cancelled.emit()
+		return
+	set_active_build(type_id)
+	build_requested.emit(type_id)
+
+
+func set_active_build(type_id: String) -> void:
+	_active_build = type_id
+	for key in _build_buttons.keys():
+		_build_buttons[key].button_pressed = (key == type_id)
+	if type_id != "":
+		set_clear_tool_active(false)
+		if _build_toggle and not _build_toggle.button_pressed:
+			_build_toggle.button_pressed = true
+			_build_tray.visible = true
+			_build_toggle.text = "▼  Build"
+			_apply_hint_visibility()
+	if type_id == "":
+		set_hint("WASD pan · wheel zoom · middle-drag rotate · click to select")
+	else:
+		set_hint("Click to place (keeps placing) · R rotate · right click / Esc to stop")
+
+
+func set_hint(text: String) -> void:
+	_base_hint = text
+	_apply_hint()
+
+
+func _apply_hint() -> void:
+	if _hint_label == null:
+		return
+	# A stalled settlement is worth more of the hint line than the controls are.
+	_hint_label.text = _idle_reason if _idle_reason != "" else _base_hint
+	_hint_label.add_theme_color_override("font_color",
+			WARN if _idle_reason != "" else INK_FAINT)
+
+
+func refresh() -> void:
+	_refresh_readouts()
+	if _sim == null:
+		return
+	for type_id in _build_buttons:
+		var def := BuildingDefs.get_def(type_id)
+		var affordable := _sim.can_afford(def.cost)
+		var parts: Dictionary = _build_cards[type_id]
+		var cost_label: Label = parts["cost"]
+		var icon_rect: TextureRect = parts["icon"]
+		# Only the price reddens. Greying the icon as well makes the whole
+		# card read as unavailable at a glance, without the name — the thing
+		# the player is actually looking for — ever changing colour.
+		cost_label.add_theme_color_override("font_color",
+				INK_DIM if affordable else BAD)
+		icon_rect.modulate = Color(1, 1, 1, 1.0 if affordable else 0.42)
+	_apply_hint()
+
+
+func _refresh_readouts() -> void:
+	if _sim == null:
+		return
+	for i in Config.RES_COUNT:
+		var amount := _sim.total_resource(i)
+		_res_labels[i].text = "%d" % int(amount)
+
+	var bonus := _sim.tools_bonus
+	_res_labels[Config.Res.TOOLS].tooltip_text = ("Tools in store make every "
+			+ "trade faster.\nCurrent work rate: %d%%" % int(bonus * 100.0))
+	_res_labels[Config.Res.TOOLS].add_theme_color_override("font_color",
+			INK if bonus > 1.01 else INK_DIM)
+
+	var food_days := _sim.food_days_remaining()
+	_res_labels[Config.Res.FOOD].add_theme_color_override("font_color",
+			BAD if food_days < 4.0 else (WARN if food_days < 10.0 else INK))
+
+	var homeless := _sim.stat_homeless
+	if _compact:
+		_pop_label.text = "Pop %d" % _sim.stat_population
+	else:
+		_pop_label.text = "Population %d  (%d homeless, %d idle)" % [
+				_sim.stat_population, homeless, _sim.stat_idle]
+	_pop_label.add_theme_color_override("font_color",
+			WARN if homeless > 0 else INK)
+
+	# Idle people are a symptom; the tooltip carries the diagnosis.
+	var reason := _sim.idle_diagnosis()
+	_pop_label.tooltip_text = (reason if reason != ""
+			else "%d of %d at work" % [_sim.stat_population - _sim.stat_idle,
+					_sim.stat_population])
+	if reason != "":
+		_pop_label.add_theme_color_override("font_color", WARN)
+		_idle_reason = reason
+	else:
+		_idle_reason = ""
+
+	if _clock:
+		_clock_label.text = _clock.date_text()
+		for i in _speed_buttons.size():
+			_speed_buttons[i].button_pressed = (i == _clock.speed_index)
+
+
+# --- Selection --------------------------------------------------------------
+
+## Rebuild the panel's action buttons only when the set of them actually
+## changes, and say whether that happened.
+##
+## The selection panel is refreshed four times a second for as long as it is
+## open, and it used to free and recreate its buttons on every one of those
+## refreshes. That quietly ate clicks. A button only fires if the press and the
+## release both land on the same instance; a refresh in between replaces it
+## with a new node that never saw the press, so the click goes nowhere. Since
+## the refresh is on a quarter-second timer and a click takes about a tenth of
+## a second, cancelling a site or paying for an upgrade failed a good part of
+## the time, at random, with no feedback — the worst kind of interface bug.
+##
+## The signature names what the buttons *are*. While it holds, the existing
+## nodes are kept and only their changeable state — whether they are affordable
+## — is updated.
+func _actions_changed(signature: String) -> bool:
+	if signature == _actions_signature:
+		return false
+	_actions_signature = signature
+	for child in _selection_actions.get_children():
+		_selection_actions.remove_child(child)
+		child.queue_free()
+	return true
+
+
+func clear_selection() -> void:
+	_selection_panel.visible = false
+	_actions_signature = ""
+	for child in _selection_actions.get_children():
+		_selection_actions.remove_child(child)
+		child.queue_free()
+
+
+func show_building(b: Building) -> void:
+	_selection_panel.visible = true
+	_selection_title.text = b.display_name()
+	# A different building, or the same one that has changed between being a
+	# site and being finished, is a different set of buttons. Anything else is
+	# the same panel being redrawn.
+	var rebuild := _actions_changed("b%d:%s" % [
+			b.id, "site" if b.under_construction else "built"])
+
+	var lines: Array[String] = []
+	lines.append("[color=#a9a49b]%s[/color]" % b.def.description)
+
+	if b.under_construction:
+		lines.append("")
+		lines.append("[b]Under construction[/b]")
+		if rebuild:
+			var cancel := _action_button("Cancel site  (materials returned)")
+			cancel.pressed.connect(func(): demolish_requested.emit(b))
+			_selection_actions.add_child(cancel)
+		var cost := b.build_cost
+		for res in cost.keys():
+			var have := float(b.delivered.get(res, 0.0))
+			var want := float(cost[res])
+			var colour := "#9ec983" if have >= want else "#e0a85c"
+			lines.append("  [color=%s]%s %d / %d[/color]"
+					% [colour, Res.display(res), int(have), int(want)])
+		lines.append("  Construction: %d%%" % int(b.build_progress * 100.0))
+	else:
+		_add_upgrade_action(b, rebuild)
+		if b.capacity() > 0.0:
+			lines.append("")
+			lines.append("[b]Stores[/b] (%d / %d)"
+					% [int(b.total_stored()), int(b.capacity())])
+			var any := false
+			for res in b.def.stores:
+				if b.inventory[res] > 0.01:
+					lines.append("  %s %d" % [Res.display(res),
+							int(b.inventory[res])])
+					any = true
+			if not any:
+				lines.append("  [color=#7d7871]empty[/color]")
+
+		if b.def.worker_slots > 0:
+			lines.append("")
+			lines.append("[b]Workers[/b] %d / %d"
+					% [b.workers.size(), b.def.worker_slots])
+			for cid in b.workers:
+				var c: Citizen = _sim.citizens_by_id.get(cid)
+				if c:
+					lines.append("  [color=#a9a49b]%s — %s[/color]"
+							% [c.given_name, c.status_line()])
+
+		if b.def.houses > 0:
+			lines.append("")
+			lines.append("[b]Residents[/b] %d / %d"
+					% [b.residents.size(), b.def.houses])
+
+		if b.field_count() > 0:
+			lines.append("")
+			lines.append("[b]Fields[/b] %d tiles — crop %d%%"
+					% [b.field_count(), int(b.crop_growth * 100.0)])
+
+	_selection_body.text = "\n".join(lines)
+
+
+## The "grow this building" button, when the definition has somewhere to grow.
+##
+## Shown whether or not the settlement can afford it, greyed out with the price
+## on it when it cannot: a player who cannot see that the granary has a bigger
+## version has no reason to save up for one.
+func _add_upgrade_action(b: Building, rebuild: bool) -> void:
+	if not b.def.can_upgrade():
+		return
+	var next := BuildingDefs.get_def(b.def.upgrades_to)
+	if next == null:
+		return
+	var check: Dictionary = _sim.can_upgrade(b)
+	var button: Button = null
+	if rebuild:
+		button = _action_button("Make into a %s  (%s)" % [
+				next.display_name, Res.cost_text(b.def.upgrade_cost)])
+		button.pressed.connect(func(): upgrade_requested.emit(b))
+		_selection_actions.add_child(button)
+	elif _selection_actions.get_child_count() > 0:
+		# This branch is the only action a finished building offers, so it is
+		# always the first child when one exists.
+		button = _selection_actions.get_child(0) as Button
+	if button == null:
+		return
+	# Affordability is the one thing about it that moves while it is on screen.
+	button.disabled = not check["ok"]
+	button.tooltip_text = (next.description if check["ok"]
+			else String(check["reason"]))
+
+
+func show_citizen(c: Citizen) -> void:
+	_selection_panel.visible = true
+	_selection_title.text = c.given_name
+	# A citizen offers no actions, so this only has to clear whatever the
+	# previous selection left behind.
+	_actions_changed("c%d" % c.id)
+
+	var home := "none"
+	var work := "none"
+	if _sim.buildings_by_id.has(c.home_id):
+		home = _sim.buildings_by_id[c.home_id].display_name()
+	if _sim.buildings_by_id.has(c.workplace_id):
+		work = _sim.buildings_by_id[c.workplace_id].display_name()
+
+	var hunger_word := "well fed"
+	if c.hunger > 1.8:
+		hunger_word = "[color=#d97368]starving[/color]"
+	elif c.hunger > 0.6:
+		hunger_word = "[color=#e0a85c]hungry[/color]"
+
+	var lines: Array[String] = [
+		"[color=#a9a49b]%s, age %d[/color]" % [c.profession.capitalize(), c.age],
+		"",
+		"[b]Doing[/b] %s" % c.status_line(),
+		"[b]Home[/b] %s" % home,
+		"[b]Works at[/b] %s" % work,
+		"[b]Condition[/b] %s" % hunger_word,
+		"[b]Morale[/b] %d%%" % int(c.morale * 100.0),
+	]
+	_selection_body.text = "\n".join(lines)
+
+
+func show_road(info: Dictionary) -> void:
+	_selection_panel.visible = true
+	_selection_title.text = "Route"
+
+	var level: int = info["level"]
+	# The route's grade is what decides whether there is an upgrade button and
+	# what it says; nothing else about the panel changes which buttons exist.
+	var rebuild := _actions_changed("road:%d" % level)
+	var lines: Array[String] = [
+		"[color=#a9a49b]%s[/color]" % Config.ROAD_NAMES[level],
+		"",
+		"[b]Traffic[/b] %d" % int(info["wear"]),
+		"[b]Movement[/b] %.2fx" % Config.ROAD_SPEED[level],
+	]
+	if info.get("locked", 0) > 0:
+		lines.append("[b]Maintained[/b] by your order")
+
+	if info.get("extent", 0) > 0:
+		lines.append("[b]Extent[/b] roughly %d m of route"
+				% int(info["extent"] * Config.WEAR_CELL * 0.55))
+
+	if level >= Config.RoadLevel.WORN and level < Config.RoadLevel.PAVED:
+		var next: int = level + 1
+		lines.append("")
+		lines.append("Upgrade to [b]%s[/b] for %d timber, %d stone."
+				% [Config.ROAD_NAMES[next], Config.UPGRADE_COST_TIMBER,
+				   Config.UPGRADE_COST_STONE])
+		var button: Button = null
+		if rebuild:
+			button = _action_button("Upgrade route to %s"
+					% Config.ROAD_NAMES[next])
+			button.pressed.connect(func(): upgrade_route_requested.emit())
+			_selection_actions.add_child(button)
+		elif _selection_actions.get_child_count() > 0:
+			button = _selection_actions.get_child(0) as Button
+		if button != null:
+			button.disabled = not bool(info.get("affordable", false))
+	elif level < Config.RoadLevel.WORN:
+		lines.append("")
+		lines.append("[color=#a9a49b]Nobody walks here yet. Routes must be "
+				+ "worn in before they can be improved.[/color]")
+
+	_selection_body.text = "\n".join(lines)
+
+
+# --- Cursor tooltip (placement feedback, design doc 6.1) --------------------
+
+func show_cursor_tooltip(lines: Array, screen_pos: Vector2) -> void:
+	_tooltip_label.text = "\n".join(lines)
+	_tooltip.visible = true
+	_tooltip.position = screen_pos + Vector2(22, 20)
+	var vp := get_viewport_rect().size
+	_tooltip.position.x = minf(_tooltip.position.x, vp.x - 250)
+	_tooltip.position.y = minf(_tooltip.position.y, vp.y - 140)
+
+
+func hide_cursor_tooltip() -> void:
+	_tooltip.visible = false
+
+
+# --- Alerts -----------------------------------------------------------------
+
+func push_alert(text: String, position: Vector3) -> void:
+	var panel := PanelContainer.new()
+	var sb := _panel(BG_PANEL)
+	sb.content_margin_left = 10
+	sb.content_margin_top = 4
+	sb.content_margin_bottom = 4
+	sb.content_margin_right = 4
+	# A gilt spine down the left edge. It marks the feed as one thing at a
+	# glance and gives the eye somewhere to land on a moving background.
+	sb.border_color = ACCENT_DEEP
+	sb.border_width_left = 3
+	panel.add_theme_stylebox_override("panel", sb)
+	panel.mouse_filter = Control.MOUSE_FILTER_STOP
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
+	panel.add_child(row)
+
+	var button := Button.new()
+	button.text = text
+	button.flat = true
+	button.focus_mode = Control.FOCUS_NONE
+	button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	button.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	button.add_theme_font_size_override("font_size", F_SMALL)
+	button.add_theme_color_override("font_color", INK)
+	button.add_theme_color_override("font_hover_color", ACCENT)
+	button.tooltip_text = "Show me"
+	button.pressed.connect(func(): focus_requested.emit(position))
+	row.add_child(button)
+
+	# Messages are dismissible. They used to sit there until a timer removed
+	# them, over the part of the map the message was about.
+	var close := Button.new()
+	close.text = "✕"
+	close.flat = true
+	close.focus_mode = Control.FOCUS_NONE
+	close.custom_minimum_size = Vector2(24, 24)
+	close.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	close.tooltip_text = "Dismiss"
+	close.add_theme_font_size_override("font_size", F_MICRO)
+	close.add_theme_color_override("font_color", INK_FAINT)
+	close.add_theme_color_override("font_hover_color", INK)
+	close.pressed.connect(func(): _dismiss_alert(panel))
+	row.add_child(close)
+
+	_alert_box.add_child(panel)
+	while _alert_box.get_child_count() > 5:
+		var oldest := _alert_box.get_child(0)
+		_alert_box.remove_child(oldest)
+		oldest.queue_free()
+
+	# They fade up over about a fifth of a second rather than snapping in,
+	# which is enough for the eye to catch that something is new without it
+	# costing any attention.
+	panel.modulate.a = 0.0
+	create_tween().tween_property(panel, "modulate:a", 1.0, 0.18)
+
+	# They also fade on their own, so ignoring them costs nothing either.
+	var tween := create_tween()
+	tween.tween_interval(14.0)
+	tween.tween_property(panel, "modulate:a", 0.0, 1.6)
+	tween.tween_callback(func(): _dismiss_alert(panel))
+
+
+func _dismiss_alert(panel: Control) -> void:
+	if not is_instance_valid(panel) or panel.get_parent() != _alert_box:
+		return
+	_alert_box.remove_child(panel)
+	panel.queue_free()
+
+
+func clear_alerts() -> void:
+	for child in _alert_box.get_children():
+		_dismiss_alert(child)
+
+
+## True when the cursor is over interface rather than the world, so a click on
+## a button never also places a building. Recurses, because the alert feed is a
+## pass-through container holding clickable panels.
+func blocks_mouse(at: Vector2) -> bool:
+	return _blocks(self, at)
+
+
+func _blocks(node: Node, at: Vector2) -> bool:
+	for child in node.get_children():
+		if not (child is Control):
+			continue
+		var control: Control = child
+		if not control.visible:
+			continue
+		if control.mouse_filter != Control.MOUSE_FILTER_IGNORE \
+				and control.get_global_rect().has_point(at):
+			return true
+		if _blocks(control, at):
+			return true
+	return false

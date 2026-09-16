@@ -1,0 +1,31 @@
+{
+  "asset_id": "stone_pile",
+  "category": "prop",
+  "footprint_m": [
+    1.6,
+    1.6
+  ],
+  "bounds_min": [
+    -0.5678,
+    -0.5103,
+    0.0325
+  ],
+  "bounds_max": [
+    0.7022,
+    0.6374,
+    0.4993
+  ],
+  "height_m": 0.467,
+  "materials": [
+    "stone_grey"
+  ],
+  "triangles": {
+    "lod0": 108,
+    "lod1": 108,
+    "lod2": 108
+  },
+  "triangle_budget": 900,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {}
+}

@@ -1,0 +1,75 @@
+[
+  {
+    "op": "note",
+    "text": "clear ground, cancel a site, show stock, protect the seat"
+  },
+  {
+    "op": "clear_trees"
+  },
+  {
+    "op": "simulate",
+    "days": 4.0
+  },
+  {
+    "op": "assert",
+    "check": "trees_were_felled"
+  },
+  {
+    "op": "assert",
+    "check": "timber_not_lost"
+  },
+  {
+    "op": "build",
+    "type": "granary",
+    "offset": [
+      26,
+      24
+    ],
+    "radius": 40,
+    "pay": true
+  },
+  {
+    "op": "simulate",
+    "days": 0.25
+  },
+  {
+    "op": "cancel_site",
+    "type": "granary"
+  },
+  {
+    "op": "assert",
+    "check": "no_stale_reservations"
+  },
+  {
+    "op": "assert",
+    "check": "seat_is_protected"
+  },
+  {
+    "op": "build",
+    "type": "logging_camp",
+    "near": "trees",
+    "radius": 200,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "farm",
+    "offset": [
+      0,
+      44
+    ],
+    "radius": 60,
+    "instant": true
+  },
+  {
+    "op": "simulate",
+    "days": 8.0
+  },
+  {
+    "op": "assert",
+    "check": "stock_is_visible"
+  },
+  {
+    "op": "quit"
+  }
+]

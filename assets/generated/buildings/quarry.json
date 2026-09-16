@@ -1,0 +1,57 @@
+{
+  "asset_id": "quarry",
+  "category": "building",
+  "footprint_m": [
+    10.0,
+    9.0
+  ],
+  "bounds_min": [
+    -5.0,
+    -4.5,
+    -0.05
+  ],
+  "bounds_max": [
+    5.0,
+    4.5,
+    5.55
+  ],
+  "height_m": 5.6,
+  "materials": [
+    "soil_dark",
+    "stone_grey",
+    "timber_dark",
+    "iron_dark",
+    "timber_light",
+    "roof_slate"
+  ],
+  "triangles": {
+    "lod0": 294,
+    "lod1": 186,
+    "lod2": 96
+  },
+  "triangle_budget": 4000,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {
+    "att_entrance": [
+      0.0,
+      -5.7,
+      0.0
+    ],
+    "att_worksite": [
+      0.4,
+      1.6,
+      0.0
+    ],
+    "att_cart_bay": [
+      3.4,
+      -5.7,
+      0.0
+    ],
+    "att_stock_0": [
+      2.9,
+      -2.2,
+      0.0
+    ]
+  }
+}

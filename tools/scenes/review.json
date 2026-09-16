@@ -1,0 +1,12 @@
+[
+  {"op": "build", "type": "farm", "offset": [0, 46], "radius": 60, "instant": true},
+  {"op": "simulate", "days": 4.0},
+  {"op": "assert", "check": "farm_plots_match_workers"},
+  {"op": "camera", "at": [384, 372], "distance": 34, "yaw": 0.62},
+  {"op": "run", "days": 0.06},
+  {"op": "shot", "name": "r_keep"},
+  {"op": "camera", "at": [392, 428], "distance": 30, "yaw": 0.5},
+  {"op": "run", "days": 0.06},
+  {"op": "shot", "name": "r_farm"},
+  {"op": "quit"}
+]

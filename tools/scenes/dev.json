@@ -1,0 +1,9 @@
+[
+  {"op": "focus_keep", "distance": 90, "yaw": 0.6},
+  {"op": "speed", "rate": 4},
+  {"op": "run", "days": 1.2},
+  {"op": "dev", "on": true},
+  {"op": "run", "days": 0.1},
+  {"op": "shot", "name": "d_dev_overlay"},
+  {"op": "quit"}
+]

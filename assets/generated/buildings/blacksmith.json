@@ -1,0 +1,63 @@
+{
+  "asset_id": "blacksmith",
+  "category": "building",
+  "footprint_m": [
+    10.4,
+    12.5
+  ],
+  "bounds_min": [
+    -6.1,
+    -7.35,
+    -0.105
+  ],
+  "bounds_max": [
+    4.45,
+    5.2,
+    9.11
+  ],
+  "height_m": 9.215,
+  "materials": [
+    "stone_dark",
+    "plaster_warm",
+    "timber_dark",
+    "glass",
+    "timber_light",
+    "roof_tile_red",
+    "iron_dark"
+  ],
+  "triangles": {
+    "lod0": 1166,
+    "lod1": 770,
+    "lod2": 194
+  },
+  "triangle_budget": 4000,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {
+    "att_entrance": [
+      -1.8,
+      -7.35,
+      0.0
+    ],
+    "att_worksite": [
+      0.2,
+      -6.75,
+      0.0
+    ],
+    "att_cart_bay": [
+      3.2,
+      -7.15,
+      0.0
+    ],
+    "att_smoke": [
+      2.5,
+      3.15,
+      9.2
+    ],
+    "att_stock_0": [
+      -3.4,
+      -2.6,
+      0.0
+    ]
+  }
+}

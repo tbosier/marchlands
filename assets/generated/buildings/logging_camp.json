@@ -1,0 +1,56 @@
+{
+  "asset_id": "logging_camp",
+  "category": "building",
+  "footprint_m": [
+    8.0,
+    7.0
+  ],
+  "bounds_min": [
+    -4.05,
+    -3.5,
+    -0.05
+  ],
+  "bounds_max": [
+    4.3,
+    3.75,
+    2.75
+  ],
+  "height_m": 2.8,
+  "materials": [
+    "soil_dark",
+    "timber_light",
+    "timber_dark",
+    "thatch",
+    "iron_dark"
+  ],
+  "triangles": {
+    "lod0": 540,
+    "lod1": 204,
+    "lod2": 204
+  },
+  "triangle_budget": 4000,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {
+    "att_entrance": [
+      0.0,
+      -4.7,
+      0.0
+    ],
+    "att_worksite": [
+      1.2,
+      -2.6,
+      0.0
+    ],
+    "att_cart_bay": [
+      3.0,
+      -4.7,
+      0.0
+    ],
+    "att_stock_0": [
+      3.0,
+      1.4,
+      0.0
+    ]
+  }
+}

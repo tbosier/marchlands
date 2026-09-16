@@ -1,0 +1,179 @@
+[
+  {
+    "op": "note",
+    "text": "a march is saved, changed, reloaded, and has to come back as it was"
+  },
+  {
+    "op": "build",
+    "type": "logging_camp",
+    "near": "trees",
+    "radius": 200,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "farm",
+    "offset": [
+      0,
+      44
+    ],
+    "radius": 60,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "granary",
+    "offset": [
+      26,
+      24
+    ],
+    "radius": 40,
+    "instant": true
+  },
+  {
+    "op": "clear_trees"
+  },
+  {
+    "op": "simulate",
+    "days": 9.0
+  },
+  {
+    "op": "note",
+    "text": "a settlement with worn routes, felled trees and stock in hand"
+  },
+  {
+    "op": "assert",
+    "check": "wear_above",
+    "value": 100
+  },
+  {
+    "op": "upgrade_route",
+    "at": "busiest"
+  },
+  {
+    "op": "simulate",
+    "days": 0.5
+  },
+  {
+    "op": "note",
+    "text": "someone is holding goods with no job \u2014 as they are after any load"
+  },
+  {
+    "op": "watch",
+    "check": "loads_are_accounted_for"
+  },
+  {
+    "op": "strand_load",
+    "res": 1,
+    "amount": 8
+  },
+  {
+    "op": "save",
+    "slot": "harness"
+  },
+  {
+    "op": "note",
+    "text": "now move the world on, so a load that did nothing cannot pass"
+  },
+  {
+    "op": "build",
+    "type": "stockpile",
+    "offset": [
+      -34,
+      -28
+    ],
+    "radius": 50,
+    "instant": true
+  },
+  {
+    "op": "clear_trees"
+  },
+  {
+    "op": "stamp_wear",
+    "at": [
+      300,
+      300
+    ],
+    "level": 3,
+    "radius": 6.0
+  },
+  {
+    "op": "simulate",
+    "days": 2.0
+  },
+  {
+    "op": "assert",
+    "check": "save_state_changed"
+  },
+  {
+    "op": "load",
+    "slot": "harness"
+  },
+  {
+    "op": "assert",
+    "check": "save_round_trip"
+  },
+  {
+    "op": "assert",
+    "check": "nav_matches_roads"
+  },
+  {
+    "op": "note",
+    "text": "and the reloaded march has to keep working: order a house"
+  },
+  {
+    "op": "build",
+    "type": "house",
+    "offset": [
+      -30,
+      10
+    ],
+    "radius": 40,
+    "pay": true
+  },
+  {
+    "op": "simulate",
+    "days": 0.1
+  },
+  {
+    "op": "assert",
+    "check": "work_in_progress",
+    "value": 1,
+    "note": "sampled while the haulers are still on the road: the house is finished well inside half a day, and a settlement with nothing left to do is not evidence that loading broke it"
+  },
+  {
+    "op": "simulate",
+    "days": 1.5
+  },
+  {
+    "op": "assert",
+    "check": "loads_are_accounted_for"
+  },
+  {
+    "op": "simulate",
+    "days": 3.0
+  },
+  {
+    "op": "assert",
+    "check": "buildings_complete",
+    "value": 10
+  },
+  {
+    "op": "assert",
+    "check": "no_stale_reservations"
+  },
+  {
+    "op": "assert",
+    "check": "stock_is_visible"
+  },
+  {
+    "op": "shot",
+    "name": "s_save_load"
+  },
+  {
+    "op": "report"
+  },
+  {
+    "op": "quit"
+  }
+]

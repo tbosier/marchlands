@@ -1,0 +1,163 @@
+# Marchlands — Machine-readable asset style specification
+# Every generated asset MUST validate against this document.
+# See design/GAME_DESIGN.md section 4.2.
+
+version: 1
+
+scale:
+  unit: meter
+  blender_units_per_meter: 1.0
+  # Characters are the reference for all other scale decisions.
+  reference_human_height_m: 1.75
+
+orientation:
+  # Assets are authored with their "front" (main entrance / viewing side)
+  # pointing down -Y in Blender, which becomes -Z in glTF / Godot.
+  forward_axis: "-Y"
+  up_axis: "+Z"
+  export_forward: "-Z"
+  export_up: "+Y"
+
+origin:
+  # Buildings and props sit on the ground; the origin is the foundation centre.
+  rule: foundation_center
+  tolerance_m: 0.02
+
+style:
+  period: late_medieval_to_early_industrial
+  register: grounded
+  silhouette: strong
+  forbidden:
+    - fantasy_ornament
+    - voxel
+    - photoreal_detail
+    - cartoon_exaggeration
+  palette_mood: warm_temperate_european
+
+geometry:
+  topology: clean
+  poly_range: low_to_mid
+  ngons_allowed: false
+  non_manifold_allowed: false
+  shade_auto_smooth_angle_deg: 35
+  modular_where_practical: true
+
+materials:
+  # A single small shared library. Assets may not invent new material names.
+  library:
+    - timber_dark
+    - timber_light
+    - plaster_warm
+    - stone_grey
+    - stone_dark
+    - brick_red
+    - iron_dark
+    - roof_tile_red
+    - roof_slate
+    - thatch
+    - glass
+    - fabric_muted
+    - foliage_green
+    - foliage_autumn
+    - foliage_deep
+    - foliage_autumn_deep
+    - soil_dark
+    - grain_gold
+    - skin_light
+    - skin_mid
+  # Seven, not six. The original six came from the design document's worked
+  # example, and a stone building that has to read as architecture rather than
+  # a grey slab needs two stones, a roof, a timber, a metal and glass before it
+  # has spent anything on character. The point of the cap is a small shared
+  # palette, and seven still holds that line.
+  max_per_asset: 7
+
+lod:
+  levels: [lod0, lod1, lod2]
+  # How each level is produced. "detail" drops whole detail tiers (see
+  # MeshBuilder in tools/blender/marchlands_kit/mesh.py); "decimate" collapses
+  # triangles at the ratios below.
+  #
+  # Buildings use "detail" because they are hard-surface geometry that is
+  # already sparse: collapsing a 1400-triangle half-timbered cottage to 40%
+  # does not simplify it, it dissolves the wall panels and leaves a cage of
+  # floating studs. Foliage is organic and dense, and collapse is exactly the
+  # right tool there.
+  strategy:
+    building: detail
+    vegetation: decimate
+    resource_node: decimate
+    prop: detail
+  # Detail tiers kept at each level when strategy is "detail".
+  detail_tiers:
+    lod0: 2
+    lod1: 1
+    lod2: 0
+  ratios:
+    lod0: 1.0
+    lod1: 0.40
+    lod2: 0.15
+  # Props are on this list because the game instantiates them at lod1: a
+  # citizen's carried goods are drawn from the reduced mesh, so a prop whose
+  # reduction is broken is broken in the player's hand, not on the horizon.
+  required_for:
+    - building
+    - vegetation
+    - prop
+
+collision:
+  required_for:
+    - building
+    - resource_node
+  default_type: simplified_mesh
+  naming: "{asset_id}_collision"
+
+triangle_budget:
+  building: 4000
+  # Per-asset exceptions. The keep is a landmark: exactly one exists in a
+  # world, it is the thing the player looks at most, and it carries the
+  # architectural detail that makes stone read as stone. Ordinary buildings
+  # stay on the 4000 line, and the LOD chain handles it at distance.
+  overrides:
+    keep_tier1: 6500
+  prop: 900
+  vegetation: 1200
+  resource_node: 900
+  character: 1400
+
+naming:
+  asset_id_pattern: "^[a-z][a-z0-9_]*$"
+  mesh_prefix: ""
+  lod_suffix: "_lod{n}"
+  collision_suffix: "_collision"
+  attachment_prefix: "att_"
+
+attachments:
+  # Empties exported as nodes. The game reads these by name.
+  known:
+    - att_entrance        # where citizens walk to
+    - att_cart_bay        # cart loading point
+    - att_rail_point      # rail loading point (future)
+    - att_smoke           # chimney smoke emitter
+    - att_worksite        # where a worker stands to work
+    - att_stock_0         # visible stock display slots
+    - att_stock_1
+    - att_stock_2
+    - att_stock_3
+    - att_flag
+
+export:
+  format: glb
+  apply_modifiers: true
+  y_up: true
+  include_empties: true
+  tangents: false
+
+preview:
+  turntable_frames: 4
+  resolution: [512, 512]
+  # A mid value, not near-white. The old backdrop sat within a few percent
+  # of thatch and plaster, so pale assets dissolved into it while dark
+  # stone read as a silhouette — a review sheet on which half the library
+  # cannot be judged.
+  background: "#cfc7b8"

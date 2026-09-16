@@ -1,0 +1,58 @@
+{
+  "asset_id": "mine",
+  "category": "building",
+  "footprint_m": [
+    8.5,
+    8.0
+  ],
+  "bounds_min": [
+    -4.3,
+    -4.05,
+    -0.05
+  ],
+  "bounds_max": [
+    4.25,
+    4.0,
+    4.8
+  ],
+  "height_m": 4.85,
+  "materials": [
+    "soil_dark",
+    "stone_dark",
+    "timber_dark",
+    "iron_dark",
+    "brick_red",
+    "timber_light",
+    "roof_slate"
+  ],
+  "triangles": {
+    "lod0": 332,
+    "lod1": 240,
+    "lod2": 120
+  },
+  "triangle_budget": 4000,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {
+    "att_entrance": [
+      0.0,
+      -5.2,
+      0.0
+    ],
+    "att_worksite": [
+      0.0,
+      1.6,
+      0.0
+    ],
+    "att_cart_bay": [
+      3.0,
+      -5.2,
+      0.0
+    ],
+    "att_stock_0": [
+      2.8,
+      -1.2,
+      0.0
+    ]
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "asset_id": "granary_large",
+  "category": "building",
+  "footprint_m": [
+    9.8,
+    16.0
+  ],
+  "bounds_min": [
+    -4.8,
+    -9.0,
+    0.0
+  ],
+  "bounds_max": [
+    4.8,
+    6.55,
+    12.654
+  ],
+  "height_m": 12.654,
+  "materials": [
+    "stone_grey",
+    "timber_dark",
+    "timber_light",
+    "iron_dark",
+    "roof_tile_red",
+    "glass"
+  ],
+  "triangles": {
+    "lod0": 2034,
+    "lod1": 1866,
+    "lod2": 338
+  },
+  "triangle_budget": 4000,
+  "has_collision": true,
+  "parts": [],
+  "attachments": {
+    "att_entrance": [
+      0.0,
+      -9.4,
+      0.0
+    ],
+    "att_cart_bay": [
+      2.6,
+      -9.4,
+      0.0
+    ],
+    "att_stock_0": [
+      -2.5,
+      -6.8,
+      0.0
+    ],
+    "att_stock_1": [
+      2.5,
+      -6.8,
+      0.0
+    ],
+    "att_stock_2": [
+      -2.5,
+      -8.4,
+      0.0
+    ],
+    "att_stock_3": [
+      2.5,
+      -8.4,
+      0.0
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+[
+  {"op": "focus_keep", "distance": 85, "yaw": 0.6},
+  {"op": "run", "days": 0.02},
+  {"op": "raycast_test"},
+  {"op": "pick_test"},
+  {"op": "quit"}
+]

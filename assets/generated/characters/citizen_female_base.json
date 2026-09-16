@@ -1,0 +1,39 @@
+{
+  "asset_id": "citizen_female_base",
+  "category": "character",
+  "footprint_m": [
+    0.5,
+    0.4
+  ],
+  "bounds_min": [
+    -0.229,
+    -0.1152,
+    0.0
+  ],
+  "bounds_max": [
+    0.229,
+    0.1152,
+    1.79
+  ],
+  "height_m": 1.79,
+  "materials": [
+    "timber_dark",
+    "brick_red",
+    "fabric_muted",
+    "skin_mid"
+  ],
+  "triangles": {
+    "parts": 220
+  },
+  "triangle_budget": 1400,
+  "has_collision": false,
+  "parts": [
+    "citizen_female_base_torso",
+    "citizen_female_base_head",
+    "citizen_female_base_arm_l",
+    "citizen_female_base_arm_r",
+    "citizen_female_base_leg_l",
+    "citizen_female_base_leg_r"
+  ],
+  "attachments": {}
+}

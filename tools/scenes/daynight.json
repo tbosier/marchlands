@@ -1,0 +1,46 @@
+[
+  {
+    "op": "focus_keep",
+    "distance": 80,
+    "yaw": 0.8
+  },
+  {
+    "op": "speed",
+    "rate": 8.0
+  },
+  {
+    "op": "run",
+    "days": 0.14
+  },
+  {
+    "op": "shot",
+    "name": "t_noon"
+  },
+  {
+    "op": "run",
+    "days": 0.22
+  },
+  {
+    "op": "shot",
+    "name": "t_evening"
+  },
+  {
+    "op": "run",
+    "days": 0.22
+  },
+  {
+    "op": "shot",
+    "name": "t_night"
+  },
+  {
+    "op": "run",
+    "days": 0.25
+  },
+  {
+    "op": "shot",
+    "name": "t_dawn"
+  },
+  {
+    "op": "quit"
+  }
+]

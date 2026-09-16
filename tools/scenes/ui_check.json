@@ -1,0 +1,10 @@
+[
+  {"op": "focus_keep", "distance": 80, "yaw": 0.6},
+  {"op": "simulate", "days": 1.2},
+  {"op": "run", "days": 0.05},
+  {"op": "select_building", "type": "keep"},
+  {"op": "run", "days": 0.05},
+  {"op": "shot", "name": "ui_portrait"},
+  {"op": "pick_test"},
+  {"op": "quit"}
+]

@@ -1,0 +1,81 @@
+[
+  {
+    "op": "build",
+    "type": "logging_camp",
+    "near": "trees",
+    "radius": 180,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "quarry",
+    "near": "stone",
+    "radius": 300,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "farm",
+    "offset": [
+      0,
+      55
+    ],
+    "radius": 70,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "farm",
+    "offset": [
+      -60,
+      30
+    ],
+    "radius": 70,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "granary",
+    "offset": [
+      30,
+      30
+    ],
+    "radius": 50,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "stockpile",
+    "offset": [
+      -40,
+      -20
+    ],
+    "radius": 50,
+    "instant": true
+  },
+  {
+    "op": "populate",
+    "count": 160
+  },
+  {
+    "op": "speed",
+    "rate": 16.0
+  },
+  {
+    "op": "run",
+    "days": 3.0
+  },
+  {
+    "op": "shot",
+    "name": "s_stress"
+  },
+  {
+    "op": "report"
+  },
+  {
+    "op": "perf"
+  },
+  {
+    "op": "quit"
+  }
+]
