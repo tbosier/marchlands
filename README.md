@@ -1,3 +1,23 @@
+<p align="center">
+  <img src="design/branding/logo.png" alt="Marchlands" width="880">
+</p>
+
+---
+
+> ### This is an AI-generated game
+>
+> I did not write it. I am using this repository to test how well AI can build
+> a game end to end — the design, the simulation, the procedural art pipeline,
+> the verification harness, the debugging, and this README. My part is
+> direction and judgement; the code in `game/` and `tools/`, every asset in
+> `assets/`, the screenshots, and the logo above were all produced by AI.
+>
+> It is an experiment and it is meant to be read as one, including the parts
+> that did not come out well — see [Known gaps](#known-gaps), which is a
+> deliberate section rather than an oversight.
+
+---
+
 # Marchlands
 
 A 3D kingdom builder whose roads are not drawn by the player. People walk
@@ -301,6 +321,36 @@ assertion, so it works as a regression gate.
 
 ---
 
+## Known gaps
+
+Published deliberately, because an experiment that only shows its successes is
+not reporting anything. These are known and unfixed, not undiscovered:
+
+* **Saving is not crash-safe.** The replacement file is moved into place with a
+  remove-then-rename, so an interruption between the two loses the previous
+  save. The compressed write is also not verified to have reached disk.
+* **The validator takes some of the manifest on trust.** It measures LOD0
+  against the exported geometry, but the reduced LODs' triangle counts, the
+  declared `height_m` and the attachment coordinates are only checked for
+  presence and plausibility, not against the mesh.
+* **Collision meshes are generated, exported, validated and then discarded.**
+  The game builds its own pick box from the manifest and picks terrain
+  analytically, so every collision mesh in the pipeline is dead weight.
+* **Food is consumed settlement-wide.** Goods are hauled physically and that is
+  the point of the game, but eating draws from a pooled total rather than from
+  a granary someone can actually walk to, so a disconnected farm still feeds
+  the march.
+* **Overflow deliveries teleport.** When a destination fills up mid-haul, the
+  remainder is redistributed to any store with room rather than carried there.
+* **The click test does not use the input path.** It calls the picking function
+  directly, so it cannot catch a regression in event handling or in the
+  HUD's mouse-blocking.
+* **The shaders are verified by rendering, not by a test.** There is no
+  automated check that the terrain or water shader still compiles; the harness
+  runs headless, where shaders are never built.
+
+---
+
 ## Performance
 
 `stress.json` runs 160 citizens across twelve buildings and prints a frame
@@ -369,7 +419,10 @@ machine and say nothing about the game; only the `sim.*` spans are meaningful.
 
 ```
 marchlands/
-├── design/GAME_DESIGN.md      the original design document
+├── design/
+│   ├── GAME_DESIGN.md         the original design document
+│   ├── screenshots/           harness output kept for documentation
+│   └── branding/              the wordmark (generated, like everything else)
 ├── assets/
 │   ├── specs/                 style + material specification (source)
 │   ├── generated/             .glb + .json manifests (build product)
@@ -378,6 +431,8 @@ marchlands/
 │   ├── blender/               the generators and the modular kit
 │   ├── validators/            spec enforcement, glb inspection
 │   ├── scenes/                scripted verification scenarios
+│   ├── branding/              make_logo.py — draws the wordmark from the
+│   │                          game's own material palette
 │   └── build.sh               the whole pipeline
 └── game/                      the Godot 4 project
     ├── scripts/core/          config, resources, clock, camera, registry,
@@ -387,7 +442,7 @@ marchlands/
     │                          workforce, population, the simulation
     ├── scripts/agents/        citizens, carts
     ├── scripts/ui/            the interface, developer overlay
-    └── shaders/terrain.gdshader
+    └── shaders/               terrain.gdshader, water.gdshader
 ```
 
 Two files are worth reading first: `game/scripts/world/wear_field.gd`, which is
