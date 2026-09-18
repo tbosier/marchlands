@@ -28,6 +28,17 @@
     "instant": true
   },
   {
+    "op": "build",
+    "type": "farm",
+    "offset": [
+      -4,
+      44
+    ],
+    "radius": 60,
+    "instant": true,
+    "note": "a march that runs thirty-two days has to be able to feed itself: without a farm it eats its opening stores and then starves, which is correct behaviour and makes a poor fixture for testing upgrades"
+  },
+  {
     "op": "simulate",
     "days": 8.0
   },

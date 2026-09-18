@@ -17,11 +17,13 @@ var _by_resource: Array = []           # res -> Array[Building]
 var _all: Array[Building] = []
 var _totals := PackedFloat32Array()
 var _carried := PackedFloat32Array()
+var _larder := PackedFloat32Array()
 
 
 func _init() -> void:
 	_totals.resize(Config.RES_COUNT)
 	_carried.resize(Config.RES_COUNT)
+	_larder.resize(Config.RES_COUNT)
 	for i in Config.RES_COUNT:
 		_by_resource.append([] as Array[Building])
 
@@ -51,10 +53,12 @@ func buildings_storing(res: int) -> Array:
 # --- Totals -----------------------------------------------------------------
 
 ## Recompute the kingdom's stock. One pass per tick, not one per query.
-func refresh_totals(citizens: Array[Citizen]) -> void:
+func refresh_totals(citizens: Array[Citizen],
+					buildings: Array[Building]) -> void:
 	for i in Config.RES_COUNT:
 		_totals[i] = 0.0
 		_carried[i] = 0.0
+		_larder[i] = 0.0
 	for b in _all:
 		# Counted even while the building is on the stocks. A granary being
 		# grown into a warehouse still physically holds its grain; leaving it
@@ -65,14 +69,28 @@ func refresh_totals(citizens: Array[Citizen]) -> void:
 		# `spend` all do.
 		for res in b.def.stores:
 			_totals[res] += b.inventory[res]
+	# Household larders are real food the march owns, but they are not stock.
+	# They cannot be spent, hauled, or requisitioned for a building site —
+	# only eaten by the people who live there — so they are counted for the
+	# readout and deliberately kept out of `spendable`.
+	for b in buildings:
+		if b.larder > 0.0:
+			_larder[Config.Res.FOOD] += b.larder
 	for c in citizens:
 		if c.carrying_res >= 0 and c.carrying_amount > 0.0:
 			_carried[c.carrying_res] += c.carrying_amount
 
 
-## What the kingdom owns, counting loads being carried. Use for display.
+## What the kingdom owns, counting loads being carried and food already in
+## people's larders. Use for display.
 func total(res: int) -> float:
-	return _totals[res] + _carried[res]
+	return _totals[res] + _carried[res] + _larder[res]
+
+
+## Food sitting in household larders — owned, eaten soon, not available to
+## spend on anything else.
+func in_larders(res: int) -> float:
+	return _larder[res]
 
 
 ## What can actually be spent right now — goods sitting in a building. A load

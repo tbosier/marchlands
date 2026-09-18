@@ -43,7 +43,7 @@ improve the busiest stretch.*
 ```bash
 # Install the tools (Arch). Any Blender 4.2+ / Godot 4.4+ will do.
 # Pillow is what stitches the contact sheet; rsync is what `sync` uses.
-sudo pacman -S blender godot python-pillow rsync
+sudo pacman -S blender godot python-pillow rsync xorg-server-xvfb
 
 tools/build.sh all      # generate assets -> validate -> import into Godot
 tools/build.sh run      # play
@@ -118,6 +118,24 @@ Elevated free camera, analytic terrain picking, day/night and seasons.
 workplace, hunger and morale. They walk the world physically, are animated
 procedurally by rotating the limb pivots the Blender export provides (no
 armature, no imported clips), and carry visible goods.
+
+They also eat and sleep, and both are physical. There is no settlement-wide
+ration: a household keeps a **larder**, the only way food gets into it is a
+citizen carrying some home from a granary, and each person sits down to **two
+meals a day** out of it. A bare cupboard sends somebody to fetch more; an empty
+granary means they go hungry, and hunger is tracked per person rather than as a
+kingdom-wide number. At dusk they walk home and go indoors until morning —
+except those working too far out to make the trip worth it, who camp where they
+are rather than spend the day walking. That second daily journey, house to
+granary and back, is one of the largest contributors to the paths that form
+through a settlement: the roads a march wears in are partly the roads to
+its dinner.
+
+![The settlement at night](design/screenshots/night.png)
+
+*Day 4, a quarter to eleven at night. There is nobody on the map — every one of
+the twenty-four is inside their own house — and the paths they wore between
+those houses, the granary and the fields are what is left to look at.*
 
 **Layer 3 — Logistics.** Local inventories — there is no global stockpile
 (§11.2). Buildings post what they need to a job board; citizens score open
@@ -213,7 +231,13 @@ tools/build.sh assets house_small_01  # or just one
 tools/build.sh validate -v            # full PASS/WARN/FAIL report
 tools/build.sh previews               # turntables + assets/previews/_all_assets.png
 tools/build.sh icons                  # the build-tray icons
+tools/build.sh shaders                # compile the shaders on a real driver
 ```
+
+`shaders` builds everything under `game/shaders/` on Mesa's llvmpipe under
+Xvfb — no GPU needed — and fails if the engine rejects one, or if GDScript sets
+a uniform that no longer exists. It runs as the last step of `build.sh all` and
+takes about seven seconds. It needs `xvfb-run` (`pacman -S xorg-server-xvfb`).
 
 The **manifest is the contract**. The game asks the registry for a building's
 footprint, height and entrance position rather than storing its own copy, so
@@ -302,6 +326,7 @@ fails if the defect is reintroduced.
 | `industry.json` | mined iron reaches the forge and comes out as tools, with the work-rate bonus those tools earn |
 | `save_load.json` | a saved march comes back whole and keeps working |
 | `upgrade.json` | a granary and a smithy grow into their next tier in place, and survive a save |
+| `households.json` | food is carried home, kept in a larder and eaten twice a day; the march sleeps indoors at night; and both survive a save |
 
 Some defects are transient — a load delivered as the wrong resource is wrong
 for a tick or two and then gone — and an assertion placed after a simulation
@@ -326,9 +351,6 @@ assertion, so it works as a regression gate.
 Published deliberately, because an experiment that only shows its successes is
 not reporting anything. These are known and unfixed, not undiscovered:
 
-* **Saving is not crash-safe.** The replacement file is moved into place with a
-  remove-then-rename, so an interruption between the two loses the previous
-  save. The compressed write is also not verified to have reached disk.
 * **The validator takes some of the manifest on trust.** It measures LOD0
   against the exported geometry, but the reduced LODs' triangle counts, the
   declared `height_m` and the attachment coordinates are only checked for
@@ -336,18 +358,20 @@ not reporting anything. These are known and unfixed, not undiscovered:
 * **Collision meshes are generated, exported, validated and then discarded.**
   The game builds its own pick box from the manifest and picks terrain
   analytically, so every collision mesh in the pipeline is dead weight.
-* **Food is consumed settlement-wide.** Goods are hauled physically and that is
-  the point of the game, but eating draws from a pooled total rather than from
-  a granary someone can actually walk to, so a disconnected farm still feeds
-  the march.
-* **Overflow deliveries teleport.** When a destination fills up mid-haul, the
-  remainder is redistributed to any store with room rather than carried there.
-* **The click test does not use the input path.** It calls the picking function
-  directly, so it cannot catch a regression in event handling or in the
-  HUD's mouse-blocking.
-* **The shaders are verified by rendering, not by a test.** There is no
-  automated check that the terrain or water shader still compiles; the harness
-  runs headless, where shaders are never built.
+* **The shaders are compiled, but not proven in situ.** `tools/build.sh shaders`
+  builds both shaders on a real OpenGL driver — Mesa's llvmpipe under Xvfb, so
+  it wants no GPU — and fails on anything the engine complains about. The
+  headless harness never did: break a shader and it prints `SHADER ERROR`, then
+  `ALL CHECKS PASSED`, and exits 0. What the check compiles them onto is a test
+  quad rather than the game, and the cross-check that GDScript still addresses
+  uniforms which exist is textual, so it would not catch a parameter moved from
+  the terrain material to the water material inside the one file that builds
+  both.
+* **Screen-space tests need a screen.** `input_check` and `ui_check` click
+  through the game's real input handler, which means they need a real viewport;
+  headless opens a 64-pixel one where the top bar covers everything. They now
+  refuse to run there and say so rather than reporting a result, so those two
+  want `tools/build.sh harness <scene>` or `xvfb-run`.
 
 ---
 

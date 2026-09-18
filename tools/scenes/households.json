@@ -1,0 +1,143 @@
+[
+  {
+    "op": "note",
+    "text": "food is not a pooled number: somebody carries it home, keeps it in a larder, and sits down to it twice a day"
+  },
+  {
+    "op": "build",
+    "type": "farm",
+    "offset": [
+      0,
+      42
+    ],
+    "radius": 60,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "granary",
+    "offset": [
+      24,
+      22
+    ],
+    "radius": 40,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "house",
+    "offset": [
+      -26,
+      16
+    ],
+    "radius": 40,
+    "instant": true
+  },
+  {
+    "op": "note",
+    "text": "four days of ordinary life"
+  },
+  {
+    "op": "watch",
+    "check": "loads_are_accounted_for"
+  },
+  {
+    "op": "simulate",
+    "days": 4.0
+  },
+  {
+    "op": "note",
+    "text": "two meals a day each, and the food is in the houses rather than the granary"
+  },
+  {
+    "op": "assert",
+    "check": "households_eat",
+    "value": 4
+  },
+  {
+    "op": "assert",
+    "check": "larders_are_stocked",
+    "value": 2
+  },
+  {
+    "op": "note",
+    "text": "and at night the march is indoors"
+  },
+  {
+    "op": "simulate",
+    "days": 0.55
+  },
+  {
+    "op": "assert",
+    "check": "asleep_at_night",
+    "value": 10
+  },
+  {
+    "op": "camera",
+    "at": [
+      384,
+      384
+    ]
+  },
+  {
+    "op": "shot",
+    "name": "h_night",
+    "note": "the settlement with nobody in it: everyone is inside their own house"
+  },
+  {
+    "op": "note",
+    "text": "the households have to survive a save"
+  },
+  {
+    "op": "save",
+    "slot": "households"
+  },
+  {
+    "op": "simulate",
+    "days": 1.0
+  },
+  {
+    "op": "assert",
+    "check": "save_state_changed"
+  },
+  {
+    "op": "load",
+    "slot": "households"
+  },
+  {
+    "op": "assert",
+    "check": "save_round_trip"
+  },
+  {
+    "op": "assert",
+    "check": "larders_are_stocked",
+    "value": 2
+  },
+  {
+    "op": "note",
+    "text": "and they go on eating afterwards"
+  },
+  {
+    "op": "simulate",
+    "days": 2.0
+  },
+  {
+    "op": "assert",
+    "check": "households_eat",
+    "value": 6
+  },
+  {
+    "op": "assert",
+    "check": "no_stale_reservations"
+  },
+  {
+    "op": "shot",
+    "name": "h_households"
+  },
+  {
+    "op": "report"
+  },
+  {
+    "op": "quit"
+  }
+]

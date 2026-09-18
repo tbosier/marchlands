@@ -56,10 +56,19 @@ static func list_slots() -> Array[String]:
 
 ## Returns "" on success, or a message describing what went wrong.
 ##
-## Written beside the slot and moved into place only once it is whole. Opening
-## the slot itself for writing truncates it first, so a failure part way
-## through — a full disk, a removed drive — would take the previous save down
-## with it while the game still reported "Saved".
+## Written beside the slot, read back, and only then moved into place, with the
+## previous save kept until the new one has landed. Three things can go wrong
+## and all three are guarded:
+##
+##   * writing into the slot directly would truncate it first, so a failure
+##     part way through — a full disk, a removed drive — took the previous save
+##     down with it while the game still reported "Saved";
+##   * a compressed FileAccess does its real writing on close, and close
+##     reports nothing, so `store_var` succeeding proves only that the value
+##     was accepted, not that it reached the disk. It is read back instead;
+##   * removing the old file before renaming the new one over it left an
+##     instant with no save at all. The old one is moved aside to `.prev` and
+##     only deleted once the replacement is in place; `read` recovers from it.
 static func write(game: Node, slot: String) -> String:
 	DirAccess.make_dir_recursive_absolute(DIR)
 	var path := slot_path(slot)
@@ -76,14 +85,53 @@ static func write(game: Node, slot: String) -> String:
 		DirAccess.remove_absolute(temp)
 		return "writing %s failed; the previous save is untouched" % path
 
+	# `store_var` returning true only means the value was accepted into the
+	# compression buffer. A compressed FileAccess does its real writing when it
+	# is closed, and close reports nothing at all — so a full disk produced a
+	# truncated file and a cheerful "Saved". Read it back before trusting it:
+	# the moment the player tries to load it is the worst possible time to
+	# discover the save was never whole.
+	var check := FileAccess.open_compressed(temp, FileAccess.READ,
+			FileAccess.COMPRESSION_ZSTD)
+	if check == null:
+		DirAccess.remove_absolute(temp)
+		return "wrote %s but could not read it back (%s)" % [
+				temp, error_string(FileAccess.get_open_error())]
+	var round_trip: Variant = check.get_var(true)
+	check.close()
+	if typeof(round_trip) != TYPE_DICTIONARY or int((round_trip as Dictionary)
+			.get("version", -1)) != VERSION:
+		DirAccess.remove_absolute(temp)
+		return "wrote %s but it did not read back whole; the previous save " \
+				% path + "is untouched"
+
 	var dir := DirAccess.open(DIR)
 	if dir == null:
 		return "could not open %s" % DIR
-	if dir.file_exists(path.get_file()):
-		dir.remove(path.get_file())
+
+	# Keep the old save until the new one is in place. Removing it first left a
+	# window with no save in it at all — an interruption there destroyed the
+	# previous march, which is the exact accident this function exists to
+	# prevent. At every instant one of the two paths holds a whole file.
+	var backup := path.get_file() + ".prev"
+	var had_previous := dir.file_exists(path.get_file())
+	if had_previous:
+		if dir.file_exists(backup):
+			dir.remove(backup)
+		var kept := dir.rename(path.get_file(), backup)
+		if kept != OK:
+			DirAccess.remove_absolute(temp)
+			return "could not set the previous save aside (%s)" \
+					% error_string(kept)
+
 	var moved := dir.rename(temp.get_file(), path.get_file())
 	if moved != OK:
+		if had_previous:
+			dir.rename(backup, path.get_file())
+		DirAccess.remove_absolute(temp)
 		return "could not replace %s (%s)" % [path, error_string(moved)]
+	if had_previous:
+		dir.remove(backup)
 	return ""
 
 
@@ -137,6 +185,10 @@ static func _capture_building(b: Building) -> Dictionary:
 		"build_seconds": b.build_seconds,
 		"delivered": b.delivered.duplicate(),
 		"inventory": b.inventory.duplicate(),
+		# The household's own food. Not part of the inventory, and a march that
+		# came back with every larder bare would have everybody walking to the
+		# granary the moment it loaded.
+		"larder": b.larder,
 		"crop_growth": b.crop_growth,
 		"workers": b.workers.duplicate(),
 		"residents": b.residents.duplicate(),
@@ -163,6 +215,10 @@ static func _capture_citizen(c: Citizen) -> Dictionary:
 		"immigrant": c.immigrant,
 		"immigrant_target": c.immigrant_target,
 		"hunger": c.hunger,
+		# When their next meal falls due, and how many they have sat down to.
+		# Without the first, everyone reloads with a meal owed at once.
+		"next_meal": c.next_meal,
+		"meals_taken": c.meals_taken,
 		"morale": c.morale,
 	}
 
@@ -176,8 +232,22 @@ static func _capture_citizen(c: Citizen) -> Dictionary:
 static func read(slot: String, problem: Array[String] = []) -> Dictionary:
 	var path := slot_path(slot)
 	if not FileAccess.file_exists(path):
-		problem.append("no save named '%s'" % slot)
-		return {}
+		# A write interrupted between setting the old save aside and moving the
+		# new one in leaves the previous march under `.prev`. It is a whole
+		# file, so recover from it rather than telling the player their save
+		# does not exist.
+		var previous := path + ".prev"
+		if FileAccess.file_exists(previous):
+			var dir := DirAccess.open(DIR)
+			if dir != null and dir.rename(previous.get_file(),
+					path.get_file()) == OK:
+				push_warning("recovered '%s' from an interrupted save" % slot)
+			else:
+				problem.append("no save named '%s'" % slot)
+				return {}
+		else:
+			problem.append("no save named '%s'" % slot)
+			return {}
 	var file := FileAccess.open_compressed(path, FileAccess.READ,
 			FileAccess.COMPRESSION_ZSTD)
 	if file == null:

@@ -33,30 +33,45 @@ func housing_capacity(buildings: Array[Building]) -> int:
 	return total
 
 
+## Days of eating the march has in hand, counting both the stores a hauler can
+## reach and the food already sitting in people's larders.
 func food_days_remaining(citizens: Array[Citizen]) -> float:
 	var eaten := maxf(1.0, citizens.size() * Config.HUNGER_PER_DAY)
 	return stores.total(Config.Res.FOOD) / eaten
 
 
-## Eat. Returns true if the settlement went short.
+## The daily reckoning of how the march is eating. Returns true if it is
+## going short.
+##
+## Nothing is consumed here any more. Food is eaten meal by meal, out of a
+## household's own larder, by the citizen who walked it home — this pass only
+## reads the result of that and moves morale. Deducting a settlement-wide
+## ration here as well would have charged the march twice for every dinner.
 func consume_food(citizens: Array[Citizen], elapsed_days: float,
 				  keep_position: Vector3, day: int) -> bool:
-	var needed := citizens.size() * Config.HUNGER_PER_DAY * elapsed_days
-	var short := stores.consume(Config.Res.FOOD, needed)
+	var hungry := 0
+	var settled := 0
+	for c in citizens:
+		if c.immigrant:
+			continue
+		settled += 1
+		if c.hunger > 0.2:
+			hungry += 1
+			c.morale = maxf(0.0, c.morale - 0.06 * elapsed_days)
+		else:
+			c.morale = minf(1.0, c.morale + 0.03 * elapsed_days)
 
-	if short > 0.5:
+	# One person late to their dinner is not a famine; a fifth of the march
+	# missing meals is.
+	if settled > 0 and hungry >= maxi(2, settled / 5):
 		_famine_days += elapsed_days
-		for c in citizens:
-			c.hunger = minf(3.0, c.hunger + 0.4)
-			c.morale = maxf(0.0, c.morale - 0.06)
 		if day % 2 == 0:
-			alert.emit("The settlement is going hungry.", keep_position)
+			alert.emit("%d of the march are going hungry — they cannot reach "
+					% hungry + "food, or there is none to reach.",
+					keep_position)
 		return true
 
 	_famine_days = 0.0
-	for c in citizens:
-		c.hunger = maxf(0.0, c.hunger - 0.5)
-		c.morale = minf(1.0, c.morale + 0.03)
 	return false
 
 

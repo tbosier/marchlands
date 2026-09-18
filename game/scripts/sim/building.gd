@@ -26,6 +26,14 @@ var reserved := PackedFloat32Array()   # already claimed for collection
 
 var workers: Array[int] = []
 var residents: Array[int] = []
+## Food kept in by the household, in food units.
+##
+## Deliberately NOT part of the stores index. A larder is not settlement stock:
+## a road crew must not be able to requisition the family's supper, and a
+## hauler must not be able to take it back out again to supply a building site.
+## It only ever goes in by somebody carrying it home, and only ever comes out
+## at a meal.
+var larder := 0.0
 
 var under_construction := true
 var delivered := {}                    # Res -> amount delivered so far
@@ -355,6 +363,7 @@ func apply_state(entry: Dictionary) -> void:
 	build_cost = (entry.get("build_cost", build_cost) as Dictionary).duplicate()
 	build_seconds = float(entry.get("build_seconds", build_seconds))
 	crop_growth = float(entry.get("crop_growth", 0.0))
+	larder = float(entry.get("larder", 0.0))
 
 	workers.assign(entry.get("workers", []))
 	residents.assign(entry.get("residents", []))
@@ -418,6 +427,42 @@ func stores(res: int) -> bool:
 
 func capacity() -> float:
 	return def.storage
+
+
+## How much a household will keep in: a few days' eating for everyone housed.
+func larder_capacity() -> float:
+	return def.houses * Config.HUNGER_PER_DAY * Config.LARDER_DAYS
+
+
+func larder_space() -> float:
+	return maxf(0.0, larder_capacity() - larder)
+
+
+## Put food in the larder, returning what would not fit.
+func stock_larder(amount: float) -> float:
+	var taken: float = minf(amount, larder_space())
+	larder += taken
+	return amount - taken
+
+
+## Sit down to a meal. False when the cupboard is bare.
+##
+## A seat that stores food feeds its own household straight from that store —
+## the keep has no separate pantry, and asking settlers living in it to walk to
+## a granary that is fifty metres away and also themselves would be absurd.
+func take_meal() -> bool:
+	if larder >= Config.MEAL_FOOD:
+		larder -= Config.MEAL_FOOD
+		return true
+	if stores(Config.Res.FOOD) and inventory[Config.Res.FOOD] >= Config.MEAL_FOOD:
+		inventory[Config.Res.FOOD] -= Config.MEAL_FOOD
+		return true
+	return false
+
+
+## Whether this household wants somebody to fetch food home.
+func larder_is_low() -> bool:
+	return def.houses > 0 and larder < larder_capacity() * 0.5
 
 
 func total_stored() -> float:

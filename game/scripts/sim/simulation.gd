@@ -64,6 +64,8 @@ var _rng := RandomNumberGenerator.new()
 ## Entrance positions are asked for every tick by every worker; they only
 ## change when a building is placed, so they are worked out once.
 var _entrance_cache: Dictionary = {}
+## Worked out once a tick rather than once per citizen.
+var _is_night := false
 
 
 func setup(world_node: World, asset_registry: AssetRegistry,
@@ -71,6 +73,14 @@ func setup(world_node: World, asset_registry: AssetRegistry,
 	world = world_node
 	registry = asset_registry
 	_rng.seed = seed_value + 4242
+
+	# The simulation's day and the clock's day have to be the same day. They
+	# advance at the same rate, but the clock opens at mid-morning while this
+	# counter used to open at zero — so anything reading a time of day off the
+	# simulation was nearly nine hours out of step with the sun, and the march
+	# would have been going to bed at lunchtime.
+	day = Clock.START_TIME_OF_DAY
+	_day_marker = day
 	# A mined-out outcrop leaves walkable ground behind. Loading a save has
 	# always restored it that way; play did not, so saving and reloading made
 	# the map measurably more walkable than it had been a moment earlier.
@@ -106,7 +116,8 @@ func tick(delta: float) -> void:
 	var prev_day := day
 	day += delta / Config.DAY_LENGTH
 
-	stores.refresh_totals(citizens)
+	_is_night = Config.is_night(day)
+	stores.refresh_totals(citizens, buildings)
 	if workforce.update(buildings, citizens, buildings_by_id):
 		for b in buildings:
 			if b.sync_fields_to_workers():
@@ -257,6 +268,9 @@ func _run_immigration() -> void:
 func idle_diagnosis() -> String:
 	if citizens.is_empty():
 		return ""
+	# The whole march being in bed is not a problem to report.
+	if _is_night:
+		return ""
 	if stat_idle < maxi(2, citizens.size() / 3):
 		return ""
 
@@ -317,6 +331,49 @@ func _tick_citizen(c: Citizen, delta: float) -> void:
 	if c.immigrant:
 		_tick_immigrant(c, delta)
 		return
+
+	c.update_hunger(day, delta / Config.DAY_LENGTH)
+
+	# A meal errand, once begun, runs to its end. The citizen may be carrying
+	# the household's food, and neither nightfall nor the job board may take it
+	# off them halfway home.
+	if c.state == Citizen.State.EATING:
+		_tick_meal(c, delta)
+		return
+
+	# Night. Everyone not holding something walks home and turns in. This is
+	# not decoration: the daily journey between home and work is one of the
+	# largest contributors to the paths that form through a settlement, and
+	# while the march worked around the clock that journey never happened.
+	# The job is deliberately kept overnight rather than dropped. Releasing it
+	# reset the walk to it, so a gatherer halfway to the quarry at dusk threw
+	# away the whole outbound journey and started again in the morning.
+	# Everyone is asleep, so nobody else wanted it anyway.
+	if _is_night and c.carrying_amount <= 0.01:
+		_tick_sleep(c, delta)
+		return
+	if c.indoors:
+		c.set_indoors(false)
+		c.state = Citizen.State.IDLE
+
+	# A meal that has fallen due is taken between jobs — or straight away, if
+	# they are hungry enough that finishing the round first would be silly.
+	if c.is_hungry(day) and day >= c.meal_retry_at \
+			and c.carrying_amount <= 0.01 \
+			and (c.job == null or c.hunger >= Config.HUNGER_URGENT):
+		if _can_eat_somewhere(c):
+			if c.job != null:
+				_abandon(c)
+			c.state = Citizen.State.EATING
+			c.clear_goal()
+			_tick_meal(c, delta)
+			return
+		# There is nothing to eat anywhere. Stay at work rather than downing
+		# tools every few minutes to walk to a cupboard that is still bare:
+		# dropping the job resets the walk to it, so a starving march spent all
+		# day re-starting journeys and never reaped the crop that would have
+		# fed it. Hunger goes on rising; this only stops the thrashing.
+		c.meal_retry_at = day + Config.MEAL_RETRY_DAYS
 
 	if c.job == null and c.carrying_amount > 0.01:
 		# Someone holding goods with no job to justify them — a hauler whose
@@ -505,12 +562,13 @@ func _tick_haul(c: Citizen, delta: float) -> void:
 	else:
 		left = amount - dst.add(job.res, amount)
 	if left > 0.01:
-		left -= src.add(job.res, left)
-	if left > 0.01:
-		left = _spill_into_stores(job.res, left, c.global_position, dst)
-	if left > 0.01:
-		# Nowhere in the march will take it. It stays on their back rather
-		# than being deleted, and the stray-load path retries every tick.
+		# It stays on their back. The two obvious alternatives are both a
+		# teleport: the carrier is standing at the destination, so putting the
+		# remainder "back" in the source moves it across the map without
+		# anybody walking it, and spilling it into whichever store has room
+		# does the same thing over a longer distance. Goods in this game move
+		# because somebody carries them, and the stray-load path below will
+		# have them carry these.
 		c.pick_up(job.res, left, registry)
 	_release_cart(c)
 	jobs.complete(job)
@@ -618,23 +676,26 @@ func _tick_harvest(c: Citizen, delta: float) -> void:
 ## fit, so a worker's effort is never silently thrown away.
 ## Put a carried load into a building, and make sure none of it evaporates.
 ##
-## `into` is where the job meant it to go; when that is full the rest goes to
-## any other store that will take it, and whatever still does not fit stays on
-## the carrier's back. Deleting the remainder — which is what happens if you
-## trust one fallback store to have room — silently destroys a full day's work
-## for a settlement that has outgrown its storage, which is exactly the moment
-## a player is watching their stocks.
+## `into` is where the job meant it to go; whatever will not fit stays on the
+## carrier's back for them to walk somewhere else. Deleting the remainder
+## silently destroys a full day's work for a settlement that has outgrown its
+## storage — which is exactly the moment a player is watching their stocks —
+## and handing it to a distant store instead would move it there without
+## anybody making the journey.
 func _deposit(c: Citizen, into: Building, res: int) -> void:
 	var amount := c.drop()
 	var left: float = amount - into.add(res, amount)
-	if left > 0.01:
-		left = _spill_into_stores(res, left, c.global_position, into)
 	if left > 0.01:
 		c.pick_up(res, left, registry)
 
 
 ## Spread `amount` over any store with room, skipping `exclude`. Returns what
 ## would not fit anywhere.
+##
+## This moves goods without anybody carrying them, so it is reserved for stock
+## that is already inside a building and has no carrier to give it to — today,
+## only the contents of a building being upgraded into a tier that does not
+## stock them. Anything a citizen is holding stays held: see `_deposit`.
 func _spill_into_stores(res: int, amount: float, from: Vector3,
 						exclude: Building = null) -> float:
 	var left := amount
@@ -822,6 +883,188 @@ func _on_building_completed(site: Building) -> void:
 	if site.def.is_farm():
 		_protect_fields(site, true)
 	workforce.mark_all_dirty()
+
+
+## Eating (design doc 9.1).
+##
+## Food is never drawn from a settlement-wide pool: it comes out of the
+## household's own larder, and the only way into that larder is somebody
+## carrying food home from a store. That is the point of it — it makes where
+## the granary stands matter, and it puts a second daily journey on the ground
+## for the roads to form along.
+func _tick_meal(c: Citizen, delta: float) -> void:
+	var home: Building = buildings_by_id.get(c.home_id)
+	var has_home: bool = (home != null and is_instance_valid(home)
+			and not home.under_construction and home.def.houses > 0)
+
+	# Leg 2: carrying the household's food home.
+	if c.carrying_amount > 0.01 and c.carrying_res == Config.Res.FOOD:
+		if not has_home:
+			# Their house came down while they were at the granary. They keep
+			# hold of the food and walk it to a store instead.
+			_end_meal(c)
+			_carry_stray_load(c, delta)
+			return
+		c.task_label = "carrying food home"
+		c.set_goal(entrance_of(home, "att_entrance"))
+		c.advance(delta, world)
+		if not c.has_arrived():
+			return
+		var left := home.stock_larder(c.drop())
+		if left > 0.01:
+			# More than the larder holds: they keep the rest and take it back.
+			c.pick_up(Config.Res.FOOD, left, registry)
+		_sit_down(c, home)
+		if c.state != Citizen.State.EATING and c.carrying_amount > 0.01:
+			# Set off with the remainder in the same tick. Ending the errand
+			# clears the route, so leaving this to the next tick left them
+			# standing in their own doorway holding food — which is precisely
+			# what the loads watch exists to catch, and it did.
+			_carry_stray_load(c, delta)
+		return
+
+	# Nobody's house — a settler not yet given one eats standing at whatever
+	# store will feed them, which is what the keep is for.
+	if not has_home:
+		var counter := _nearest_food(c.global_position)
+		if counter == null:
+			_no_food(c, delta)
+			return
+		c.task_label = "going to eat"
+		c.set_goal(entrance_of(counter, "att_cart_bay"))
+		c.advance(delta, world)
+		if not c.has_arrived():
+			return
+		if counter.remove(Config.Res.FOOD, Config.MEAL_FOOD) \
+				> Config.MEAL_FOOD * 0.9:
+			c.take_meal(day)
+		_end_meal(c)
+		return
+
+	# There is food in the house: go home and eat it.
+	if home.larder >= Config.MEAL_FOOD or (home.stores(Config.Res.FOOD)
+			and home.inventory[Config.Res.FOOD] >= Config.MEAL_FOOD):
+		c.task_label = "going home to eat"
+		c.set_goal(entrance_of(home, "att_entrance"))
+		c.advance(delta, world)
+		if not c.has_arrived():
+			return
+		_sit_down(c, home)
+		return
+
+	# Leg 1: the larder is bare, so fetch enough to fill it.
+	var source := _nearest_food(c.global_position)
+	if source == null:
+		_no_food(c, delta)
+		return
+	c.task_label = "fetching food"
+	c.set_goal(entrance_of(source, "att_cart_bay"))
+	c.advance(delta, world)
+	if not c.has_arrived():
+		return
+	var want: float = clampf(home.larder_space(), Config.MEAL_FOOD,
+			float(Config.CARRY_CAPACITY))
+	var got := source.remove(Config.Res.FOOD, want)
+	if got <= 0.01:
+		# Somebody emptied it while they walked. Look again next tick.
+		return
+	c.pick_up(Config.Res.FOOD, got, registry)
+
+
+## Sit down to the meal. A housemate can have emptied the larder between
+## arriving and eating, in which case the errand simply carries on.
+func _sit_down(c: Citizen, home: Building) -> void:
+	if home.take_meal():
+		c.take_meal(day)
+		_end_meal(c)
+
+
+func _end_meal(c: Citizen) -> void:
+	c.state = Citizen.State.IDLE
+	c.task_label = "idle"
+	c.clear_goal()
+
+
+## No food anywhere. They go back to what they were doing and try again
+## shortly: a march with an empty granary needs its farmers reaping, not its
+## entire population queuing at a bare cupboard.
+func _no_food(c: Citizen, delta: float) -> void:
+	c.meal_retry_at = day + Config.MEAL_RETRY_DAYS
+	_end_meal(c)
+	_idle_behaviour(c, delta)
+
+
+## Whether this citizen has anywhere to get a meal — their own larder first,
+## then any store within reach of the settlement's food.
+func _can_eat_somewhere(c: Citizen) -> bool:
+	var home: Building = buildings_by_id.get(c.home_id)
+	if home != null and is_instance_valid(home) and not home.under_construction:
+		if home.larder >= Config.MEAL_FOOD:
+			return true
+		if home.stores(Config.Res.FOOD) \
+				and home.inventory[Config.Res.FOOD] >= Config.MEAL_FOOD:
+			return true
+	return _nearest_food(c.global_position) != null
+
+
+## The nearest store actually holding a meal.
+func _nearest_food(from: Vector3) -> Building:
+	var best: Building = null
+	var best_d := INF
+	for b in stores.buildings_storing(Config.Res.FOOD):
+		if b.under_construction \
+				or b.inventory[Config.Res.FOOD] < Config.MEAL_FOOD:
+			continue
+		var d := from.distance_squared_to(b.global_position)
+		if d < best_d:
+			best_d = d
+			best = b
+	return best
+
+
+## Night: home, and indoors.
+func _tick_sleep(c: Citizen, delta: float) -> void:
+	c.state = Citizen.State.SLEEPING
+	var home: Building = buildings_by_id.get(c.home_id)
+	var has_home: bool = (home != null and is_instance_valid(home)
+			and not home.under_construction and home.def.houses > 0)
+	if c.indoors and not has_home:
+		# The roof over their head came down in the night.
+		c.set_indoors(false)
+	if c.indoors:
+		c.update_animation(delta, 0.0)
+		return
+
+	var anchor: Building = home if has_home else keep
+	if anchor == null or not is_instance_valid(anchor):
+		_bed_down(c, delta)
+		return
+
+	var door := entrance_of(anchor, "att_entrance")
+	var walk := c.global_position.distance_to(door)
+	# Too far to be worth going home for. They camp where they are, keeping
+	# their route so the morning carries on from here rather than from the
+	# doorstep — which is what makes a distant quarry workable at all.
+	if walk > Config.SLEEP_WALK_MAX:
+		_bed_down(c, delta)
+		return
+	if walk > 3.0:
+		c.task_label = "going home for the night"
+		c.set_goal(door)
+		c.advance(delta, world)
+		return
+
+	c.task_label = "asleep"
+	c.clear_goal()
+	if has_home:
+		c.set_indoors(true)
+	c.update_animation(delta, 0.0)
+
+
+## Sleep where you stand, holding on to whatever you were doing.
+func _bed_down(c: Citizen, delta: float) -> void:
+	c.task_label = "sleeping rough"
+	c.update_animation(delta, 0.0)
 
 
 func _idle_behaviour(c: Citizen, delta: float) -> void:
@@ -1255,6 +1498,7 @@ func add_citizen(position: Vector3, as_immigrant: bool = false,
 	citizens.append(c)
 	citizens_by_id[c.id] = c
 
+	c.next_meal = Config.next_meal_after(day)
 	if as_immigrant:
 		c.immigrant = true
 		c.task_label = "travelling to your lands"
@@ -1335,7 +1579,7 @@ func finish_restore() -> void:
 	# Last, because every building placed above flattened the ground beneath
 	# it, and a cell's travel weight is part slope.
 	world.nav.rebuild_all()
-	stores.refresh_totals(citizens)
+	stores.refresh_totals(citizens, buildings)
 	_update_stats()
 
 
@@ -1357,7 +1601,10 @@ func _update_stats() -> void:
 			continue
 		if c.home_id < 0:
 			stat_homeless += 1
-		if c.job == null:
+		# Asleep or at supper is not idle. Counting it as idle made the march
+		# look as though it had downed tools every night.
+		if c.job == null and c.state != Citizen.State.SLEEPING \
+				and c.state != Citizen.State.EATING:
 			stat_idle += 1
 	stat_jobs_open = jobs.open_jobs()
 	stats_changed.emit()

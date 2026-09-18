@@ -136,6 +136,11 @@
     "days": 0.1
   },
   {
+    "op": "advance_to",
+    "time": 0.45,
+    "note": "mid-morning: the march sleeps now, so an assertion about work has to be made at an hour when anyone is awake"
+  },
+  {
     "op": "assert",
     "check": "work_in_progress",
     "value": 1,

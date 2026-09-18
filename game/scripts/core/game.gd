@@ -134,6 +134,15 @@ func _seed_from_args() -> int:
 
 ## Returns "" on success, or the reason it failed.
 func save_game(slot: String = SaveGame.QUICK_SLOT) -> String:
+	# Settle the world before writing it down. Road levels are a cache over the
+	# wear field refreshed on a timer, so a save taken inside that window
+	# records a march whose road graph lags its own history by a couple of
+	# seconds — and since loading rebuilds the cache from scratch, the march
+	# came back with a road the saved one did not have.
+	var settled := world.wear.refresh_levels()
+	if not settled.is_empty():
+		world.nav.apply_road_changes(settled)
+		sim.jobs.clear_refusals()
 	var problem := SaveGame.write(self, slot)
 	if problem == "":
 		_on_alert("Saved as '%s'" % slot, camera.focus)

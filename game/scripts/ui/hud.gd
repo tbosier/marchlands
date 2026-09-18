@@ -1058,6 +1058,14 @@ func show_building(b: Building) -> void:
 		lines.append("  Construction: %d%%" % int(b.build_progress * 100.0))
 	else:
 		_add_upgrade_action(b, rebuild)
+		if b.def.houses > 0:
+			lines.append("")
+			lines.append("[b]Larder[/b] %d / %d  [color=#a9a49b]%s[/color]"
+					% [int(b.larder), int(b.larder_capacity()),
+					   "%d housed" % b.residents.size()])
+			if b.larder < Config.MEAL_FOOD:
+				lines.append("  [color=#e0a85c]bare — somebody will fetch "
+						+ "food[/color]")
 		if b.capacity() > 0.0:
 			lines.append("")
 			lines.append("[b]Stores[/b] (%d / %d)"
@@ -1138,11 +1146,21 @@ func show_citizen(c: Citizen) -> void:
 	if _sim.buildings_by_id.has(c.workplace_id):
 		work = _sim.buildings_by_id[c.workplace_id].display_name()
 
+	# Hunger runs 0 (just eaten) to 1 (starving), and only rises once a meal has
+	# actually been missed.
 	var hunger_word := "well fed"
-	if c.hunger > 1.8:
+	if c.hunger > 0.75:
 		hunger_word = "[color=#d97368]starving[/color]"
-	elif c.hunger > 0.6:
+	elif c.hunger > 0.35:
 		hunger_word = "[color=#e0a85c]hungry[/color]"
+	elif c.hunger > 0.0:
+		hunger_word = "[color=#e0a85c]peckish[/color]"
+	var meal_in: float = c.next_meal - _sim.day
+	var meal_word := "due now"
+	if meal_in > 0.0:
+		var hours: float = meal_in * 24.0
+		meal_word = ("in %d min" % int(maxf(1.0, hours * 60.0))) if hours < 1.0 \
+				else ("in %.1f h" % hours)
 
 	var lines: Array[String] = [
 		"[color=#a9a49b]%s, age %d[/color]" % [c.profession.capitalize(), c.age],
@@ -1151,6 +1169,8 @@ func show_citizen(c: Citizen) -> void:
 		"[b]Home[/b] %s" % home,
 		"[b]Works at[/b] %s" % work,
 		"[b]Condition[/b] %s" % hunger_word,
+		"[b]Next meal[/b] %s  [color=#a9a49b](%d taken)[/color]"
+				% [meal_word, c.meals_taken],
 		"[b]Morale[/b] %d%%" % int(c.morale * 100.0),
 	]
 	_selection_body.text = "\n".join(lines)

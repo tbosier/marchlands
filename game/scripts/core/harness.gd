@@ -74,6 +74,7 @@ func run(game_node, script_path: String) -> void:
 		return
 	_steps = parsed
 	DirAccess.make_dir_recursive_absolute(_out_dir)
+
 	_note("harness: %d steps from %s" % [_steps.size(), script_path])
 
 
@@ -163,6 +164,8 @@ func _execute(step: Dictionary) -> bool:
 		"run":
 			_run_remaining = float(step.get("days", 1.0)) * Config.DAY_LENGTH
 			return false
+		"advance_to":
+			_do_advance_to(float(step.get("time", 0.45)))
 		"simulate":
 			_do_simulate(float(step.get("days", 1.0)))
 		"shot":
@@ -309,6 +312,34 @@ func _do_simulate(days: float) -> void:
 			% [days, (Time.get_ticks_msec() - started) / 1000.0])
 
 
+## Run on until the march reaches a given time of day, given as a fraction.
+##
+## The settlement sleeps now, so whether anybody is working depends on the hour
+## as well as on the state of the world. An assertion about work placed after a
+## fixed number of days lands wherever the arithmetic happens to put it — which
+## is how `work_in_progress` came to be sampled at two in the morning and fail
+## with the entirely correct answer that everyone was in bed.
+func _do_advance_to(target: float) -> void:
+	var want: float = fposmod(target, 1.0)
+	var step: float = Config.MAX_SIM_STEP
+	var guard := 0
+	# A whole day of steps plus a margin: enough to reach any hour from any
+	# other, and a hard stop rather than a possible infinite loop.
+	var limit: int = int(ceil(Config.DAY_LENGTH / step)) + 8
+	while guard < limit:
+		var now: float = fposmod(game.sim.day, 1.0)
+		if absf(now - want) < step / Config.DAY_LENGTH:
+			break
+		game.sim.tick(step)
+		game.clock.elapsed_days += step / Config.DAY_LENGTH
+		guard += 1
+		if not _watches.is_empty():
+			_watch_steps += 1
+			_run_watches()
+	_note("advanced to %02d:%02d" % [int(fposmod(game.sim.day, 1.0) * 24.0),
+			int(fposmod(fposmod(game.sim.day, 1.0) * 24.0, 1.0) * 60.0)])
+
+
 ## Place a blueprint, let some materials arrive, then call it off and check the
 ## goods came back. This is the stuck-state a player hits by committing all
 ## their timber to a site they cannot finish.
@@ -326,7 +357,7 @@ func _do_cancel_site(type_id: String) -> void:
 	game._on_demolish_requested(target)
 	# Totals are cached and refreshed once per tick, so ask for a recount
 	# rather than reading the figure from before the goods came back.
-	game.sim.stores.refresh_totals(game.sim.citizens)
+	game.sim.stores.refresh_totals(game.sim.citizens, game.sim.buildings)
 	var after: float = game.sim.total_resource(Config.Res.TIMBER)
 	if after >= before + on_site - 0.5:
 		_note("PASS cancel_site: %.0f timber returned (%.0f -> %.0f)"
@@ -514,8 +545,12 @@ func _do_upgrade_building(type_id: String) -> void:
 
 
 func _do_save(slot: String) -> void:
-	_save_fingerprint = _fingerprint()
 	var problem: String = game.save_game(slot)
+	# Fingerprinted *after* the write, so it describes the world that was
+	# actually written down rather than the world a moment before it — saving
+	# settles the road-level cache, and taking the print first compared the
+	# reloaded march against a state that was never saved.
+	_save_fingerprint = _fingerprint()
 	if problem == "":
 		_note("saved '%s' (%s)" % [slot, _describe_save(slot)])
 	else:
@@ -551,7 +586,7 @@ func _fingerprint() -> Dictionary:
 	# The kingdom's totals are a per-tick cache. Reading them straight after an
 	# op that moved goods gives the figure from before the op, which showed up
 	# as a round trip that had apparently gained eight timber.
-	game.sim.stores.refresh_totals(game.sim.citizens)
+	game.sim.stores.refresh_totals(game.sim.citizens, game.sim.buildings)
 	var totals := {}
 	for res in Config.RES_COUNT:
 		totals[res] = roundf(game.sim.stores.total(res))
@@ -1022,6 +1057,83 @@ func _do_assert(step: Dictionary) -> void:
 				_note("PASS %d buildings complete" % n)
 			else:
 				_fail("only %d buildings complete, wanted %d" % [n, int(value)])
+		"households_eat":
+			# Meals actually sat down to, per settled citizen. Food being
+			# present proves nothing; somebody has to have eaten it.
+			var total := 0
+			var counted := 0
+			var starving: Array[String] = []
+			for c in game.sim.citizens:
+				if c.immigrant:
+					continue
+				counted += 1
+				total += c.meals_taken
+				if c.hunger > 0.75:
+					starving.append(c.given_name)
+			# The average rather than the worst-fed: settlers arrive throughout
+			# a run, and somebody who walked in yesterday cannot have eaten a
+			# week of dinners. Starvation is the per-person half of this and is
+			# checked separately, so it cannot hide inside an average.
+			var per_head: float = float(total) / float(maxi(1, counted))
+			if counted == 0:
+				_fail("households_eat: nobody to feed")
+			elif not starving.is_empty():
+				_fail("households_eat: %d starving (%s)"
+						% [starving.size(), ", ".join(starving.slice(0, 4))])
+			elif per_head < value:
+				_fail("households_eat: %.1f meals a head across %d people, "
+						% [per_head, counted] + "wanted %.0f (%d eaten)"
+						% [value, total])
+			else:
+				_note("PASS %.1f meals a head across %d people (%d eaten, "
+						% [per_head, counted, total] + "nobody starving)")
+		"larders_are_stocked":
+			# The food has to be in the houses, not in the granary. This is the
+			# whole point of the change: it is carried home and kept there.
+			var stocked := 0
+			var households := 0
+			var bare: Array[String] = []
+			for b in game.sim.buildings:
+				if b.under_construction or b.def.houses <= 0 \
+						or b.residents.is_empty():
+					continue
+				households += 1
+				if b.larder >= Config.MEAL_FOOD:
+					stocked += 1
+				else:
+					bare.append("%s (%d housed)"
+							% [b.display_name(), b.residents.size()])
+			if households == 0:
+				_fail("larders_are_stocked: no occupied households")
+			elif stocked < int(maxf(value, 1.0)):
+				_fail("only %d of %d households have food in — bare: %s"
+						% [stocked, households, ", ".join(bare.slice(0, 4))])
+			else:
+				_note("PASS %d of %d households have food in the larder"
+						% [stocked, households])
+		"asleep_at_night":
+			# Asserts it really is night as well as that they are indoors: a
+			# check that silently passes in broad daylight is worthless.
+			if not Config.is_night(game.sim.day):
+				_fail("asleep_at_night sampled at %.2f of a day, which is not "
+						% fposmod(game.sim.day, 1.0) + "night")
+			else:
+				var inside := 0
+				var housed := 0
+				for c in game.sim.citizens:
+					if c.immigrant or c.home_id < 0:
+						continue
+					housed += 1
+					if c.indoors:
+						inside += 1
+				if housed == 0:
+					_fail("asleep_at_night: nobody has a home to go to")
+				elif inside < int(maxf(value, 1.0)):
+					_fail("only %d of %d housed citizens are indoors at night"
+							% [inside, housed])
+				else:
+					_note("PASS %d of %d housed citizens are indoors for the "
+							% [inside, housed] + "night")
 		_:
 			_fail("unknown assert '%s'" % check)
 
@@ -1045,6 +1157,17 @@ func _shot(tag: String) -> void:
 		_note("shot %s skipped (headless)" % tag)
 		_busy = false
 		return
+	# Bring the view up to date before photographing it. A `simulate` step runs
+	# the whole span inside one frame, so nothing that refreshes on a timer has
+	# caught up: the interface still shows the readouts it had before the burst
+	# and the wear texture still shows the ground before anybody walked on it.
+	# A screenshot captioned "day 16" that reads "Day 1" in the corner is worse
+	# than no screenshot, because it is documentation.
+	game.world.set_time_of_day(game.clock.day_fraction(),
+			game.clock.season_fraction())
+	game.world.wear.flush_texture(true)
+	game.hud.refresh()
+	await RenderingServer.frame_post_draw
 	await RenderingServer.frame_post_draw
 	var image: Image = game.get_viewport().get_texture().get_image()
 	var path := "%s/%s.png" % [_out_dir, tag]
@@ -1082,8 +1205,14 @@ func _do_inspect(type_id: String) -> void:
 func _report() -> void:
 	var sim = game.sim
 	_note("--- state ---")
-	_note("day %.2f  population %d  buildings %d"
-			% [sim.day, sim.citizens.size(), sim.buildings.size()])
+	# Both clocks, because they are supposed to be the same clock: the sun is
+	# graded off the Clock and the settlement's routine off the simulation, so
+	# if these ever drift apart the march goes to bed at noon.
+	_note("day %.2f (clock %.2f, %02d:%02d)  population %d  buildings %d"
+			% [sim.day, game.clock.elapsed_days,
+			   int(game.clock.day_fraction() * 24.0),
+			   int(fposmod(game.clock.day_fraction() * 24.0, 1.0) * 60.0),
+			   sim.citizens.size(), sim.buildings.size()])
 	for res in Config.RES_COUNT:
 		_note("  %-7s %.0f" % [Res.display(res), sim.total_resource(res)])
 	_note("  peak wear %.0f (%s)"
@@ -1107,9 +1236,65 @@ func _perf_report() -> void:
 		_note(line)
 
 
-## Click the first building of a type, through the real input path, so the
+## Screen-space tests need a screen. Headless opens a 64-pixel window, where the
+## top bar alone covers the whole of it, every click aimed at the world lands on
+## the interface, and any conclusion drawn is about nothing. Say so and fail
+## rather than report a result: this used to "pass" headless only because the
+## test called the picking function behind the interface's back.
+func _needs_real_viewport(what: String) -> bool:
+	var size: Vector2 = game.get_viewport().get_visible_rect().size
+	if size.x >= 640.0 and size.y >= 400.0:
+		return false
+	_fail("%s needs a real viewport; this one is %dx%d. Run it with a display "
+			% [what, int(size.x), int(size.y)]
+			+ "(tools/build.sh harness <scene>, or under xvfb-run) rather "
+			+ "than --headless.")
+	return true
+
+
+## Left-click at a screen position the way the player does.
+##
+## This builds a real InputEventMouseButton and hands it to the game's input
+## handler, rather than calling `_pick_at` behind its back. Calling the picking
+## function directly skipped `hud.blocks_mouse` and the placement/clear mode
+## dispatch entirely, so the test could not have caught a click being eaten by
+## the interface or going to the wrong verb — while its comment claimed it
+## exercised "the real input path". The only part left out is the engine's own
+## event routing, which is not ours to break.
+func _click_at(screen: Vector2) -> void:
+	if game.hud.blocks_mouse(screen):
+		_fail("a click at %v never reaches the world: %s is over it"
+				% [screen, _blocker_at(game.hud, screen)])
+	var ev := InputEventMouseButton.new()
+	ev.button_index = MOUSE_BUTTON_LEFT
+	ev.pressed = true
+	ev.position = screen
+	game._unhandled_input(ev)
+
+
+## Name the interface element sitting over a point, so "the click was eaten"
+## comes with the culprit rather than sending the reader hunting for it.
+func _blocker_at(node: Node, at: Vector2) -> String:
+	for child in node.get_children():
+		if not (child is Control):
+			continue
+		var control: Control = child
+		if not control.visible:
+			continue
+		if control.mouse_filter != Control.MOUSE_FILTER_IGNORE \
+				and control.get_global_rect().has_point(at):
+			return "%s %s" % [control.name, str(control.get_global_rect())]
+		var deeper := _blocker_at(control, at)
+		if deeper != "":
+			return deeper
+	return ""
+
+
+## Click the first building of a type, through the game's input handler, so the
 ## screenshot shows what a player actually sees after clicking it.
 func _do_select_building(type_id: String) -> void:
+	if _needs_real_viewport("select_building"):
+		return
 	var cam: Camera3D = game.camera.camera()
 	for b in game.sim.buildings:
 		if b.type_id != type_id:
@@ -1117,7 +1302,7 @@ func _do_select_building(type_id: String) -> void:
 		var aim: Vector3 = b.global_position + Vector3(0, 1.5, 0)
 		if cam.is_position_behind(aim):
 			continue
-		game._pick_at(cam.unproject_position(aim))
+		_click_at(cam.unproject_position(aim))
 		if game.selected_building == b:
 			_note("selected %s by clicking it" % b.display_name())
 		else:
@@ -1128,10 +1313,12 @@ func _do_select_building(type_id: String) -> void:
 	_fail("select_building: no %s on the map" % type_id)
 
 
-## Click on the centre of every building, through the real input path, and
-## report what got selected. Verifies the whole chain: world position ->
-## screen projection -> ray -> physics query -> selection.
+## Click on the centre of every building, through the game's input handler, and
+## report what got selected. Verifies the whole chain: world position -> screen
+## projection -> input handling -> ray -> physics query -> selection.
 func _do_pick_test() -> void:
+	if _needs_real_viewport("pick_test"):
+		return
 	var cam: Camera3D = game.camera.camera()
 	var hits := 0
 	var misses: Array[String] = []
@@ -1140,7 +1327,7 @@ func _do_pick_test() -> void:
 		if cam.is_position_behind(aim):
 			continue
 		var screen: Vector2 = cam.unproject_position(aim)
-		game._pick_at(screen)
+		_click_at(screen)
 		if game.selected_building == b:
 			hits += 1
 		elif game.selected_building != null:

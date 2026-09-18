@@ -9,7 +9,7 @@ extends Node3D
 ## animated procedurally by rotating the limb pivots the Blender export
 ## provides — no armature, no imported clips.
 
-enum State { IDLE, TRAVELLING, WORKING, ARRIVING }
+enum State { IDLE, TRAVELLING, WORKING, ARRIVING, EATING, SLEEPING }
 
 const STUCK_LIMIT := 4.0
 
@@ -25,8 +25,24 @@ var age: int = 24
 
 var carrying_res: int = -1
 var carrying_amount: float = 0.0
+## 0 is fed, 1 is starving. Rises only once a meal has actually fallen due, so
+## a citizen who eats on time sits at zero rather than drifting upward.
 var hunger: float = 0.0
+## The absolute day on which the next meal falls due. Absolute rather than a
+## time of day so it crosses midnight, survives a save, and needs no special
+## casing when the calendar is set from a file.
+var next_meal: float = 0.0
+## Meals this citizen has actually sat down to, for the record and for the
+## interface. Not load-bearing.
+var meals_taken := 0
+## Set when a meal errand found no food anywhere. Without it a starving march
+## would spend every tick walking to an empty granary and back, and the farmers
+## would never reap the crop that would have fed it.
+var meal_retry_at: float = 0.0
 var morale: float = 0.75
+## True while they are inside their own house for the night: hidden, and not
+## clickable, because a person indoors is not on the map to be selected.
+var indoors := false
 
 var state: int = State.IDLE
 var job: JobBoard.Job = null
@@ -120,6 +136,10 @@ func apply_state(entry: Dictionary, registry: AssetRegistry = null) -> void:
 	home_id = int(entry.get("home_id", -1))
 	workplace_id = int(entry.get("workplace_id", -1))
 	hunger = float(entry.get("hunger", 0.0))
+	# A save written before meals existed has no schedule in it; leaving
+	# next_meal at zero would have every restored citizen owed a meal at once.
+	next_meal = float(entry.get("next_meal", next_meal))
+	meals_taken = int(entry.get("meals_taken", 0))
 	morale = float(entry.get("morale", 0.75))
 
 	if immigrant:
@@ -429,6 +449,37 @@ func face_towards(target: Vector3) -> void:
 
 func has_cart() -> bool:
 	return wear_rate_override > 0.0
+
+
+## Go inside for the night, or come back out. Hiding the node takes the visual
+## with it; the pick body has to be told separately, or the settlement would be
+## full of invisible people who could still be clicked on.
+func set_indoors(value: bool) -> void:
+	if indoors == value:
+		return
+	indoors = value
+	visible = not value
+	if _body != null and is_instance_valid(_body):
+		_body.collision_layer = 0 if value else 4
+
+
+## Hunger rises only after a meal has been missed, and reaches starving after
+## Config.STARVE_DAYS. `day` is the simulation's own day counter.
+func update_hunger(day: float, delta_days: float) -> void:
+	if day <= next_meal:
+		return
+	hunger = minf(1.0, hunger + delta_days / Config.STARVE_DAYS)
+
+
+## Sit down to a meal: clears the hunger and books the next one.
+func take_meal(day: float) -> void:
+	meals_taken += 1
+	hunger = 0.0
+	next_meal = Config.next_meal_after(day)
+
+
+func is_hungry(day: float) -> bool:
+	return day >= next_meal
 
 
 func status_line() -> String:

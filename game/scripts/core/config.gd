@@ -152,6 +152,57 @@ const START_CITIZENS := 20
 const WORK_TICKS_PER_UNIT := 1.15   # in-game seconds to gather one unit
 const HUNGER_PER_DAY := 1.0         # food eaten per citizen per day
 
+## Meals, sleep and the household larder (design doc 9.1).
+##
+## Food is not drawn from a settlement-wide pool. A household keeps a larder,
+## somebody has to physically carry food home to fill it, and each citizen sits
+## down to eat twice a day. The totals are unchanged — two meals of MEAL_FOOD
+## is still HUNGER_PER_DAY — so this changes where the food has to *be*, not
+## how much of it the march gets through.
+const MEALS_PER_DAY := 2
+## When the household eats, as a fraction of the day: a little after dawn, and
+## again before dark. Kept apart from the sleeping hours on purpose, so nobody
+## has to choose between supper and bed.
+const MEAL_TIMES: Array[float] = [0.30, 0.78]
+const MEAL_FOOD := HUNGER_PER_DAY / float(MEALS_PER_DAY)
+## Days of food a household will keep in, and therefore how often somebody has
+## to walk to a granary. One trip carries a full larder for a four-person
+## house, which is what keeps this from swamping the job board.
+const LARDER_DAYS := 3.0
+## How long a missed meal takes to become starvation.
+const STARVE_DAYS := 2.5
+## Hunger past this and a citizen drops what they are doing to go and eat.
+const HUNGER_URGENT := 0.45
+## How long a citizen who found no food waits before trying again.
+const MEAL_RETRY_DAYS := 0.06
+
+## Night. Citizens walk home and go inside; the settlement sleeps. The hours
+## are deliberately not symmetrical about midnight — the march rises early.
+const SLEEP_FROM := 0.88            # 21:07
+const SLEEP_UNTIL := 0.22           # 05:17
+## How far a citizen will walk home to sleep. Beyond this they bed down where
+## they are: a woodcutter working the far woods camps out rather than walking
+## two hundred metres home at dusk and two hundred metres back at dawn, which
+## costs more of the day than the work itself.
+const SLEEP_WALK_MAX := 70.0
+
+
+## Whether `fraction` of a day falls in the small hours.
+static func is_night(fraction: float) -> bool:
+	var t := fposmod(fraction, 1.0)
+	return t >= SLEEP_FROM or t < SLEEP_UNTIL
+
+
+## The next time a meal falls due, as an absolute day, given the day it is now.
+## Absolute rather than a fraction so it survives midnight and a save without
+## any special casing.
+static func next_meal_after(day: float) -> float:
+	var whole := floorf(day)
+	for t in MEAL_TIMES:
+		if day < whole + t:
+			return whole + t
+	return whole + 1.0 + MEAL_TIMES[0]
+
 # --- Economy ---------------------------------------------------------------
 
 enum Res { FOOD, TIMBER, STONE, IRON, TOOLS }
