@@ -11,21 +11,54 @@ extends RefCounted
 ## historical is the part the player made: the wear ground into the soil, what
 ## has been built and how far, who lives here, and what is in the stores.
 ##
-## **Save state, not schedules.** Jobs, reservations and claimed haulage are
-## not written. They are a cache of decisions the simulation makes afresh every
-## tick, and a half-finished delivery reconstructed from a file is a source of
-## phantom reservations rather than continuity. On load everyone stands idle
-## for one tick and the job board refills from the same rota that filled it
-## before. A hauler loses the leg they were walking; nothing else changes.
+## **Save state, not local job schedules.** Local jobs and claimed haulage are
+## rebuilt on load; their carried goods remain on the citizens. Caravan phases,
+## identities, cargo and stock promises are persistent orders and are restored
+## explicitly. Bridge deliveries and lost-cart recovery orders likewise survive,
+## while their transient worker assignments are rebuilt.
 ##
 ## The file is Godot's own binary variant format, zstd-compressed. The wear
-## field alone is 147k floats, and a JSON save would spend most of its size
-## base64-encoding it.
+## field grows with the chosen map size, so its packed arrays stay binary.
 
 const VERSION := 1
 const DIR := "user://saves"
 const EXTENSION := "sav"
 const QUICK_SLOT := "quicksave"
+const Validation = preload("res://scripts/core/save_validation.gd")
+
+## A replacement march lives here until it has been checked and restored.
+## Its own 3D world keeps lighting and physics out of the active viewport.
+class RestoreState:
+	extends SubViewport
+	var registry: AssetRegistry
+	var world: World
+	var sim: Simulation
+	var clock := Clock.new()
+
+
+static func validate(data: Variant, registry: AssetRegistry = null) -> String:
+	return Validation.validate(migrate(data), registry, VERSION)
+
+
+## Five-resource version-one saves predate hides and leather. Migrate only
+## that known layout, leaving malformed modern arrays for validation to reject.
+static func migrate(data: Variant) -> Variant:
+	if not data is Dictionary or data.has("resource_layout"):
+		return data
+	var upgraded: Dictionary = data.duplicate(true)
+	upgraded["resource_layout"] = 2
+	var records: Array = []
+	if upgraded.get("buildings") is Array:
+		records.append_array(upgraded.buildings)
+	if upgraded.get("campaign") is Dictionary and upgraded.campaign.get("buildings") is Array:
+		records.append_array(upgraded.campaign.buildings)
+	for record in records:
+		if record is Dictionary and record.get("inventory") is PackedFloat32Array \
+				and record.inventory.size() == 5:
+			var inventory: PackedFloat32Array = record.inventory
+			inventory.resize(Config.RES_COUNT)
+			record.inventory = inventory
+	return upgraded
 
 static func slot_path(slot: String) -> String:
 	return "%s/%s.%s" % [DIR, _sanitise(slot), EXTENSION]
@@ -70,6 +103,10 @@ static func list_slots() -> Array[String]:
 ##     instant with no save at all. The old one is moved aside to `.prev` and
 ##     only deleted once the replacement is in place; `read` recovers from it.
 static func write(game: Node, slot: String) -> String:
+	var snapshot := capture(game)
+	var invalid := validate(snapshot, game.registry)
+	if invalid != "":
+		return "could not save: " + invalid
 	DirAccess.make_dir_recursive_absolute(DIR)
 	var path := slot_path(slot)
 	var temp := path + ".part"
@@ -79,7 +116,7 @@ static func write(game: Node, slot: String) -> String:
 	if file == null:
 		return "could not write %s (%s)" % [
 				temp, error_string(FileAccess.get_open_error())]
-	var stored := file.store_var(capture(game), true)
+	var stored := file.store_var(snapshot, false)
 	file.close()
 	if not stored:
 		DirAccess.remove_absolute(temp)
@@ -97,10 +134,9 @@ static func write(game: Node, slot: String) -> String:
 		DirAccess.remove_absolute(temp)
 		return "wrote %s but could not read it back (%s)" % [
 				temp, error_string(FileAccess.get_open_error())]
-	var round_trip: Variant = check.get_var(true)
+	var round_trip: Variant = check.get_var(false)
 	check.close()
-	if typeof(round_trip) != TYPE_DICTIONARY or int((round_trip as Dictionary)
-			.get("version", -1)) != VERSION:
+	if validate(round_trip, game.registry) != "" or round_trip != snapshot:
 		DirAccess.remove_absolute(temp)
 		return "wrote %s but it did not read back whole; the previous save " \
 				% path + "is untouched"
@@ -150,12 +186,21 @@ static func capture(game: Node) -> Dictionary:
 
 	return {
 		"version": VERSION,
+		"resource_layout": 2,
 		"seed": world.world_seed,
+		"world_settings": world.generation_settings.duplicate(),
 		"saved_at": Time.get_datetime_string_from_system(true),
 		"day": sim.day,
 		"elapsed_days": clock.elapsed_days,
 		"day_marker": sim.day_marker(),
 		"speed_index": clock.speed_index,
+		"speed_layout": 2,
+		"resume_speed_index": clock.resume_speed_index(),
+		"research": sim.research.capture(),
+		"campaign": sim.campaign.capture() if sim.campaign != null else {},
+		"husbandry": sim.husbandry.capture() if sim.husbandry != null else {},
+		"trade": sim.trade.capture() if sim.trade != null else {},
+		"bridges": sim.bridges.capture() if sim.bridges != null else {},
 		"next_building_id": sim.next_building_id(),
 		"next_citizen_id": sim.next_citizen_id(),
 		"terrain_edits": world.heightmap.capture(),
@@ -190,6 +235,9 @@ static func _capture_building(b: Building) -> Dictionary:
 		# granary the moment it loaded.
 		"larder": b.larder,
 		"crop_growth": b.crop_growth,
+		"market_stock_target": b.market_stock_target,
+		"health": b.health,
+		"fire": b.fire,
 		"workers": b.workers.duplicate(),
 		"residents": b.residents.duplicate(),
 		# The plot layout, not just the count: see Building.adopt_plots.
@@ -198,7 +246,7 @@ static func _capture_building(b: Building) -> Dictionary:
 
 
 static func _capture_citizen(c: Citizen) -> Dictionary:
-	return {
+	var record := {
 		"id": c.id,
 		"name": c.given_name,
 		"asset_id": c.asset_id,
@@ -221,6 +269,10 @@ static func _capture_citizen(c: Citizen) -> Dictionary:
 		"meals_taken": c.meals_taken,
 		"morale": c.morale,
 	}
+	if c is Soldier:
+		record["body"] = c.capture_body()
+		record["veteran_rations"] = c.rations
+	return record
 
 
 # ---------------------------------------------------------------------------
@@ -254,19 +306,13 @@ static func read(slot: String, problem: Array[String] = []) -> Dictionary:
 		problem.append("could not read %s (%s)" % [
 				path, error_string(FileAccess.get_open_error())])
 		return {}
-	var data: Variant = file.get_var(true)
+	# Saves contain only values. Never instantiate objects from a save file.
+	var data: Variant = file.get_var(false)
 	file.close()
 
-	if typeof(data) != TYPE_DICTIONARY:
-		problem.append("%s is not a Marchlands save" % path)
-		return {}
-	var version := int(data.get("version", 0))
-	if version != VERSION:
-		# There is one version so far. When there are more this is where the
-		# upgrade path goes; refusing to guess is the honest behaviour until
-		# then, because a silently mis-read save loses a march.
-		problem.append("save is version %d, this build reads version %d"
-				% [version, VERSION])
+	var invalid := validate(data)
+	if invalid != "":
+		problem.append(invalid)
 		return {}
 	return data
 
@@ -278,8 +324,9 @@ static func read(slot: String, problem: Array[String] = []) -> Dictionary:
 ## Rebuild the settlement described by `data` into a freshly generated world.
 ##
 ## The caller is responsible for the world already matching `data["seed"]` —
-## Game does that by reloading the scene with the seed from the save.
-static func restore(game: Node, data: Dictionary) -> void:
+## Game does that in an isolated viewport before swapping in the replacement.
+static func restore(game: Node, data: Dictionary) -> String:
+	data = migrate(data)
 	var sim: Simulation = game.sim
 	var world: World = game.world
 	var clock: Clock = game.clock
@@ -288,7 +335,7 @@ static func restore(game: Node, data: Dictionary) -> void:
 	# Otherwise the first advance after loading sees the whole-day number jump
 	# from zero and announces a day change that did not happen.
 	clock.set_day_marker(floori(clock.elapsed_days))
-	clock.set_speed(int(data.get("speed_index", Config.NORMAL_SPEED)))
+	clock.restore_saved_speed(data)
 	sim.set_day(float(data.get("day", 0.0)))
 	# After `set_day`, which parks the marker on the restored day. The marker
 	# is how much of the current day has already been charged for; dropping it
@@ -301,7 +348,7 @@ static func restore(game: Node, data: Dictionary) -> void:
 	# them belong to buildings that were pulled down and are not coming back.
 	world.heightmap.apply_state(data.get("terrain_edits", []))
 	world.terrain.rebuild_region(world.centre(),
-			Config.WORLD_SIZE, Config.WORLD_SIZE)
+			world.size_m, world.size_m)
 
 	# The pathfinder is told about the restored roads by finish_restore, once
 	# every building has been placed: placing one flattens the ground under it,
@@ -312,13 +359,15 @@ static func restore(game: Node, data: Dictionary) -> void:
 	# it is mined out during play.
 	for rec in world.nodes.records:
 		if rec.kind != ResourceNodes.Kind.TREE:
-			var c := Config.world_to_cell(rec.position)
+			var c := world.world_to_cell(rec.position)
 			world.nav.set_blocked(c.x, c.y, not rec.depleted)
 
 	for entry in data.get("buildings", []):
-		_restore_building(sim, entry)
+		if not _restore_building(sim, entry):
+			return "could not restore building %d" % entry.id
 	for entry in data.get("citizens", []):
-		_restore_citizen(sim, entry)
+		if not _restore_citizen(sim, entry):
+			return "could not restore citizen %d" % entry.id
 
 	sim.set_next_ids(int(data.get("next_building_id", 1)),
 			int(data.get("next_citizen_id", 1)))
@@ -327,14 +376,36 @@ static func restore(game: Node, data: Dictionary) -> void:
 		var cart := Cart.new()
 		world.effects_root.add_child(cart)
 		var at: Vector3 = data.get("cart_position", world.centre())
-		at.y = world.heightmap.height_at(at.x, at.z)
 		cart.setup(game.registry, at)
 		sim.set_cart(cart)
 
+	var research_error: String = sim.research.restore(data.get("research", {}))
+	if research_error != "": return research_error
 	sim.finish_restore()
+	sim.campaign = FrontierCampaign.new()
+	sim.add_child(sim.campaign)
+	sim.campaign.setup(sim, world, game.registry)
+	var campaign_error: String = sim.campaign.restore(data.get("campaign", {}))
+	if campaign_error != "": return campaign_error
+	sim.husbandry = Husbandry.new()
+	sim.add_child(sim.husbandry)
+	sim.husbandry.setup(sim, world, game.registry)
+	var husbandry_error: String = sim.husbandry.restore(data.get("husbandry", {}))
+	if husbandry_error != "": return husbandry_error
+	sim.bridges = Bridges.new()
+	sim.add_child(sim.bridges)
+	sim.bridges.setup(sim, world, game.registry)
+	var bridge_error: String = sim.bridges.restore(data.get("bridges", {}))
+	if bridge_error != "": return bridge_error
+	sim.trade = TradeRoutes.new()
+	sim.add_child(sim.trade)
+	sim.trade.setup(sim, world, game.registry)
+	var trade_error: String = sim.trade.restore(data.get("trade", {}))
+	if trade_error != "": return trade_error
+	return ""
 
 
-static func _restore_building(sim: Simulation, entry: Dictionary) -> void:
+static func _restore_building(sim: Simulation, entry: Dictionary) -> bool:
 	# `instant` is what tells place_building to finish the structure, register
 	# it with the stores and lay out its fields — precisely the work a saved
 	# completed building needs done again.
@@ -343,17 +414,22 @@ static func _restore_building(sim: Simulation, entry: Dictionary) -> void:
 			float(entry["yaw"]), completed, String(entry.get("asset_id", "")),
 			int(entry.get("id", -1)), false, true)
 	if b == null:
-		return
+		return false
 	var plots: Array = entry.get("plots", [])
-	if not plots.is_empty():
+	if entry.has("plots"):
 		b.adopt_plots(plots, sim.world.heightmap, sim.world.nav, sim.registry)
 	b.apply_state(entry)
+	return true
 
 
-static func _restore_citizen(sim: Simulation, entry: Dictionary) -> void:
+static func _restore_citizen(sim: Simulation, entry: Dictionary) -> bool:
 	var c := sim.add_citizen(entry["position"],
 			bool(entry.get("immigrant", false)),
-			String(entry.get("asset_id", "")), int(entry.get("id", -1)))
+			String(entry.get("asset_id", "")), int(entry.get("id", -1)), entry.get("body", {}))
 	if c == null:
-		return
+		return false
+	c.position = entry["position"]
 	c.apply_state(entry, sim.registry)
+	if c is Soldier:
+		c.rations = float(entry.get("veteran_rations", 0.0))
+	return true

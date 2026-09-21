@@ -18,7 +18,13 @@ extends RefCounted
 
 signal road_levels_changed(cells: Array)
 
-const RES := Config.WEAR_RES
+const RES := Config.WEAR_RES # legacy callers
+var res := RES
+var grid_size := Config.GRID
+var world_size := Config.WORLD_SIZE
+const TILE_TEXELS := 96
+var _tiles: Dictionary = {}
+var _hm: Heightmap
 
 const NEIGHBOURS_4: Array[Vector2i] = [
 	Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
@@ -33,6 +39,18 @@ var wear := PackedFloat32Array()
 var locked := PackedByteArray()
 ## Cached road level per nav cell, so systems do not rescan the fine field.
 var nav_level := PackedByteArray()
+## Used-route connectivity changes invalidate a quote; ordinary extra traffic
+## does not change the already quoted cells or price.
+var route_revision := 0
+
+const SCOPE_FRACTIONS := {"busiest": 0.20, "local": 0.50, "all": 1.0}
+const COST_PER_M2 := {
+	Config.RoadLevel.WORN: {Config.Res.TIMBER: 0.005},
+	Config.RoadLevel.PATH: {Config.Res.TIMBER: 0.01, Config.Res.STONE: 0.005},
+	Config.RoadLevel.DIRT: {Config.Res.TIMBER: 0.015, Config.Res.STONE: 0.015},
+	Config.RoadLevel.IMPROVED: {Config.Res.TIMBER: 0.02, Config.Res.STONE: 0.03},
+	Config.RoadLevel.PAVED: {Config.Res.TIMBER: 0.01, Config.Res.STONE: 0.06},
+}
 
 var _image: Image
 var _texture: ImageTexture
@@ -60,13 +78,25 @@ var _last_upload_ms := 0
 
 
 func _init() -> void:
-	wear.resize(RES * RES)
-	locked.resize(RES * RES)
-	_is_active.resize(RES * RES)
-	_is_dirty_texel.resize(RES * RES)
-	_protected.resize(RES * RES)
-	nav_level.resize(Config.GRID * Config.GRID)
-	_image = Image.create(RES, RES, false, Image.FORMAT_RGBA8)
+	setup()
+
+
+func setup(size_m: float = Config.WORLD_SIZE) -> void:
+	world_size = size_m
+	grid_size = roundi(size_m / Config.CELL)
+	res = grid_size * Config.WEAR_SCALE
+	_tiles.clear()
+	_active.clear()
+	_touched_cells.clear()
+	_dirty_texels.clear()
+	wear.resize(res * res)
+	locked.resize(res * res)
+	_is_active.resize(res * res)
+	_is_dirty_texel.resize(res * res)
+	_protected.resize(res * res)
+	nav_level.resize(grid_size * grid_size)
+	var image_res := res if grid_size == Config.GRID else 1
+	_image = Image.create(image_res, image_res, false, Image.FORMAT_RGBA8)
 	_image.fill(Color(0, 0, 0, 0))
 	_pixels = _image.get_data()
 	_texture = ImageTexture.create_from_image(_image)
@@ -79,17 +109,22 @@ func texture() -> ImageTexture:
 ## Bake static per-cell data the shader wants (fertility) into the green
 ## channel once at startup.
 func bake_fertility(hm: Heightmap) -> void:
-	for y in RES:
-		for x in RES:
+	_hm = hm
+	if grid_size > Config.GRID:
+		return
+	for y in res:
+		for x in res:
 			var cx := x / Config.WEAR_SCALE
 			var cz := y / Config.WEAR_SCALE
-			_pixels[(y * RES + x) * 4 + 1] = int(
+			_pixels[(y * res + x) * 4 + 1] = int(
 					clampf(hm.cell_fertility(cx, cz), 0.0, 1.0) * 255.0)
 	_upload()
 
 
 func _upload() -> void:
-	_image.set_data(RES, RES, false, Image.FORMAT_RGBA8, _pixels)
+	if grid_size > Config.GRID:
+		return
+	_image.set_data(res, res, false, Image.FORMAT_RGBA8, _pixels)
 	_texture.update(_image)
 
 
@@ -123,9 +158,9 @@ func stamp_point(wx: float, wz: float, amount: float, radius: float) -> void:
 	var fz := wz / Config.WEAR_CELL
 	var r := radius / Config.WEAR_CELL
 	var x0 := maxi(0, int(floor(fx - r)))
-	var x1 := mini(RES - 1, int(ceil(fx + r)))
+	var x1 := mini(res - 1, int(ceil(fx + r)))
 	var y0 := maxi(0, int(floor(fz - r)))
-	var y1 := mini(RES - 1, int(ceil(fz + r)))
+	var y1 := mini(res - 1, int(ceil(fz + r)))
 	if x0 > x1 or y0 > y1:
 		return
 
@@ -139,10 +174,13 @@ func stamp_point(wx: float, wz: float, amount: float, radius: float) -> void:
 				continue
 			# Soft falloff: the centre of the track wears fastest.
 			var w := (1.0 - d2)
-			var idx := y * RES + x
+			var idx := y * res + x
 			if _protected[idx] != 0:
 				continue
+			var was_used := _used_route_texel(idx)
 			wear[idx] += amount * w * w
+			if was_used != _used_route_texel(idx):
+				route_revision += 1
 			if _is_active[idx] == 0:
 				_is_active[idx] = 1
 				_active.append(idx)
@@ -170,18 +208,21 @@ func stamp_point(wx: float, wz: float, amount: float, radius: float) -> void:
 func set_protected(centre: Vector3, half: float, value: bool,
 				   clear_existing: bool = true) -> void:
 	var x0 := maxi(0, int(floor((centre.x - half) / Config.WEAR_CELL)))
-	var x1 := mini(RES - 1, int(ceil((centre.x + half) / Config.WEAR_CELL)) - 1)
+	var x1 := mini(res - 1, int(ceil((centre.x + half) / Config.WEAR_CELL)) - 1)
 	var y0 := maxi(0, int(floor((centre.z - half) / Config.WEAR_CELL)))
-	var y1 := mini(RES - 1, int(ceil((centre.z + half) / Config.WEAR_CELL)) - 1)
+	var y1 := mini(res - 1, int(ceil((centre.z + half) / Config.WEAR_CELL)) - 1)
 	if x0 > x1 or y0 > y1:
 		return
 	for y in range(y0, y1 + 1):
 		for x in range(x0, x1 + 1):
-			var idx := y * RES + x
+			var idx := y * res + x
+			if bool(_protected[idx]) != value:
+				route_revision += 1
 			_protected[idx] = 1 if value else 0
-			if value and clear_existing and wear[idx] > 0.0:
+			if value and clear_existing and (wear[idx] > 0.0 or locked[idx] > 0):
 				# Clear whatever track had already formed here.
 				wear[idx] = 0.0
+				locked[idx] = 0
 				_mark_texel(idx)
 				_touched_cells[Vector2i(x / Config.WEAR_SCALE,
 						y / Config.WEAR_SCALE)] = true
@@ -197,26 +238,33 @@ func _mark_texel(idx: int) -> void:
 # --- Queries ----------------------------------------------------------------
 
 func wear_at_texel(x: int, y: int) -> float:
-	if x < 0 or y < 0 or x >= RES or y >= RES:
+	if x < 0 or y < 0 or x >= res or y >= res:
 		return 0.0
-	return wear[y * RES + x]
+	return wear[y * res + x]
 
 
 func wear_at(wx: float, wz: float) -> float:
-	var x := clampi(int(wx / Config.WEAR_CELL), 0, RES - 1)
-	var y := clampi(int(wz / Config.WEAR_CELL), 0, RES - 1)
-	return wear[y * RES + x]
+	var x := clampi(int(wx / Config.WEAR_CELL), 0, res - 1)
+	var y := clampi(int(wz / Config.WEAR_CELL), 0, res - 1)
+	return wear[y * res + x]
 
 
 ## Road level under a world position — what a mover's speed is scaled by.
 func road_level_at(wx: float, wz: float) -> int:
-	return Config.road_level_for_wear(wear_at(wx, wz))
+	var x := clampi(int(wx / Config.WEAR_CELL), 0, res - 1)
+	var y := clampi(int(wz / Config.WEAR_CELL), 0, res - 1)
+	return _level_at_index(y * res + x)
+
+
+func _level_at_index(index: int) -> int:
+	return maxi(locked[index], mini(Config.RoadLevel.DIRT,
+			Config.road_level_for_wear(wear[index])))
 
 
 func road_level_of_cell(cx: int, cz: int) -> int:
-	if cx < 0 or cz < 0 or cx >= Config.GRID or cz >= Config.GRID:
+	if cx < 0 or cz < 0 or cx >= grid_size or cz >= grid_size:
 		return Config.RoadLevel.NATURAL
-	return nav_level[cz * Config.GRID + cx]
+	return nav_level[cz * grid_size + cx]
 
 
 ## The road level a cell *should* be at, worked out from the wear field itself
@@ -226,9 +274,13 @@ func road_level_of_cell(cx: int, cz: int) -> int:
 ## is the right answer to ask during play and the wrong one to check the cache
 ## against. This is the independent measurement.
 func level_from_wear(cx: int, cz: int) -> int:
-	if cx < 0 or cz < 0 or cx >= Config.GRID or cz >= Config.GRID:
+	if cx < 0 or cz < 0 or cx >= grid_size or cz >= grid_size:
 		return Config.RoadLevel.NATURAL
-	return Config.road_level_for_wear(peak_wear_in_cell(cx, cz))
+	var best := Config.RoadLevel.NATURAL
+	for y in range(cz * Config.WEAR_SCALE, (cz + 1) * Config.WEAR_SCALE):
+		for x in range(cx * Config.WEAR_SCALE, (cx + 1) * Config.WEAR_SCALE):
+			best = maxi(best, _level_at_index(y * res + x))
+	return best
 
 
 ## Strongest wear anywhere under a nav cell. Nav costs use the best surface in
@@ -239,7 +291,7 @@ func peak_wear_in_cell(cx: int, cz: int) -> float:
 	var by := cz * Config.WEAR_SCALE
 	for y in range(by, by + Config.WEAR_SCALE):
 		for x in range(bx, bx + Config.WEAR_SCALE):
-			best = maxf(best, wear[y * RES + x])
+			best = maxf(best, wear[y * res + x])
 	return best
 
 
@@ -249,95 +301,199 @@ func speed_multiplier_at(wx: float, wz: float) -> float:
 
 # --- Player intervention (design doc 7.3) -----------------------------------
 
-## Raise every cell in the route cluster containing `origin` to `level`, and
-## lock it there. Returns the number of texels changed.
-##
-## Only ground that already carries a path is eligible, which is what makes
-## organic routes cheaper than commissioning a road from nothing: the player
-## is paying to improve a route the settlement has already proven it wants.
-func upgrade_route(origin: Vector3, level: int, max_texels: int = 20000) -> int:
-	var start := Vector2i(
-		clampi(int(origin.x / Config.WEAR_CELL), 0, RES - 1),
-		clampi(int(origin.z / Config.WEAR_CELL), 0, RES - 1)
-	)
-	# Follow the route, not the trampled ground around it. The fill is limited
-	# to ground at least as well used as the spot the player picked, so
-	# upgrading a track through a settlement improves the track rather than
-	# paving the whole village green.
-	var from_level := Config.road_level_for_wear(
-			wear[start.y * RES + start.x])
-	if from_level < Config.RoadLevel.WORN:
-		return 0
-	var min_wear: float = Config.ROAD_THRESHOLD[from_level] * 0.92
-
-	var target: float = Config.ROAD_THRESHOLD[level] * 1.04
-	var seen := {}
-	var queue: Array[Vector2i] = [start]
-	seen[start] = true
-	var changed := 0
-
-	while not queue.is_empty() and changed < max_texels:
-		var p: Vector2i = queue.pop_front()
-		var idx := p.y * RES + p.x
-		if wear[idx] < target:
-			wear[idx] = target
-		locked[idx] = maxi(locked[idx], level)
-		if _is_active[idx] == 0:
-			_is_active[idx] = 1
-			_active.append(idx)
-		_mark_texel(idx)
-		_touched_cells[Vector2i(p.x / Config.WEAR_SCALE,
-				p.y / Config.WEAR_SCALE)] = true
-		changed += 1
-
-		for d in NEIGHBOURS_8:
-			var q: Vector2i = p + d
-			if q.x < 0 or q.y < 0 or q.x >= RES or q.y >= RES:
-				continue
-			if seen.has(q):
-				continue
-			if wear[q.y * RES + q.x] < min_wear:
-				continue
-			seen[q] = true
-			queue.push_back(q)
-
-	# Deliberately does NOT call refresh_levels(): that clears the touched-cell
-	# set, so the caller's own refresh returned nothing and the navigation
-	# graph never learned about the new road. Paying to upgrade a route looked
-	# like it worked and changed nothing about where people walked.
-	return changed
+## Quote a connected portion of the used network. All scopes start at its
+## busiest texel and expand through adjacent traffic, making the 20%, 50% and
+## 100% selections nested without disconnected islands. Existing surfaces are
+## traversed as connectors but only cells whose surface improves are charged.
+func preview_upgrade(origin: Vector3, level: int, scope: String = "all") -> Dictionary:
+	var result := {"cells": PackedInt32Array(), "route_cells": PackedInt32Array(),
+		"count": 0, "area_m2": 0.0, "cost": {}, "level": level, "scope": scope,
+		"network_count": 0, "route_revision": route_revision,
+		"previous_locked": PackedByteArray(), "error": ""}
+	if not SCOPE_FRACTIONS.has(scope) or not COST_PER_M2.has(level):
+		result.error = "Invalid road scope or surface"
+		return result
+	if not origin.is_finite() or origin.x < 0.0 or origin.z < 0.0 \
+			or origin.x >= world_size or origin.z >= world_size:
+		result.error = "Select a used route inside the map"
+		return result
+	var start := int(origin.z / Config.WEAR_CELL) * res + int(origin.x / Config.WEAR_CELL)
+	var network := _route_network(start)
+	result.network_count = network.size()
+	if network.is_empty():
+		result.error = "Select a used route"
+		return result
+	var wanted := maxi(1, ceili(network.size() * float(SCOPE_FRACTIONS[scope])))
+	var selected := network if wanted == network.size() else _busiest_connected(network, wanted)
+	result.route_cells = selected
+	var changed := PackedInt32Array()
+	var previous := PackedByteArray()
+	for index in selected:
+		if _level_at_index(index) >= level:
+			continue
+		changed.append(index)
+		previous.append(locked[index])
+	result.cells = changed
+	result.previous_locked = previous
+	result.count = changed.size()
+	result.area_m2 = changed.size() * Config.WEAR_CELL * Config.WEAR_CELL
+	result.cost = _upgrade_cost(level, result.area_m2)
+	return result
 
 
-## Preview which texels an upgrade would touch, without changing anything.
-##
-## Walks with the same eight-neighbour connectivity `upgrade_route` fills with.
-## Walking four while the fill walked eight meant the panel quoted an extent
-## systematically smaller than the stretch the player was about to pay for.
-func route_extent(origin: Vector3, max_texels: int = 20000) -> int:
-	var start := Vector2i(
-		clampi(int(origin.x / Config.WEAR_CELL), 0, RES - 1),
-		clampi(int(origin.z / Config.WEAR_CELL), 0, RES - 1)
-	)
-	var from_level := Config.road_level_for_wear(
-			wear[start.y * RES + start.x])
-	if from_level < Config.RoadLevel.WORN:
-		return 0
-	var min_wear: float = Config.ROAD_THRESHOLD[from_level] * 0.92
+func _used_route_texel(index: int) -> bool:
+	return _protected[index] == 0 and (wear[index] >= Config.ROAD_THRESHOLD[Config.RoadLevel.WORN]
+			or locked[index] > Config.RoadLevel.NATURAL)
+
+
+func _route_network(start: int) -> PackedInt32Array:
+	if not _used_route_texel(start):
+		return PackedInt32Array()
+	var queue := PackedInt32Array([start])
 	var seen := {start: true}
-	var queue: Array[Vector2i] = [start]
-	var count := 0
-	while not queue.is_empty() and count < max_texels:
-		var p: Vector2i = queue.pop_front()
-		count += 1
-		for d in NEIGHBOURS_8:
-			var q: Vector2i = p + d
-			if q.x < 0 or q.y < 0 or q.x >= RES or q.y >= RES:
+	var head := 0
+	while head < queue.size():
+		var index := queue[head]
+		head += 1
+		var x := index % res
+		var y := index / res
+		for direction in NEIGHBOURS_8:
+			var q := Vector2i(x, y) + direction
+			if q.x < 0 or q.y < 0 or q.x >= res or q.y >= res:
 				continue
-			if seen.has(q) or wear[q.y * RES + q.x] < min_wear:
+			var next := q.y * res + q.x
+			if seen.has(next) or not _used_route_texel(next):
 				continue
-			seen[q] = true
-			queue.push_back(q)
-	return count
+			seen[next] = 1
+			queue.append(next)
+	return queue
+
+
+func _busiest_connected(network: PackedInt32Array, wanted: int) -> PackedInt32Array:
+	var strongest := network[0]
+	for index in network:
+		if _busier(index, strongest):
+			strongest = index
+	var queued := {strongest: true}
+	var frontier: Array[int] = [strongest]
+	var selected := PackedInt32Array()
+	while selected.size() < wanted and not frontier.is_empty():
+		var index := _pop_busiest(frontier)
+		selected.append(index)
+		var x := index % res
+		var y := index / res
+		for direction in NEIGHBOURS_8:
+			var q := Vector2i(x, y) + direction
+			if q.x < 0 or q.y < 0 or q.x >= res or q.y >= res:
+				continue
+			var next := q.y * res + q.x
+			if queued.has(next) or not _used_route_texel(next):
+				continue
+			queued[next] = 1
+			_push_busiest(frontier, next)
+	return selected
+
+
+func _busier(a: int, b: int) -> bool:
+	return wear[a] > wear[b] or (wear[a] == wear[b] and a < b)
+
+
+func _push_busiest(heap: Array[int], index: int) -> void:
+	heap.append(index)
+	var at := heap.size() - 1
+	while at > 0:
+		var parent := (at - 1) / 2
+		if not _busier(heap[at], heap[parent]):
+			break
+		var swap := heap[parent]
+		heap[parent] = heap[at]
+		heap[at] = swap
+		at = parent
+
+
+func _pop_busiest(heap: Array[int]) -> int:
+	var answer := heap[0]
+	var last: int = heap.pop_back()
+	if heap.is_empty():
+		return answer
+	heap[0] = last
+	var at := 0
+	while at * 2 + 1 < heap.size():
+		var child := at * 2 + 1
+		if child + 1 < heap.size() and _busier(heap[child + 1], heap[child]):
+			child += 1
+		if not _busier(heap[child], heap[at]):
+			break
+		var swap := heap[at]
+		heap[at] = heap[child]
+		heap[child] = swap
+		at = child
+	return answer
+
+
+func _upgrade_cost(level: int, area_m2: float) -> Dictionary:
+	var cost := {}
+	if area_m2 <= 0.0:
+		return cost
+	for resource in COST_PER_M2[level]:
+		cost[resource] = ceili(area_m2 * float(COST_PER_M2[level][resource]))
+	return cost
+
+
+## Validate before charging. Apply validates again, then changes exactly the
+## quoted cells. Traffic may increase while a confirmation panel is open, but
+## changed connectivity, protection, or paid surfaces require a fresh quote.
+func validate_upgrade(proposal: Dictionary) -> String:
+	if proposal.get("error", "") != "":
+		return str(proposal.error)
+	if not SCOPE_FRACTIONS.has(proposal.get("scope")) or not COST_PER_M2.has(proposal.get("level")):
+		return "Invalid road proposal"
+	if proposal.get("route_revision", -1) != route_revision:
+		return "The route changed; review a fresh quote"
+	var cells: Variant = proposal.get("cells")
+	var previous: Variant = proposal.get("previous_locked")
+	if not cells is PackedInt32Array or not previous is PackedByteArray \
+			or cells.size() != previous.size() or proposal.get("count", -1) != cells.size():
+		return "Invalid road cells"
+	var area: float = cells.size() * Config.WEAR_CELL * Config.WEAR_CELL
+	if proposal.get("area_m2", -1.0) != area \
+			or proposal.get("cost", {}) != _upgrade_cost(proposal.level, area):
+		return "The road cost does not match its area"
+	var seen := {}
+	for i in cells.size():
+		var index: int = cells[i]
+		if index < 0 or index >= wear.size() or seen.has(index):
+			return "Invalid or repeated road cell"
+		seen[index] = true
+		if not _used_route_texel(index) or locked[index] != previous[i] \
+				or _level_at_index(index) >= int(proposal.level):
+			return "The road surface changed; review a fresh quote"
+	return ""
+
+
+func apply_upgrade(proposal: Dictionary) -> int:
+	if validate_upgrade(proposal) != "":
+		return 0
+	for index in proposal.cells:
+		locked[index] = proposal.level
+		if _is_active[index] == 0:
+			_is_active[index] = 1
+			_active.append(index)
+		_mark_texel(index)
+		_touched_cells[Vector2i((index % res) / Config.WEAR_SCALE,
+				(index / res) / Config.WEAR_SCALE)] = true
+	# The caller refreshes once and hands the changed cells to navigation.
+	return proposal.cells.size()
+
+
+## Compatibility for callers commissioning the complete network. Limits used
+## to make the 6,000-cell preview differ from the 20,000-cell paid operation.
+func upgrade_route(origin: Vector3, level: int, _max_texels: int = 0) -> int:
+	return apply_upgrade(preview_upgrade(origin, level, "all"))
+
+
+func route_extent(origin: Vector3, _max_texels: int = 0) -> int:
+	return int(preview_upgrade(origin, Config.RoadLevel.PAVED, "all").network_count)
 
 
 # --- Per-tick maintenance ---------------------------------------------------
@@ -353,21 +509,19 @@ func decay(in_game_days: float) -> void:
 		var w := wear[i]
 		if w <= 0.0:
 			continue
-		var lock_level := locked[i]
-		var floor_wear: float = (Config.ROAD_THRESHOLD[lock_level]
-				if lock_level > 0 else 0.0)
-		if w <= floor_wear:
-			continue
-		var level := Config.road_level_for_wear(w)
+		var level := mini(Config.RoadLevel.DIRT, Config.road_level_for_wear(w))
 		var scale: float = maxf(Config.ROAD_THRESHOLD[level], 100.0)
-		var new_w: float = maxf(floor_wear,
+		var new_w: float = maxf(0.0,
 				w - scale * Config.WEAR_DECAY_PER_DAY * in_game_days)
 		if new_w == w:
 			continue
+		var was_used := _used_route_texel(i)
 		wear[i] = new_w
+		if was_used != _used_route_texel(i):
+			route_revision += 1
 		_mark_texel(i)
-		_touched_cells[Vector2i((i % RES) / Config.WEAR_SCALE,
-				(i / RES) / Config.WEAR_SCALE)] = true
+		_touched_cells[Vector2i((i % res) / Config.WEAR_SCALE,
+				(i / res) / Config.WEAR_SCALE)] = true
 
 	Perf.count("wear.active", _active.size())
 	Perf.end("wear.decay")
@@ -382,8 +536,8 @@ func refresh_levels() -> Array:
 	var changed: Array = []
 	for cell in _touched_cells:
 		var c: Vector2i = cell
-		var idx: int = c.y * Config.GRID + c.x
-		var level := Config.road_level_for_wear(peak_wear_in_cell(c.x, c.y))
+		var idx: int = c.y * grid_size + c.x
+		var level := level_from_wear(c.x, c.y)
 		if nav_level[idx] != level:
 			nav_level[idx] = level
 			changed.append(c)
@@ -437,7 +591,9 @@ func apply_state(data: Dictionary) -> Array:
 			# session but is bare in the save would otherwise never be
 			# rewritten, and the terrain would keep drawing a road that no
 			# longer exists in either the wear field or the nav graph.
-			_mark_texel(i)
+			if grid_size == Config.GRID:
+				_mark_texel(i)
+	_rebake_tiles()
 	var changed := rebuild_all_levels()
 	flush_texture(true)
 	return changed
@@ -446,11 +602,19 @@ func apply_state(data: Dictionary) -> Array:
 ## Rebuild every nav cell's level from scratch. Only needed after a bulk edit
 ## that bypassed stamping, such as loading a save.
 func rebuild_all_levels() -> Array:
+	route_revision += 1
 	_touched_cells.clear()
-	for cz in Config.GRID:
-		for cx in Config.GRID:
-			_touched_cells[Vector2i(cx, cz)] = true
-	return refresh_levels()
+	var changed: Array = []
+	for cz in grid_size:
+		for cx in grid_size:
+			var index := cz * grid_size + cx
+			var level := level_from_wear(cx, cz)
+			if nav_level[index] != level:
+				nav_level[index] = level
+				changed.append(Vector2i(cx, cz))
+	if not changed.is_empty():
+		road_levels_changed.emit(changed)
+	return changed
 
 
 ## Push accumulated wear into the texture the terrain shader samples.
@@ -470,14 +634,90 @@ func flush_texture(force: bool = false) -> void:
 		_last_upload_ms = now
 
 	Perf.begin("wear.flush")
+	if grid_size > Config.GRID:
+		_flush_tiles()
+		Perf.end("wear.flush")
+		return
 	for idx in _dirty_texels:
 		# R is the continuous surface level, normalised to 0..1, so each stage
 		# of the road occupies an equal band in the shader.
-		_pixels[idx * 4] = int(
-				Config.road_level_continuous(wear[idx]) * (255.0 / 5.0))
+		var natural := minf(Config.RoadLevel.DIRT, Config.road_level_continuous(wear[idx]))
+		_pixels[idx * 4] = int(maxf(natural, locked[idx]) * (255.0 / 5.0))
 		_pixels[idx * 4 + 2] = int(locked[idx] * (255.0 / 5.0))
 		_is_dirty_texel[idx] = 0
 	Perf.count("wear.texels_flushed", _dirty_texels.size())
 	_dirty_texels.clear()
 	_upload()
 	Perf.end("wear.flush")
+
+
+## Large worlds upload only visible road tiles. Simulation remains at the
+## same two-metre resolution, and save data is independent of rendering.
+func tile_texture(tile: Vector2i) -> ImageTexture:
+	if _tiles.has(tile):
+		return _tiles[tile].texture
+	var size := TILE_TEXELS + 2 # one shared border texel for bilinear filtering
+	var pixels := PackedByteArray()
+	pixels.resize(size * size * 4)
+	for y in size:
+		for x in size:
+			var wx := clampi(tile.x * TILE_TEXELS + x - 1, 0, res - 1)
+			var wy := clampi(tile.y * TILE_TEXELS + y - 1, 0, res - 1)
+			var index := wy * res + wx
+			var dest := (y * size + x) * 4
+			var natural := minf(Config.RoadLevel.DIRT, Config.road_level_continuous(wear[index]))
+			pixels[dest] = int(maxf(natural, locked[index]) * 51.0)
+			pixels[dest + 2] = int(locked[index] * 51.0)
+			if _hm:
+				pixels[dest + 1] = int(_hm.cell_fertility(wx / Config.WEAR_SCALE, wy / Config.WEAR_SCALE) * 255.0)
+	var image := Image.create_from_data(size, size, false, Image.FORMAT_RGBA8, pixels)
+	var tex := ImageTexture.create_from_image(image)
+	_tiles[tile] = {"texture": tex, "image": image, "pixels": pixels}
+	return tex
+
+
+func release_tile(tile: Vector2i) -> void:
+	_tiles.erase(tile)
+
+
+func _flush_tiles() -> void:
+	var dirty := {}
+	var size := TILE_TEXELS + 2
+	for index in _dirty_texels:
+		var x := index % res
+		var y := index / res
+		var main_tile := Vector2i(x / TILE_TEXELS, y / TILE_TEXELS)
+		# Border pixels belong to both adjacent textures.
+		for dz in range(-1, 2):
+			for dx in range(-1, 2):
+				var tile := main_tile + Vector2i(dx, dz)
+				if not _tiles.has(tile):
+					continue
+				var local := Vector2i(x, y) - tile * TILE_TEXELS + Vector2i.ONE
+				if local.x < 0 or local.y < 0 or local.x >= size or local.y >= size:
+					continue
+				# Mutate the packed array in place through the dictionary;
+				# copying it to a local would trigger copy-on-write per stamp.
+				var dest := (local.y * size + local.x) * 4
+				var natural := minf(Config.RoadLevel.DIRT, Config.road_level_continuous(wear[index]))
+				_tiles[tile].pixels[dest] = int(maxf(natural, locked[index]) * 51.0)
+				_tiles[tile].pixels[dest + 2] = int(locked[index] * 51.0)
+				dirty[tile] = true
+		_is_dirty_texel[index] = 0
+	for tile in dirty:
+		var rec: Dictionary = _tiles[tile]
+		rec.image.set_data(size, size, false, Image.FORMAT_RGBA8, rec.pixels)
+		rec.texture.update(rec.image)
+	Perf.count("wear.texels_flushed", _dirty_texels.size())
+	_dirty_texels.clear()
+
+
+func _rebake_tiles() -> void:
+	# Existing terrain materials keep their texture objects during a load.
+	# Refill those objects, including texels which became empty in the save.
+	for tile in _tiles.keys():
+		var original: ImageTexture = _tiles[tile].texture
+		_tiles.erase(tile)
+		tile_texture(tile)
+		original.update(_tiles[tile].image)
+		_tiles[tile].texture = original

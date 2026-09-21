@@ -2,17 +2,17 @@
   "asset_id": "wood_cart",
   "category": "prop",
   "footprint_m": [
-    1.6,
-    3.4
+    2.4,
+    3.3
   ],
   "bounds_min": [
     -1.185,
-    -2.2177,
+    -1.6464,
     -0.02
   ],
   "bounds_max": [
     1.185,
-    1.075,
+    1.6464,
     1.08
   ],
   "height_m": 1.1,
@@ -27,17 +27,16 @@
     "lod2": 168
   },
   "triangle_budget": 900,
-  "has_collision": true,
   "parts": [],
   "attachments": {
     "att_worksite": [
       0.0,
-      -2.325,
+      -1.7536,
       0.0
     ],
     "att_stock_0": [
       0.0,
-      0.0,
+      0.5714,
       0.66
     ]
   }

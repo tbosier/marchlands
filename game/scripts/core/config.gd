@@ -11,6 +11,9 @@ extends RefCounted
 
 ## Side length of the playable world, in metres.
 const WORLD_SIZE := 768.0
+## Legacy defaults stay immutable: staged save worlds may have different sizes.
+const WORLD_SIZES := {"small": 768.0, "medium": 1536.0, "large": 3072.0, "extra_large": 6144.0}
+const GENERATION_VERSION := 2
 
 ## Simulation/navigation cell size. Terrain mesh vertices share this spacing.
 const CELL := 4.0
@@ -33,14 +36,12 @@ const MAX_BUILD_SLOPE := 0.42  # rise/run; steeper ground rejects buildings
 const DAY_LENGTH := 180.0
 const DAYS_PER_SEASON := 12
 
-## Time controls. The sub-1x rates exist for watching a single citizen make a
-## decision; 16x is for letting a settlement run while you wait for a road to
-## wear in. NORMAL_SPEED is the index the game starts at.
-const SPEEDS: Array[float] = [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 16.0]
+## Time controls. Simulation still advances in bounded steps at fast rates.
+const SPEEDS: Array[float] = [0.0, 1.0, 2.0, 4.0, 16.0, 32.0, 64.0]
 const SPEED_LABELS: Array[String] = [
-	"Paused", "0.25x", "0.5x", "1x", "2x", "4x", "16x",
+	"Paused", "1x", "2x", "4x", "16x", "32x", "64x",
 ]
-const NORMAL_SPEED := 3
+const NORMAL_SPEED := 1
 
 ## Above this rate the simulation is stepped in slices, so one frame's work
 ## never explodes just because the clock is running fast.
@@ -205,11 +206,11 @@ static func next_meal_after(day: float) -> float:
 
 # --- Economy ---------------------------------------------------------------
 
-enum Res { FOOD, TIMBER, STONE, IRON, TOOLS }
+enum Res { FOOD, TIMBER, STONE, IRON, TOOLS, HIDES, LEATHER }
 
 ## Display names, carried props and colours live in `Res`; this is only the
 ## count, because it sizes every per-resource array in the simulation.
-const RES_COUNT := 5
+const RES_COUNT := 7
 
 # --- Immigration (design doc 9.2) -----------------------------------------
 
@@ -247,6 +248,12 @@ const COLOR_PATH := Color(0.54, 0.45, 0.32)
 const COLOR_TRACK := Color(0.40, 0.34, 0.26)
 const COLOR_IMPROVED := Color(0.64, 0.59, 0.47)
 const COLOR_PAVED := Color(0.51, 0.50, 0.49)
+
+
+## Harvest yield can grow while a worker is walking to a plot. Posting reserves
+## harvest_load(1.0), so even a fully ripe load has somewhere to be deposited.
+static func harvest_load(growth: float) -> float:
+	return CARRY_CAPACITY * lerpf(0.6, 1.25, clampf(growth, 0.0, 1.0))
 
 
 static func world_to_cell(p: Vector3) -> Vector2i:

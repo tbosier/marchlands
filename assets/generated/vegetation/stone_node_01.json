@@ -21,11 +21,10 @@
   ],
   "triangles": {
     "lod0": 132,
-    "lod1": 52,
-    "lod2": 22
+    "lod1": 47,
+    "lod2": 11
   },
   "triangle_budget": 900,
-  "has_collision": true,
   "parts": [],
   "attachments": {
     "att_worksite": [

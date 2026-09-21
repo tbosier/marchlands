@@ -61,6 +61,12 @@ func _assign_work(buildings: Array[Building], citizens: Array[Citizen],
 		if c.immigrant:
 			continue
 		var place: Building = by_id.get(c.workplace_id)
+		if c.workability() <= 0.0:
+			if place != null:
+				place.workers.erase(c.id)
+			c.workplace_id = -1
+			c.profession = "injured resident"
+			continue
 		if place == null or place.under_construction \
 				or place.def.worker_slots <= 0 or not place.workers.has(c.id):
 			# Take them off the building's roll as well as out of their own

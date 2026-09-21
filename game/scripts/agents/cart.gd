@@ -44,7 +44,7 @@ func take(c: Citizen) -> void:
 	c.brush_override = Config.WEAR_BRUSH_CART
 
 
-func release(hm: Heightmap) -> void:
+func release(hm: Heightmap, world: World = null) -> void:
 	if carrier != null:
 		carrier.speed_modifier = 1.0
 		carrier.wear_rate_override = -1.0
@@ -54,24 +54,24 @@ func release(hm: Heightmap) -> void:
 	# Left where it was last used, which is exactly where the next hauler
 	# wants it — carts accumulate at busy places, as they should.
 	parked_at = global_position
-	parked_at.y = hm.height_at(parked_at.x, parked_at.z)
+	parked_at.y = world.surface_height_at(parked_at.x, parked_at.z) if world != null else hm.height_at(parked_at.x, parked_at.z)
 	global_position = parked_at
 
 
 ## Trail behind the carrier, matching their heading.
-func follow(hm: Heightmap, delta: float) -> void:
+func follow(hm: Heightmap, delta: float, world: World = null) -> void:
 	if carrier == null:
 		return
 	var heading := carrier.rotation.y
 	var back := Vector3(sin(heading), 0.0, cos(heading)) * FOLLOW_DISTANCE
 	var want := carrier.global_position + back
-	want.y = hm.height_at(want.x, want.z)
+	want.y = world.surface_height_at(want.x, want.z) if world != null else hm.height_at(want.x, want.z)
 	var k := clampf(delta * 9.0, 0.0, 1.0)
 	global_position = global_position.lerp(want, k)
 	rotation.y = lerp_angle(rotation.y, heading, k)
 
 	# Tilt with the slope so it does not look like it is hovering.
-	var n := hm.normal_at(global_position.x, global_position.z)
+	var n := Vector3.UP if world != null and world.bridge_id_at(global_position.x, global_position.z) >= 0 else hm.normal_at(global_position.x, global_position.z)
 	rotation.x = lerp_angle(rotation.x, -asin(clampf(n.z, -1.0, 1.0)) * 0.6, k)
 	rotation.z = lerp_angle(rotation.z, asin(clampf(n.x, -1.0, 1.0)) * 0.6, k)
 
@@ -87,7 +87,7 @@ func _set_load(res: int) -> void:
 	if node == null:
 		return
 	node.name = "load"
-	node.position = Vector3(0, 0.62, 0.0)
+	node.position = _registry.attachment("wood_cart", "att_stock_0")
 	node.scale = Vector3.ONE * 0.85
 	add_child(node)
 	_load_visual = node

@@ -105,7 +105,7 @@ def render_icon(asset_id: str, factory) -> str:
     materials.build_all()
 
     asset = factory()
-    exporter.build_asset_objects(asset, make_lods=False, make_collision=False)
+    exporter.build_asset_objects(asset, make_lods=False)
     bpy.context.view_layer.update()
 
     meshes = [o for o in bpy.context.scene.objects if o.type == "MESH"]

@@ -12,17 +12,30 @@ const N := Config.GRID + 1   # corner samples per side
 
 enum Surface { WATER, MARSH, GRASS, FOREST, ROCK }
 
+var grid_size := Config.GRID
+var n := N
+var world_size := Config.WORLD_SIZE
+var generation_version := 1
+
 var heights := PackedFloat32Array()
 var surface := PackedByteArray()
 var fertility := PackedFloat32Array()
 var _rng := RandomNumberGenerator.new()
 
 
-func generate(seed_value: int) -> void:
+func generate(seed_value: int, size_m: float = Config.WORLD_SIZE, version: int = 1) -> void:
+	world_size = size_m
+	grid_size = roundi(size_m / Config.CELL)
+	n = grid_size + 1
+	generation_version = version
+	edits.clear()
+	if version >= 2:
+		_generate_geography(seed_value)
+		return
 	_rng.seed = seed_value
-	heights.resize(N * N)
-	surface.resize(Config.GRID * Config.GRID)
-	fertility.resize(Config.GRID * Config.GRID)
+	heights.resize(n * n)
+	surface.resize(grid_size * grid_size)
+	fertility.resize(grid_size * grid_size)
 
 	var ridge := FastNoiseLite.new()
 	ridge.seed = seed_value
@@ -43,10 +56,10 @@ func generate(seed_value: int) -> void:
 	moisture.frequency = 0.0035
 	moisture.fractal_octaves = 3
 
-	var half := Config.WORLD_SIZE * 0.5
+	var half := world_size * 0.5
 
-	for j in N:
-		for i in N:
+	for j in n:
+		for i in n:
 			var wx := i * Config.CELL
 			var wz := j * Config.CELL
 
@@ -72,15 +85,15 @@ func generate(seed_value: int) -> void:
 			var flat := 1.0 - smoothstep(30.0, 110.0, d_centre)
 			h = lerpf(h, 9.5, flat * 0.85)
 
-			heights[j * N + i] = h
+			heights[j * n + i] = h
 
 	_classify(moisture)
 
 
 func _classify(moisture: FastNoiseLite) -> void:
-	for cz in Config.GRID:
-		for cx in Config.GRID:
-			var idx := cz * Config.GRID + cx
+	for cz in grid_size:
+		for cx in grid_size:
+			var idx := cz * grid_size + cx
 			var h := cell_height(cx, cz)
 			var s := cell_slope(cx, cz)
 			var wx := (cx + 0.5) * Config.CELL
@@ -113,16 +126,16 @@ func _classify(moisture: FastNoiseLite) -> void:
 # --- Sampling ---------------------------------------------------------------
 
 func corner(i: int, j: int) -> float:
-	i = clampi(i, 0, N - 1)
-	j = clampi(j, 0, N - 1)
-	return heights[j * N + i]
+	i = clampi(i, 0, n - 1)
+	j = clampi(j, 0, n - 1)
+	return heights[j * n + i]
 
 
 ## Height at an arbitrary world position, bilinearly interpolated so units
 ## walk smoothly rather than stepping between cells.
 func height_at(x: float, z: float) -> float:
-	var fx := clampf(x / Config.CELL, 0.0, float(N - 1) - 0.0001)
-	var fz := clampf(z / Config.CELL, 0.0, float(N - 1) - 0.0001)
+	var fx := clampf(x / Config.CELL, 0.0, float(n - 1) - 0.0001)
+	var fz := clampf(z / Config.CELL, 0.0, float(n - 1) - 0.0001)
 	var i := int(fx)
 	var j := int(fz)
 	var tx := fx - i
@@ -164,20 +177,20 @@ func cell_slope(cx: int, cz: int) -> float:
 
 
 func cell_surface(cx: int, cz: int) -> int:
-	if cx < 0 or cz < 0 or cx >= Config.GRID or cz >= Config.GRID:
+	if cx < 0 or cz < 0 or cx >= grid_size or cz >= grid_size:
 		return Surface.WATER
-	return surface[cz * Config.GRID + cx]
+	return surface[cz * grid_size + cx]
 
 
 func surface_at(p: Vector3) -> int:
-	var c := Config.world_to_cell(p)
+	var c := world_to_cell(p)
 	return cell_surface(c.x, c.y)
 
 
 func cell_fertility(cx: int, cz: int) -> float:
-	if cx < 0 or cz < 0 or cx >= Config.GRID or cz >= Config.GRID:
+	if cx < 0 or cz < 0 or cx >= grid_size or cz >= grid_size:
 		return 0.0
-	return fertility[cz * Config.GRID + cx]
+	return fertility[cz * grid_size + cx]
 
 
 ## Base movement multiplier for a cell, before roads are considered.
@@ -191,7 +204,7 @@ func surface_speed(cx: int, cz: int) -> float:
 
 
 func is_passable(cx: int, cz: int) -> bool:
-	if cx < 0 or cz < 0 or cx >= Config.GRID or cz >= Config.GRID:
+	if cx < 0 or cz < 0 or cx >= grid_size or cz >= grid_size:
 		return false
 	if cell_surface(cx, cz) == Surface.WATER:
 		return false
@@ -247,16 +260,16 @@ func flatten(centre: Vector3, half_w: float, half_d: float) -> float:
 	if not repeat:
 		edits.append({"x": centre.x, "z": centre.z,
 				"half_w": half_w, "half_d": half_d})
-	var i0 := clampi(int(floor((centre.x - half_w) / Config.CELL)), 0, N - 1)
-	var i1 := clampi(int(ceil((centre.x + half_w) / Config.CELL)), 0, N - 1)
-	var j0 := clampi(int(floor((centre.z - half_d) / Config.CELL)), 0, N - 1)
-	var j1 := clampi(int(ceil((centre.z + half_d) / Config.CELL)), 0, N - 1)
+	var i0 := clampi(int(floor((centre.x - half_w) / Config.CELL)), 0, n - 1)
+	var i1 := clampi(int(ceil((centre.x + half_w) / Config.CELL)), 0, n - 1)
+	var j0 := clampi(int(floor((centre.z - half_d) / Config.CELL)), 0, n - 1)
+	var j1 := clampi(int(ceil((centre.z + half_d) / Config.CELL)), 0, n - 1)
 
 	var total := 0.0
 	var count := 0
 	for j in range(j0, j1 + 1):
 		for i in range(i0, i1 + 1):
-			total += heights[j * N + i]
+			total += heights[j * n + i]
 			count += 1
 	var target: float = total / maxf(1.0, float(count))
 	if repeat:
@@ -269,6 +282,78 @@ func flatten(centre: Vector3, half_w: float, half_d: float) -> float:
 			var dx := absf(i * Config.CELL - centre.x) / maxf(half_w, 0.001)
 			var dz := absf(j * Config.CELL - centre.z) / maxf(half_d, 0.001)
 			var t := 1.0 - smoothstep(0.85, 1.45, maxf(dx, dz))
-			var k := j * N + i
+			var k := j * n + i
 			heights[k] = lerpf(heights[k], target, t)
 	return target
+
+
+func world_to_cell(p: Vector3) -> Vector2i:
+	return Vector2i(clampi(floori(p.x / Config.CELL), 0, grid_size - 1),
+			clampi(floori(p.z / Config.CELL), 0, grid_size - 1))
+
+
+## Versioned regional geography: winding connected drainage, parallel ridges
+## broken by broad passes, and a guaranteed fertile clearing at the start.
+## Physical feature widths remain in metres as the region gets larger.
+func _generate_geography(seed_value: int) -> void:
+	heights.resize(n * n)
+	surface.resize(grid_size * grid_size)
+	fertility.resize(grid_size * grid_size)
+	var detail := FastNoiseLite.new()
+	detail.seed = seed_value
+	detail.frequency = 0.006
+	detail.fractal_octaves = 3
+	var moisture := FastNoiseLite.new()
+	moisture.seed = seed_value + 91
+	moisture.frequency = 0.006
+	moisture.fractal_octaves = 2
+	var phase := float(posmod(seed_value, 997)) / 997.0 * TAU
+	var half := world_size * 0.5
+	var river_start := half - 210.0
+	for j in n:
+		var z := j * Config.CELL
+		var river_x := river_centre(z, phase)
+		var ridge_shift := sin(z / 220.0 + phase) * 46.0
+		var pass_distance := absf(fposmod(z - half + 384.0, 768.0) - 384.0)
+		var pass_strength := smoothstep(32.0, 125.0, pass_distance)
+		for i in n:
+			var x := i * Config.CELL
+			var ridge_distance := absf(fposmod(x - half + 230.0 + ridge_shift, 768.0) - 384.0)
+			var ridge := (1.0 - smoothstep(0.0, 115.0, ridge_distance))
+			var h := 11.0 + detail.get_noise_2d(x, z) * 4.0
+			h += ridge * ridge * (8.0 + 50.0 * pass_strength)
+			# One continuous meandering river drains to the southern outlet.
+			# A rounded headwater permits a legible overland detour upstream.
+			var river_distance := Vector2(x - river_x, minf(0.0, z - river_start)).length()
+			# A river cuts a broad low valley through the ridge first, then
+			# its channel. This leaves real dry approaches on both banks;
+			# carving sea-level water straight into a summit made cliffs.
+			h = lerpf(h, 8.5, 1.0 - smoothstep(44.0, 145.0, river_distance))
+			h = lerpf(0.3, h, smoothstep(9.0, 36.0, river_distance))
+			# Connected tributaries add additional valleys in larger regions.
+			if world_size >= 1536.0:
+				var tributary_z := half + 310.0 + sin(x / 190.0 + phase) * 42.0
+				var join_x := river_centre(tributary_z, phase)
+				if x <= join_x:
+					var branch_distance := Vector2(maxf(0.0, world_size * 0.18 - x), z - tributary_z).length()
+					h = lerpf(h, 8.5, 1.0 - smoothstep(40.0, 130.0, branch_distance))
+					h = lerpf(0.3, h, smoothstep(7.0, 32.0, branch_distance))
+			var from_start := Vector2(x - half, z - half).length()
+			h = lerpf(h, 10.0, 1.0 - smoothstep(85.0, 135.0, from_start))
+			heights[j * n + i] = h
+	_classify(moisture)
+	# Fertile, clear plots are available before scouting or trade. This is
+	# generation data, so old seeds and their saves retain their old ground.
+	for cz in range(maxi(0, grid_size / 2 - 22), mini(grid_size, grid_size / 2 + 22)):
+		for cx in range(maxi(0, grid_size / 2 - 22), mini(grid_size, grid_size / 2 + 22)):
+			var idx := cz * grid_size + cx
+			var distance := Vector2((cx + 0.5) * Config.CELL - half,
+					(cz + 0.5) * Config.CELL - half).length()
+			if cell_slope(cx, cz) < 0.25 and distance < 85.0:
+				surface[idx] = Surface.GRASS
+				fertility[idx] = lerpf(fertility[idx], 0.85,
+						1.0 - smoothstep(58.0, 85.0, distance))
+
+
+func river_centre(z: float, phase: float) -> float:
+	return world_size * 0.5 + 190.0 + sin(z / 170.0 + phase) * 44.0

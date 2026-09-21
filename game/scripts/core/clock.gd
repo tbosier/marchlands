@@ -28,6 +28,8 @@ func paused() -> bool:
 
 func set_speed(index: int) -> void:
 	var clamped := clampi(index, 0, Config.SPEEDS.size() - 1)
+	if clamped > 0:
+		_resume_index = clamped
 	if clamped == speed_index:
 		return
 	speed_index = clamped
@@ -51,10 +53,34 @@ func set_rate(rate: float) -> void:
 func toggle_pause() -> void:
 	# Unpausing returns to the rate you were at, not to a fixed 1x.
 	if speed_index != 0:
-		_resume_index = speed_index
 		set_speed(0)
 	else:
 		set_speed(_resume_index)
+
+
+func resume_speed_index() -> int:
+	return _resume_index
+
+
+## A paused save belongs to its own clock, not the session it replaces.
+func restore_speed(index: int, resume_index: int = Config.NORMAL_SPEED) -> void:
+	_resume_index = clampi(resume_index, 1, Config.SPEEDS.size() - 1)
+	set_speed(index)
+
+
+## Version-one files before the market update stored indices into the slower
+## speed menu. Preserve their rate; retired fractional rates resume at 1x.
+func restore_saved_speed(data: Dictionary) -> void:
+	if int(data.get("speed_layout", 1)) == 2:
+		restore_speed(int(data.speed_index), int(data.get("resume_speed_index", Config.NORMAL_SPEED)))
+		return
+	var legacy := [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 16.0]
+	set_rate(maxf(1.0, legacy[int(data.get("resume_speed_index", 3))]))
+	var resume := speed_index
+	if int(data.speed_index) == 0:
+		restore_speed(0, resume)
+	else:
+		set_rate(maxf(1.0, legacy[int(data.speed_index)]))
 
 
 ## Returns in-game seconds elapsed this frame.

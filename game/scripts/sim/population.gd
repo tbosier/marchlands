@@ -136,19 +136,20 @@ func consider_immigration(buildings: Array[Building],
 	return {"count": count, "reasons": info["reasons"]}
 
 
-## A walkable point on the map edge, so settlers can be seen arriving.
-func edge_entry_point(world: World) -> Vector3:
+## A walkable point on the map edge connected to the settlement. An isolated
+## island can have perfectly walkable ground and still strand every arrival.
+func edge_entry_point(world: World, destination: Vector3) -> Vector3:
 	for _attempt in 24:
 		var p: Vector3
 		match _rng.randi() % 4:
-			0: p = Vector3(_rng.randf() * Config.WORLD_SIZE, 0, 6.0)
-			1: p = Vector3(_rng.randf() * Config.WORLD_SIZE, 0,
-					Config.WORLD_SIZE - 6.0)
-			2: p = Vector3(6.0, 0, _rng.randf() * Config.WORLD_SIZE)
-			_: p = Vector3(Config.WORLD_SIZE - 6.0, 0,
-					_rng.randf() * Config.WORLD_SIZE)
-		var c := Config.world_to_cell(p)
-		if not world.nav.is_solid(c.x, c.y):
+			0: p = Vector3(_rng.randf() * world.size_m, 0, 6.0)
+			1: p = Vector3(_rng.randf() * world.size_m, 0,
+					world.size_m - 6.0)
+			2: p = Vector3(6.0, 0, _rng.randf() * world.size_m)
+			_: p = Vector3(world.size_m - 6.0, 0,
+					_rng.randf() * world.size_m)
+		var c := world.world_to_cell(p)
+		if not world.nav.is_solid(c.x, c.y) and world.nav.can_reach(p, destination):
 			p.y = world.heightmap.height_at(p.x, p.z)
 			return p
 	return Vector3.INF

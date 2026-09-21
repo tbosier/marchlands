@@ -21,6 +21,7 @@ extends Node
 ##     {"op": "shot",       "name": "after_two_days"}
 ##     {"op": "assert",     "check": "wear_above", "value": 500}
 ##     {"op": "upgrade_building", "type": "granary"}
+##     {"op": "research", "id": "civic_building", "complete": true}
 ##     {"op": "strand_load", "res": 1, "amount": 8}
 ##     {"op": "watch",      "check": "loads_are_accounted_for"}
 ##     {"op": "save",       "slot": "harness"}
@@ -45,6 +46,7 @@ var _busy := false
 ## A snapshot of the settlement taken by the "save" op, compared against the
 ## live one by the save_round_trip assertion after a "load".
 var _save_fingerprint: Dictionary = {}
+var _last_building_id := -1
 ## Invariants checked on every simulation step rather than sampled after one.
 var _watches: Array[String] = []
 var _watch_steps := 0
@@ -56,6 +58,9 @@ var _felling_expected := 0.0
 
 func run(game_node, script_path: String) -> void:
 	game = game_node
+	# Production's review jitter and scripted population scatter use the global
+	# generator. Keep automated runs reproducible without changing normal play.
+	seed(game.world.world_seed)
 	var text := ""
 	var abs_path := script_path
 	if not abs_path.begins_with("res://") and not abs_path.begins_with("/"):
@@ -138,6 +143,8 @@ func _execute(step: Dictionary) -> bool:
 			_do_cancel_site(String(step.get("type", "house")))
 		"upgrade_building":
 			_do_upgrade_building(String(step.get("type", "granary")))
+		"research":
+			_do_research(step)
 		"strand_load":
 			_do_strand_load(step)
 		"watch":
@@ -200,6 +207,7 @@ func _execute(step: Dictionary) -> bool:
 
 
 func _do_build(step: Dictionary) -> void:
+	_last_building_id = -1
 	var type_id := String(step.get("type", "house"))
 	var position := _resolve_position(step)
 	if position == Vector3.INF:
@@ -223,6 +231,10 @@ func _do_build(step: Dictionary) -> void:
 	var instant := bool(step.get("instant", false))
 	var b = game.sim.place_building(type_id, position,
 			float(step.get("yaw", PI)), instant)
+	if b == null:
+		_fail("build %s: placement failed" % type_id)
+		return
+	_last_building_id = b.id
 	_note("%s %s at (%.0f, %.0f)"
 			% ["built" if instant else "sited", type_id, position.x, position.z])
 
@@ -279,8 +291,8 @@ func _resolve_position(step: Dictionary) -> Vector3:
 		for a in 16:
 			var ang := TAU * a / 16.0 + ring * 0.31
 			var p := anchor + Vector3(cos(ang) * r, 0, sin(ang) * r)
-			if p.x < 10 or p.z < 10 or p.x > Config.WORLD_SIZE - 10 \
-					or p.z > Config.WORLD_SIZE - 10:
+			if p.x < 10 or p.z < 10 or p.x > game.world.size_m - 10 \
+					or p.z > game.world.size_m - 10:
 				continue
 			p.y = game.world.heightmap.height_at(p.x, p.z)
 			var check: Dictionary = game.sim.can_place(type_id, p)
@@ -471,9 +483,9 @@ func _busiest_route() -> Vector3:
 	var best := -1.0
 	var best_p := Vector3.INF
 	var w = game.world.wear
-	for y in Config.WEAR_RES:
-		for x in Config.WEAR_RES:
-			var v: float = w.wear[y * Config.WEAR_RES + x]
+	for y in game.world.wear.res:
+		for x in game.world.wear.res:
+			var v: float = w.wear[y * game.world.wear.res + x]
 			if v > best:
 				best = v
 				best_p = Vector3((x + 0.5) * Config.WEAR_CELL, 0.0,
@@ -484,27 +496,48 @@ func _busiest_route() -> Vector3:
 	return best_p
 
 
-## Per-entry comparison of two fingerprint sub-dictionaries, so the report
-## names the building or the person that came back wrong rather than saying
-## that something, somewhere, differs.
-func _dict_drift(label: String, was: Dictionary, is_now: Variant
-				 ) -> Array[String]:
+## Compare actual values, not their display strings: formatting rounded away
+## missing goods and hid changes to nested records. Paths identify the precise
+## citizen, building, terrain edit or road texel that failed to survive.
+## Binary scalar/packed-array values round-trip exactly. Single-precision
+## transforms get only a tenth of a millimetre of tolerance for spatial values.
+func _state_drift(label: String, was: Variant, is_now: Variant) -> Array[String]:
 	var out: Array[String] = []
-	if typeof(is_now) != TYPE_DICTIONARY:
-		out.append("%s: missing entirely after loading" % label)
+	if typeof(was) != typeof(is_now):
+		out.append("%s: saved type %s, loaded type %s" % [label,
+				type_string(typeof(was)), type_string(typeof(is_now))])
 		return out
-	var now: Dictionary = is_now
-	for key in was:
-		if not now.has(key):
-			out.append("%s %s: gone after loading (was %s)"
-					% [label, key, was[key]])
-		elif str(now[key]) != str(was[key]):
-			out.append("%s %s: saved '%s', loaded '%s'"
-					% [label, key, was[key], now[key]])
-	for key in now:
-		if not was.has(key):
-			out.append("%s %s: appeared from nowhere (%s)"
-					% [label, key, now[key]])
+	if was is Dictionary:
+		for key in was:
+			var path := "%s.%s" % [label, key] if not label.is_empty() else str(key)
+			if not is_now.has(key):
+				out.append("%s: missing after loading" % path)
+			else:
+				out.append_array(_state_drift(path, was[key], is_now[key]))
+			if out.size() >= 16:
+				return out
+		for key in is_now:
+			if not was.has(key):
+				out.append("%s.%s: appeared after loading" % [label, key])
+			if out.size() >= 16:
+				return out
+	elif was is Array or was is PackedFloat32Array or was is PackedByteArray:
+		if was == is_now:
+			return out
+		if was.size() != is_now.size():
+			out.append("%s: saved %d entries, loaded %d"
+					% [label, was.size(), is_now.size()])
+		for i in mini(was.size(), is_now.size()):
+			out.append_array(_state_drift("%s[%d]" % [label, i], was[i], is_now[i]))
+			if out.size() >= 16:
+				return out
+	elif was is Vector3:
+		var difference: Vector3 = (was - is_now).abs()
+		if not (difference.x <= 0.0001 and difference.y <= 0.0001
+				and difference.z <= 0.0001):
+			out.append("%s: saved %s, loaded %s" % [label, was, is_now])
+	elif was != is_now:
+		out.append("%s: saved %s, loaded %s" % [label, was, is_now])
 	return out
 
 
@@ -544,6 +577,23 @@ func _do_upgrade_building(type_id: String) -> void:
 	_fail("upgrade %s: no completed one to upgrade" % type_id)
 
 
+## Research always uses the player's market prerequisite and real payment.
+## Optional waiting advances the whole settlement, not just the research clock.
+func _do_research(step: Dictionary) -> void:
+	var tech_id := String(step.get("id", ""))
+	game.sim.stores.refresh_totals(game.sim.citizens, game.sim.buildings)
+	var error: String = game.sim.research.start(tech_id, game._has_market(),
+			game.sim.stores.try_spend)
+	if error != "":
+		_fail("research %s: %s" % [tech_id, error])
+		return
+	_note("paid for research %s (%s)" % [tech_id, Res.cost_text(RoadResearch.TECHS[tech_id].cost)])
+	if bool(step.get("complete", false)):
+		_do_simulate(float(RoadResearch.TECHS[tech_id].duration_days) + 0.01)
+		if not game.sim.research.completed.has(tech_id):
+			_fail("research %s did not complete after its duration" % tech_id)
+
+
 func _do_save(slot: String) -> void:
 	var problem: String = game.save_game(slot)
 	# Fingerprinted *after* the write, so it describes the world that was
@@ -575,7 +625,7 @@ func _describe_save(slot: String) -> String:
 	return "%.1f KB on disk" % (size / 1024.0)
 
 
-## The facts a save is supposed to preserve, reduced to comparable numbers.
+## The facts a save is supposed to preserve, read independently from live state.
 ##
 ## Deliberately not a checksum of the save file: that would only prove the file
 ## round-trips through itself, not that the settlement came back. Deliberately
@@ -583,64 +633,231 @@ func _describe_save(slot: String) -> String:
 ## granary full of grain from a keep full of grain, so an early version of this
 ## would have accepted a load that put everything in the wrong place.
 func _fingerprint() -> Dictionary:
-	# The kingdom's totals are a per-tick cache. Reading them straight after an
-	# op that moved goods gives the figure from before the op, which showed up
-	# as a round trip that had apparently gained eight timber.
-	game.sim.stores.refresh_totals(game.sim.citizens, game.sim.buildings)
-	var totals := {}
-	for res in Config.RES_COUNT:
-		totals[res] = roundf(game.sim.stores.total(res))
-
 	# Each building's identity, contents, staffing and construction state,
 	# keyed by id so a reordered list is not mistaken for a changed one.
 	var buildings := {}
 	for b in game.sim.buildings:
-		var held := ""
-		for res in Config.RES_COUNT:
-			held += "%.0f," % b.inventory[res]
-		buildings[b.id] = "%s@%.1f,%.1f %s %s w%d r%d f%d %s" % [
-			b.type_id, b.position.x, b.position.z, b.asset_id, held,
-			b.workers.size(), b.residents.size(), b.field_count(),
-			"site%.2f" % b.build_progress if b.under_construction else "done"]
+		var workers: Array = b.workers.duplicate()
+		var residents: Array = b.residents.duplicate()
+		workers.sort()
+		residents.sort()
+		buildings[b.id] = {
+			"type_id": b.type_id, "asset_id": b.asset_id,
+			"position": b.position, "yaw": b.yaw,
+			"inventory": b.inventory.duplicate(), "larder": b.larder,
+			"market_stock_target": b.market_stock_target, "health": b.health, "fire": b.fire,
+			"under_construction": b.under_construction,
+			"build_progress": b.build_progress,
+			"build_cost": b.build_cost.duplicate(),
+			"build_seconds": b.build_seconds, "delivered": b.delivered.duplicate(),
+			"crop_growth": b.crop_growth, "workers": workers, "residents": residents,
+			"plots": b.all_plots().duplicate(true), "fields": b.field_count(),
+		}
 
 	# And each person's identity and attachments.
 	var people := {}
 	for c in game.sim.citizens:
-		people[c.id] = "%s %s home%d work%d %s%.0f %s" % [
-			c.given_name, c.asset_id, c.home_id, c.workplace_id,
-			Res.display(c.carrying_res) if c.carrying_res >= 0 else "-",
-			c.carrying_amount, "settling" if c.immigrant else "settled"]
+		people[c.id] = {
+			"name": c.given_name, "asset_id": c.asset_id,
+			"profession": c.profession, "age": c.age,
+			"position": c.position, "home_id": c.home_id,
+			"workplace_id": c.workplace_id, "carrying_res": c.carrying_res,
+			"carrying_amount": c.carrying_amount, "immigrant": c.immigrant,
+			"hunger": c.hunger, "next_meal": c.next_meal,
+			"meals_taken": c.meals_taken, "morale": c.morale,
+		}
+		# A settled citizen's former arrival target is dormant; only a settler
+		# still travelling uses it after a load.
+		if c.immigrant:
+			people[c.id]["immigrant_target"] = c.immigrant_target
+		if c is Soldier:
+			people[c.id]["body"] = c._body_state.duplicate(true)
+			people[c.id]["veteran_rations"] = c.rations
+
+	# The display cache adds Float32 quantities in registration order. Upgrades
+	# change that order, so rebuilding it on load can change a rounding bit even
+	# when every individual quantity is identical. Sum snapshots in stable ID
+	# order with scalar (Float64) arithmetic; all underlying quantities remain
+	# exact comparisons above, including amounts too small for the HUD cache.
+	var totals := {}
+	for res in Config.RES_COUNT:
+		totals[res] = 0.0
+	var building_ids := buildings.keys()
+	building_ids.sort()
+	for id in building_ids:
+		for res in Config.RES_COUNT:
+			totals[res] += float(buildings[id]["inventory"][res])
+		totals[Config.Res.FOOD] += float(buildings[id]["larder"])
+	var citizen_ids := people.keys()
+	citizen_ids.sort()
+	for id in citizen_ids:
+		var res: int = people[id]["carrying_res"]
+		if res >= 0:
+			totals[res] += float(people[id]["carrying_amount"])
 
 	# Roads by level, not just "some road exists".
 	var levels := {}
 	var wear_sum := 0.0
-	for cz in Config.GRID:
-		for cx in Config.GRID:
+	for cz in game.world.grid_size:
+		for cx in game.world.grid_size:
 			var level: int = game.world.wear.road_level_of_cell(cx, cz)
 			if level > 0:
 				levels[level] = int(levels.get(level, 0)) + 1
 	for i in game.world.wear.wear.size():
 		wear_sum += game.world.wear.wear[i]
 
-	var standing := 0
-	var marked: int = game.world.nodes.marked_ids().size()
+	var nodes := {}
 	for rec in game.world.nodes.records:
-		if not rec.depleted:
-			standing += 1
+		# Loading completes a tree's purely visual topple immediately. Its
+		# exhausted amount already makes it unavailable in the live world.
+		var gone: bool = rec.depleted or (rec.kind == ResourceNodes.Kind.TREE
+				and rec.amount <= 0.01)
+		nodes[rec.id] = {"amount": rec.amount, "depleted": gone,
+				"regrow_at": rec.regrow_at}
+	var marked: Array = game.world.nodes.marked_ids()
+	marked.sort()
 
 	return {
+		"seed": game.world.world_seed,
+		"world_settings": {"size_m": game.world.size_m, "generation_version": game.world.generation_version},
 		"population": game.sim.citizens.size(),
 		"buildings_count": game.sim.buildings.size(),
 		"buildings": buildings,
 		"people": people,
-		"road_cells": str(levels),
-		"wear_sum": roundf(wear_sum),
-		"standing_nodes": standing,
+		"road_cells": levels,
+		"wear_sum": wear_sum,
+		"wear": game.world.wear.wear.duplicate(),
+		"locked_roads": game.world.wear.locked.duplicate(),
+		"nodes": nodes,
 		"marked_trees": marked,
-		"terrain_edits": game.world.heightmap.edits.size(),
-		"day": roundf(game.sim.day * 100.0),
+		"terrain_edits": game.world.heightmap.edits.duplicate(true),
+		"day": game.sim.day,
+		"day_marker": game.sim.day_marker(),
+		"elapsed_days": game.clock.elapsed_days,
+		"speed_index": game.clock.speed_index,
+		"resume_speed_index": game.clock.resume_speed_index(),
+		"next_building_id": game.sim.next_building_id(),
+		"next_citizen_id": game.sim.next_citizen_id(),
+		"cart": game.sim.cart != null,
+		"cart_position": (game.sim.cart.global_position
+				if game.sim.cart else Vector3.ZERO),
 		"totals": totals,
+		"research": {"completed": game.sim.research.completed.duplicate(),
+			"active": game.sim.research.active, "remaining_days": game.sim.research.remaining_days,
+			"ranching_known": game.sim.research.ranching_known},
+		"campaign": _campaign_fingerprint(),
+		"husbandry": _husbandry_fingerprint(),
+		"trade": _trade_fingerprint(),
+		"bridges": _bridges_fingerprint(),
 	}
+
+
+func _trade_fingerprint() -> Dictionary:
+	var manager: Node = game.sim.trade
+	if manager == null: return {}
+	var records := {}
+	for route in manager.caravans.values():
+		var fields := {}
+		for key in ["origin_id", "target_id", "source_id", "food_source_id", "state", "loading_stage", "status", "repeat", "export_amount", "import_amount", "provisions", "pack_amount", "cargo_res", "cargo_amount", "promised", "source_reserved", "food_reserved", "expires_in", "health", "completed_trips"]:
+			fields[key] = route.get(key)
+		fields.cart_position = route.cart.global_position
+		var citizen: Citizen = route.merchant
+		fields.citizen = {"id": citizen.id, "name": citizen.given_name, "asset_id": citizen.asset_id,
+			"profession": citizen.profession, "age": citizen.age, "position": citizen.global_position,
+			"home_id": citizen.home_id, "workplace_id": citizen.workplace_id,
+			"carrying_res": citizen.carrying_res, "carrying_amount": citizen.carrying_amount,
+			"hunger": citizen.hunger, "morale": citizen.morale, "next_meal": citizen.next_meal,
+			"meals_taken": citizen.meals_taken}
+		if citizen is Soldier:
+			fields.citizen.body = citizen._body_state.duplicate(true)
+			fields.citizen.veteran_rations = citizen.rations
+		records[route.id] = fields
+	return {"next_id": manager._next_id, "caravans": records, "wrecks": manager.wrecks.duplicate(true)}
+
+
+func _bridges_fingerprint() -> Dictionary:
+	var manager: Node = game.sim.bridges
+	if manager == null: return {}
+	var records := {}
+	for id in manager.bridges:
+		var record: Dictionary = manager.bridges[id]
+		var fields := {}
+		for key in ["a", "b", "cost", "delivered", "work", "complete"]:
+			fields[key] = record[key].duplicate(true) if record[key] is Dictionary else record[key]
+		records[id] = fields
+	return {"next_id": manager._next_id, "bridges": records}
+
+
+func _husbandry_fingerprint() -> Dictionary:
+	var husbandry: Node = game.sim.husbandry
+	if husbandry == null: return {}
+	var cattle := {}
+	for cow in husbandry.cows.values():
+		cattle[cow.id] = {"position": cow.position, "yaw": cow.rotation.y,
+			"ranch_id": cow.ranch_id, "age_days": cow.age_days, "marked": cow.marked}
+	return {"next_id": husbandry._next_id, "cows": cattle, "breeding": husbandry.breeding.duplicate(true)}
+
+
+## Read campaign entities independently of its serializer. IDs, not dictionary
+## insertion order, identify a rival structure, soldier or working grower.
+func _campaign_fingerprint() -> Dictionary:
+	var campaign: Node = game.sim.campaign
+	if campaign == null:
+		return {}
+	var buildings := {}
+	for b: Building in campaign.enemy_buildings.values():
+		buildings[b.id] = {"type_id": b.type_id, "position": b.position,
+			"health": b.health, "fire": b.fire, "inventory": b.inventory.duplicate(),
+			"plots": b.all_plots().duplicate(), "crop_growth": b.crop_growth}
+	var units := {}
+	for unit: Soldier in campaign.units.values():
+		var target: Node
+		if unit.target_kind == "unit":
+			target = campaign.units.get(unit.target_id)
+			if target != null and (target.faction == unit.faction or target.health <= 0.0):
+				target = null
+		elif unit.target_kind == "building":
+			target = campaign.enemy_buildings.get(unit.target_id) if unit.faction == 0 \
+					else game.sim.buildings_by_id.get(unit.target_id)
+			if target != null and target.health <= 0.0:
+				target = null
+		units[unit.id] = {"faction": unit.faction, "position": unit.position,
+			"name": unit.given_name, "age": unit.age, "asset_id": unit.asset_id,
+			"carrying_res": unit.carrying_res, "carrying_amount": unit.carrying_amount,
+			"health": unit.health, "rations": unit.rations,
+			"body": unit._body_state.duplicate(true),
+			"target_id": unit.target_id if target != null else -1,
+			"target_kind": unit.target_kind if target != null else "",
+			"moving": unit.has_goal(), "cooldown": unit.cooldown, "fire_cooldown": unit.fire_cooldown}
+		if unit.has_goal():
+			units[unit.id]["goal"] = unit._goal
+		if unit.faction == 0:
+			units[unit.id]["civilian"] = {"id": campaign._civilian_ids.get(unit.id, -1),
+				"name": unit.given_name, "age": unit.age, "asset_id": unit.asset_id,
+				"home_id": unit.home_id, "hunger": unit.hunger, "morale": unit.morale,
+				"next_meal": unit.next_meal, "meals_taken": unit.meals_taken,
+				"carrying_res": unit.carrying_res, "carrying_amount": unit.carrying_amount}
+	var workers := {}
+	for worker: Citizen in campaign._workers:
+		workers[worker.id] = {"position": worker.position, "carried": worker.carrying_amount,
+			"name": worker.given_name, "age": worker.age,
+			"leg": int(campaign._worker_leg.get(worker.id, 0)), "asset_id": worker.asset_id,
+			"moving": worker.has_goal()}
+		if worker.has_goal():
+			workers[worker.id]["goal"] = worker._goal
+	var impacts: Array = []
+	for event in campaign._impacts:
+		var targets: Dictionary = campaign.enemy_buildings if event.faction == 0 \
+				else game.sim.buildings_by_id
+		if targets.has(event.id):
+			impacts.append(event.duplicate())
+	return {"personality": campaign.personality, "rival_name": campaign.rival_name,
+		"town_population": campaign.town_population, "rival_position": campaign.rival_position,
+		"at_war": campaign.at_war, "defeated": campaign.defeated, "conquered": campaign.conquered,
+		"next_id": campaign._next_id, "time": campaign._time, "review": campaign._review,
+		"recruit_at": campaign._recruit_at, "rng_state": campaign._rng.state,
+		"buildings": buildings, "units": units, "workers": workers,
+		"ruins": campaign._ruins.duplicate(true), "impacts": impacts}
 
 
 ## Two ways a carried load goes wrong, and both are invisible from the resource
@@ -676,8 +893,9 @@ func _check_loads() -> Array[String]:
 		if room > c.carrying_amount:
 			wrong.append("%s is standing still holding %.0f %s, with %.0f of "
 					% [c.given_name, c.carrying_amount,
-					   Res.display(c.carrying_res), room]
-					+ "room free to put it")
+						   Res.display(c.carrying_res), room]
+					+ "room free to put it (state %d, task %s, position %s, home %d, unreachable %s)"
+					% [c.state, c.task_label, c.position, c.home_id, c.unreachable])
 	return wrong
 
 
@@ -711,6 +929,16 @@ func _do_assert(step: Dictionary) -> void:
 	var check := String(step.get("check", ""))
 	var value := float(step.get("value", 0.0))
 	match check:
+		"last_build_progress":
+			var b: Building = game.sim.buildings_by_id.get(_last_building_id)
+			if b == null:
+				_fail("last_build_progress: the last ordered building is missing")
+			elif b.build_progress >= value:
+				_note("PASS last ordered %s reached %.0f%% construction"
+						% [b.type_id, b.build_progress * 100.0])
+			else:
+				_fail("last_build_progress: %s reached %.0f%%, expected %.0f%%"
+						% [b.type_id, b.build_progress * 100.0, value * 100.0])
 		"wear_above":
 			var peak := _peak_wear()
 			if peak >= value:
@@ -793,6 +1021,11 @@ func _do_assert(step: Dictionary) -> void:
 							else ""))
 				_fail("no completed '%s' — the settlement has %s"
 						% [want, ", ".join(have)])
+				for b in game.sim.buildings:
+					if b.type_id == want and b.under_construction:
+						_note("  %s #%d: %.1f%% built; missing %s; incoming %s"
+								% [want, b.id, b.build_progress * 100.0,
+								b.materials_outstanding(), b.incoming])
 			else:
 				_note("PASS a completed %s stands (%d storage, %d workers)"
 						% [found.display_name(), int(found.capacity()),
@@ -808,7 +1041,8 @@ func _do_assert(step: Dictionary) -> void:
 				var after := _fingerprint()
 				var moved: Array[String] = []
 				for key in _save_fingerprint:
-					if str(after.get(key)) != str(_save_fingerprint[key]):
+					if not _state_drift(key, _save_fingerprint[key],
+							after.get(key)).is_empty():
 						moved.append(key)
 				if moved.is_empty():
 					_fail("save_state_changed: the world is identical to the "
@@ -821,21 +1055,13 @@ func _do_assert(step: Dictionary) -> void:
 				_fail("save_round_trip: nothing was saved to compare against")
 			else:
 				var now := _fingerprint()
-				var drift: Array[String] = []
-				for key in _save_fingerprint:
-					var was: Variant = _save_fingerprint[key]
-					var is_now: Variant = now.get(key)
-					if typeof(was) == TYPE_DICTIONARY:
-						drift.append_array(_dict_drift(key, was, is_now))
-					elif str(is_now) != str(was):
-						drift.append("%s: saved %s, loaded %s"
-								% [key, was, is_now])
+				var drift := _state_drift("", _save_fingerprint, now)
 				if drift.is_empty():
 					_note("PASS save round trip preserved the settlement "
 							+ "(%d people, %d buildings, roads %s, wear %.0f, "
 							% [now["population"], now["buildings_count"],
 							   now["road_cells"], now["wear_sum"]]
-							+ "%d terrain edits)" % now["terrain_edits"])
+							+ "%d terrain edits)" % now["terrain_edits"].size())
 				else:
 					for line in drift.slice(0, 8):
 						_fail("save_round_trip — " + line)
@@ -844,8 +1070,8 @@ func _do_assert(step: Dictionary) -> void:
 		"nav_matches_roads":
 			var wrong: Array[String] = []
 			var checked := 0
-			for cz in Config.GRID:
-				for cx in Config.GRID:
+			for cz in game.world.grid_size:
+				for cx in game.world.grid_size:
 					# The level is recomputed from the raw wear field rather
 					# than read from the cache the pathfinder itself uses.
 					# Comparing the cache with the cache proved only that the
@@ -1146,7 +1372,11 @@ func _peak_wear() -> float:
 
 
 func _peak_road_level() -> int:
-	return Config.road_level_for_wear(_peak_wear())
+	var peak := Config.RoadLevel.NATURAL
+	for cz in game.world.grid_size:
+		for cx in game.world.grid_size:
+			peak = maxi(peak, game.world.wear.level_from_wear(cx, cz))
+	return peak
 
 
 func _shot(tag: String) -> void:
@@ -1218,8 +1448,8 @@ func _report() -> void:
 	_note("  peak wear %.0f (%s)"
 			% [_peak_wear(), Config.ROAD_NAMES[_peak_road_level()]])
 	var levels := {}
-	for cz in Config.GRID:
-		for cx in Config.GRID:
+	for cz in game.world.grid_size:
+		for cx in game.world.grid_size:
 			var l: int = game.world.wear.road_level_of_cell(cx, cz)
 			if l > 0:
 				levels[l] = int(levels.get(l, 0)) + 1

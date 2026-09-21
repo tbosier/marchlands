@@ -12,10 +12,13 @@ scale:
 
 orientation:
   # Assets are authored with their "front" (main entrance / viewing side)
-  # pointing down -Y in Blender, which becomes -Z in glTF / Godot.
+  # pointing down -Y in Blender. The Y-up export maps Blender (x, y, z) to
+  # glTF (x, z, -y), so that front ends up facing +Z in glTF and in Godot —
+  # this block said -Z, which is the direction the conversion does not
+  # produce and which nothing in the pipeline reads, so it went unnoticed.
   forward_axis: "-Y"
   up_axis: "+Z"
-  export_forward: "-Z"
+  export_forward: "+Z"
   export_up: "+Y"
 
 origin:
@@ -35,10 +38,20 @@ style:
   palette_mood: warm_temperate_european
 
 geometry:
-  topology: clean
+  # Joined kit pieces and split UV/material seams are assembled surfaces, not
+  # one watertight solid. Decode triangles and reject invalid indices, zero-area
+  # or duplicate faces and inconsistent winding on two-face geometric edges.
+  topology: assembled_surfaces
+  # Open ends and edges where kit pieces meet are intentional; welded stair
+  # baselines and timber joints can share indexed edges too. These counts are
+  # measured and reported; each allowance can be tightened here. Shared
+  # position-buffer ranges count as the same indexed vertices even across
+  # material primitives. This policy does not promise a watertight solid.
+  boundary_edges_allowed: true
+  coincident_junction_edges_allowed: true
+  indexed_junction_edges_allowed: true
   poly_range: low_to_mid
   ngons_allowed: false
-  non_manifold_allowed: false
   shade_auto_smooth_angle_deg: 35
   modular_where_practical: true
 
@@ -100,17 +113,14 @@ lod:
   # Props are on this list because the game instantiates them at lod1: a
   # citizen's carried goods are drawn from the reduced mesh, so a prop whose
   # reduction is broken is broken in the player's hand, not on the horizon.
+  # Resource nodes are on it because they ship a chain like any other
+  # scenery; while they were left off, the validator checked their reduced
+  # levels for nothing at all.
   required_for:
     - building
     - vegetation
     - prop
-
-collision:
-  required_for:
-    - building
     - resource_node
-  default_type: simplified_mesh
-  naming: "{asset_id}_collision"
 
 triangle_budget:
   building: 4000
@@ -129,7 +139,6 @@ naming:
   asset_id_pattern: "^[a-z][a-z0-9_]*$"
   mesh_prefix: ""
   lod_suffix: "_lod{n}"
-  collision_suffix: "_collision"
   attachment_prefix: "att_"
 
 attachments:

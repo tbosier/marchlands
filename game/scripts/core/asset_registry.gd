@@ -121,8 +121,8 @@ func _clear_owner(node: Node) -> void:
 		_clear_owner(child)
 
 
-## Instantiate an asset, stripping the collision/LOD clutter the game does not
-## want in the scene tree. `lod` picks which visual mesh to keep.
+## Instantiate an asset, keeping only the one visual mesh the caller asked for.
+## `lod` picks which.
 func instantiate(asset_id: String, lod: int = 0) -> Node3D:
 	var packed := scene(asset_id)
 	if packed == null:
@@ -131,10 +131,7 @@ func instantiate(asset_id: String, lod: int = 0) -> Node3D:
 	var kept := false
 	for child in node.get_children():
 		var n := String(child.name)
-		if n.ends_with("_collision"):
-			node.remove_child(child)
-			child.queue_free()
-		elif n.contains("_lod"):
+		if n.contains("_lod"):
 			if n.ends_with("_lod%d" % lod):
 				kept = true
 			else:
@@ -177,18 +174,13 @@ func mesh(asset_id: String, lod: int = 0) -> Mesh:
 
 
 ## Instantiate keeping the whole LOD chain, with distance bands applied, so the
-## renderer swaps between the meshes the pipeline generated. Collision geometry
-## is still stripped — the game picks with its own raycasts.
+## renderer swaps between the meshes the pipeline generated.
 func instantiate_with_lods(asset_id: String,
 						   bands: Array = LOD.BUILDING_BANDS) -> Node3D:
 	var packed := scene(asset_id)
 	if packed == null:
 		return _placeholder(asset_id)
 	var node := _unwrap(packed.instantiate(), asset_id)
-	for child in node.get_children():
-		if String(child.name).ends_with("_collision"):
-			node.remove_child(child)
-			child.queue_free()
 	LOD.apply(node, bands)
 	return node
 

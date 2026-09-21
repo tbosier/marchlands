@@ -25,6 +25,9 @@ var _panel: PanelContainer
 var _text: RichTextLabel
 var _keys: RichTextLabel
 var _timer := 0.0
+var campaign: Node
+var _personality: OptionButton
+var _campaign_label: Label
 
 var sim: Simulation
 var clock: Clock
@@ -89,6 +92,16 @@ func setup(p_sim: Simulation, p_clock: Clock, p_world: World,
 		lines.append("%-4s %s" % [row[0], row[1]])
 	_keys.text = "\n".join(lines)
 	col.add_child(_keys)
+	_campaign_label = Label.new()
+	_campaign_label.text = "Rival personality"
+	col.add_child(_campaign_label)
+	_personality = OptionButton.new()
+	for value in ["aggressive", "peaceful", "loner"]:
+		_personality.add_item(value.capitalize())
+	_personality.item_selected.connect(func(index):
+		if is_instance_valid(campaign):
+			campaign.set_personality(["aggressive", "peaceful", "loner"][index]))
+	col.add_child(_personality)
 
 
 func _mono(width: int) -> RichTextLabel:
@@ -170,3 +183,10 @@ func _thousands(n: int) -> String:
 		if count % 3 == 0 and i > 0:
 			out = " " + out
 	return out
+
+
+func bind_campaign(value: Node) -> void:
+	campaign = value
+	if _personality != null and is_instance_valid(campaign):
+		_personality.select(["aggressive", "peaceful", "loner"].find(campaign.personality))
+		_campaign_label.text = "Ashcombe personality · edits apply immediately"

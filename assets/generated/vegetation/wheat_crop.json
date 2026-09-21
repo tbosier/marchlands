@@ -23,10 +23,9 @@
   "triangles": {
     "lod0": 864,
     "lod1": 344,
-    "lod2": 144
+    "lod2": 72
   },
   "triangle_budget": 1200,
-  "has_collision": true,
   "parts": [],
   "attachments": {}
 }

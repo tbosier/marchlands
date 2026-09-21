@@ -1,6 +1,10 @@
 # Marchlands
 ## Starter Game Design & Technical Direction
 
+Current base-game priorities are recorded in [Base game direction](BASE_GAME_DIRECTION.md):
+finite-population caravans, geographic trade routes, selectable worlds and timber bridges.
+That document is a proposal; this broader design remains the long-term roadmap.
+
 **Genre:** 3D real-time kingdom builder / logistics strategy / light grand strategy  
 **Perspective:** Fully 3D, elevated free camera, continuous world  
 **Simulation:** Real-time with pause and speed controls  

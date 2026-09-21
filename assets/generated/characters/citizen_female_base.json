@@ -26,7 +26,6 @@
     "parts": 220
   },
   "triangle_budget": 1400,
-  "has_collision": false,
   "parts": [
     "citizen_female_base_torso",
     "citizen_female_base_head",

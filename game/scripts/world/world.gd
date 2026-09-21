@@ -21,6 +21,11 @@ var sun: DirectionalLight3D
 var fill: DirectionalLight3D
 var environment: WorldEnvironment
 
+var size_m := Config.WORLD_SIZE
+var grid_size := Config.GRID
+var generation_version := 1
+var generation_settings: Dictionary = {}
+
 var world_seed := 20260911
 var _nav_overlay: MultiMeshInstance3D
 
@@ -35,10 +40,16 @@ var _last_season_push := -1.0
 var _last_sky_push := -1.0
 
 
-func generate(registry: AssetRegistry, seed_value: int) -> void:
+func generate(registry: AssetRegistry, seed_value: int, settings: Dictionary = {}) -> void:
 	world_seed = seed_value
-
-	heightmap.generate(seed_value)
+	generation_version = int(settings.get("generation_version", 1 if settings.is_empty() else Config.GENERATION_VERSION))
+	size_m = float(settings.get("size_m", Config.WORLD_SIZE))
+	if not Config.WORLD_SIZES.values().has(size_m):
+		size_m = Config.WORLD_SIZE
+	grid_size = roundi(size_m / Config.CELL)
+	generation_settings = {"size_m": size_m, "generation_version": generation_version}
+	heightmap.generate(seed_value, size_m, generation_version)
+	wear.setup(size_m)
 	wear.bake_fertility(heightmap)
 	nav.setup(heightmap, wear)
 
@@ -58,7 +69,7 @@ func generate(registry: AssetRegistry, seed_value: int) -> void:
 	# valleys that a person can plainly walk through.
 	for rec in nodes.records:
 		if rec.kind != ResourceNodes.Kind.TREE:
-			var c := Config.world_to_cell(rec.position)
+			var c := world_to_cell(rec.position)
 			nav.set_blocked(c.x, c.y, true)
 
 	buildings_root = Node3D.new()
@@ -470,8 +481,8 @@ func _build_nav_overlay() -> MultiMeshInstance3D:
 
 	var cells: Array[Vector2i] = []
 	var colours: Array[Color] = []
-	for cz in Config.GRID:
-		for cx in Config.GRID:
+	for cz in grid_size:
+		for cx in grid_size:
 			var solid := nav.is_solid(cx, cz)
 			var level := wear.road_level_of_cell(cx, cz)
 			if not solid and level == Config.RoadLevel.NATURAL:
@@ -501,5 +512,39 @@ func _build_nav_overlay() -> MultiMeshInstance3D:
 
 
 func centre() -> Vector3:
-	var half := Config.WORLD_SIZE * 0.5
+	var half := size_m * 0.5
 	return Vector3(half, heightmap.height_at(half, half), half)
+
+
+func world_to_cell(p: Vector3) -> Vector2i:
+	return heightmap.world_to_cell(p)
+
+
+func in_bounds(c: Vector2i) -> bool:
+	return c.x >= 0 and c.y >= 0 and c.x < grid_size and c.y < grid_size
+
+
+func clamp_world(p: Vector3, margin: float = 0.0) -> Vector3:
+	return Vector3(clampf(p.x, margin, size_m - margin), p.y,
+			clampf(p.z, margin, size_m - margin))
+
+
+func install_bridge(id: int, a: Vector3, b: Vector3, width: float = 4.0) -> void:
+	nav.install_bridge(id, a, b, width)
+
+
+func remove_bridge(id: int) -> void:
+	nav.remove_bridge(id)
+
+
+func surface_height_at(x: float, z: float) -> float:
+	return nav.surface_height_at(x, z)
+
+
+func surface_speed_at(x: float, z: float) -> float:
+	var c := world_to_cell(Vector3(x, 0, z))
+	return nav.surface_speed(c.x, c.y)
+
+
+func bridge_id_at(x: float, z: float) -> int:
+	return nav.bridge_id_at(world_to_cell(Vector3(x, 0, z)))

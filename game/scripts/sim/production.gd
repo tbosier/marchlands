@@ -24,6 +24,8 @@ const MAX_REVIEWS_PER_TICK := 24
 var jobs: JobBoard
 var stores: Stores
 var world: World
+var husbandry: Node
+var research: RoadResearch
 var _cart: Cart
 var _next_review: Dictionary = {}       # building id -> in-game seconds
 var _clock := 0.0
@@ -73,8 +75,48 @@ func _review(b: Building) -> void:
 	if b.under_construction:
 		_post_construction(b)
 		return
+	if b.def.is_food_depot():
+		_post_market(b)
+		return
+	if b.def.is_ranch():
+		if husbandry != null:
+			husbandry.post_ranch_jobs(b)
+		_post_delivery(b)
+		_post_delivery(b, Config.Res.FOOD)
+		return
+	if b.type_id == "tannery" and (research == null or not research.completed.has("leatherworking")):
+		return
 	_post_gathering(b)
 	_post_delivery(b)
+
+
+## Market stock is carried by its employed vendors. Incoming claims count
+## against the chosen target, so repeated reviews cannot flood the counters.
+func _post_market(b: Building) -> void:
+	if b.under_construction or b.workers.is_empty():
+		return
+	var res := Config.Res.FOOD
+	if jobs.count_for(JobBoard.Kind.HAUL, b.id, res) >= b.workers.size():
+		return
+	var wanted := float(b.food_stock_target()) - b.inventory[res] - b.incoming[res]
+	if wanted < 1.0:
+		return
+	var source := stores.find_market_source(b)
+	if source == null:
+		return
+	var take := minf(float(Config.CARRY_CAPACITY), wanted)
+	take = minf(take, minf(stores.market_surplus(source), b.space_for(res)))
+	if take < 1.0:
+		return
+	var job := jobs.post(JobBoard.Kind.HAUL, source.global_position, 64.0)
+	job.res = res
+	job.amount = take
+	job.source_id = source.id
+	job.dest_id = b.id
+	job.required_workplace = b.id
+	jobs.index(job)
+	source.reserved[res] += take
+	b.incoming[res] += take
 
 
 # ---------------------------------------------------------------------------
@@ -96,13 +138,14 @@ func _post_construction(b: Building) -> void:
 					float(gross.get(res, want)) / float(Config.CARRY_CAPACITY)))
 			if jobs.count_for(JobBoard.Kind.HAUL, b.id, res) >= trips_needed:
 				continue
-			var source := stores.find_source(res, b.global_position,
-					Config.CARRY_CAPACITY)
+			var take: float = minf(Config.CARRY_CAPACITY, want)
+			var source := stores.find_source(res, b.global_position, take)
 			if source == null:
 				continue
-			var take: float = minf(Config.CARRY_CAPACITY, want)
 			take = minf(take, source.available(res))
-			if take <= 0.5:
+			# Construction waits for every amount above its material epsilon.
+			# Ignoring a fractional last load leaves a paid site stalled forever.
+			if take <= 0.01:
 				continue
 			var job := jobs.post(JobBoard.Kind.HAUL, source.global_position, 72.0)
 			job.res = res
@@ -139,7 +182,11 @@ func _post_gathering(b: Building) -> void:
 		_post_crafting(b)
 		return
 
-	if b.space_for(res) < 1.0:
+	# Each posted trip owns room for its output. Checking only for one free
+	# unit let three workers collect 36 units for a yard with one slot left;
+	# once every store was full they were all stranded carrying the overflow.
+	var output := Config.harvest_load(1.0) if def.is_farm() else float(Config.CARRY_CAPACITY)
+	if b.space_for(res) < output:
 		return
 
 	var kind := JobBoard.Kind.HARVEST if def.is_farm() else JobBoard.Kind.GATHER
@@ -152,6 +199,8 @@ func _post_gathering(b: Building) -> void:
 		var harvest := jobs.post(kind, b.global_position, 58.0)
 		harvest.res = res
 		harvest.dest_id = b.id
+		harvest.output_reserved = output
+		b.production_reserved += output
 		jobs.index(harvest)
 		return
 
@@ -166,6 +215,8 @@ func _post_gathering(b: Building) -> void:
 	gather.res = res
 	gather.dest_id = b.id
 	gather.node_id = node.id
+	gather.output_reserved = output
+	b.production_reserved += output
 	jobs.index(gather)
 
 
@@ -211,7 +262,7 @@ func _post_crafting(b: Building) -> void:
 		if jobs.count_for(JobBoard.Kind.HAUL, b.id, input) >= 2:
 			continue
 		var source := stores.find_source(input, b.global_position,
-				Config.CARRY_CAPACITY)
+				Config.CARRY_CAPACITY, b.id)
 		if source == null:
 			continue
 		var take: float = minf(Config.CARRY_CAPACITY, source.available(input))
@@ -250,10 +301,10 @@ func _post_crafting(b: Building) -> void:
 ## Production buildings are not warehouses. Once stock accumulates it needs
 ## carrying to real storage, which is what creates the repeated round trips
 ## that wear roads in.
-func _post_delivery(b: Building) -> void:
+func _post_delivery(b: Building, output_res: int = -1) -> void:
 	if b.def.is_workshop():
 		_post_workshop_delivery(b)
-	var res := b.def.produces
+	var res := b.def.produces if output_res < 0 else output_res
 	if res < 0:
 		return
 	var surplus := b.available(res)

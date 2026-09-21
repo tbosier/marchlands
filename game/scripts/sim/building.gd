@@ -10,6 +10,10 @@ extends Node3D
 
 signal construction_finished(building: Building)
 
+const MARKET_STOCK_TARGETS := [40, 80, 120]
+const MARKET_SERVICE_RADIUS := 80.0
+const SUPPLY_RELAY_RANGE := 160.0
+
 var id: int = -1
 var type_id: String = ""
 var def: BuildingDefs.Def = null
@@ -23,6 +27,9 @@ var yaw := 0.0
 var inventory := PackedFloat32Array()
 var incoming := PackedFloat32Array()   # already promised by a hauler
 var reserved := PackedFloat32Array()   # already claimed for collection
+## Capacity promised to gathering/harvesting jobs, including loads on their
+## way back. Transient like incoming: rebuilt from jobs, never saved as stock.
+var production_reserved := 0.0
 
 var workers: Array[int] = []
 var residents: Array[int] = []
@@ -34,6 +41,11 @@ var residents: Array[int] = []
 ## It only ever goes in by somebody carrying it home, and only ever comes out
 ## at a meal.
 var larder := 0.0
+## Desired food on the market's counters, including deliveries on the road.
+## Lowering the target never destroys food or cancels a load already carried.
+var market_stock_target := 80
+var health := 200.0
+var fire := 0.0
 
 var under_construction := true
 var delivered := {}                    # Res -> amount delivered so far
@@ -65,6 +77,10 @@ var _smoke: GPUParticles3D
 var _stock_slots: Array[Node3D] = []
 var _stock_shown: Array[int] = []
 var _registry: AssetRegistry
+var _damage_stage := -1
+var _damage_material: StandardMaterial3D
+var _fire_visual: Node3D
+var _fire_time := 0.0
 
 
 func setup(building_id: int, definition: BuildingDefs.Def,
@@ -72,9 +88,14 @@ func setup(building_id: int, definition: BuildingDefs.Def,
 	id = building_id
 	def = definition
 	type_id = def.type_id
+	health = max_health()
 	asset_id = variant if variant != "" else def.asset
 	footprint = registry.footprint(asset_id)
 	_height = registry.height(asset_id)
+	if def.is_food_depot():
+		_height = maxf(_height, 3.6)
+	if type_id in ["fort", "barracks"]:
+		_height = maxf(_height, 5.0)
 
 	inventory.resize(Config.RES_COUNT)
 	incoming.resize(Config.RES_COUNT)
@@ -94,6 +115,14 @@ func setup(building_id: int, definition: BuildingDefs.Def,
 func _build_visual(registry: AssetRegistry) -> void:
 	_visual = registry.instantiate_with_lods(asset_id)
 	add_child(_visual)
+	if def.is_food_depot():
+		_add_market_stalls(_visual)
+	if type_id == "fort":
+		_add_palisade(_visual)
+	if type_id == "barracks":
+		_add_military_banner(_visual)
+	if def.is_ranch():
+		_add_ranch_fittings(_visual)
 
 	if under_construction:
 		# Two visuals while building: a translucent ghost of the finished
@@ -102,6 +131,14 @@ func _build_visual(registry: AssetRegistry) -> void:
 		_blueprint = registry.instantiate(asset_id, 1)
 		_blueprint.name = "blueprint"
 		add_child(_blueprint)
+		if def.is_food_depot():
+			_add_market_stalls(_blueprint)
+		if type_id == "fort":
+			_add_palisade(_blueprint)
+		if type_id == "barracks":
+			_add_military_banner(_blueprint)
+		if def.is_ranch():
+			_add_ranch_fittings(_blueprint)
 		_set_material_on(_blueprint, _blueprint_material())
 		_add_site_pad()
 
@@ -109,6 +146,217 @@ func _build_visual(registry: AssetRegistry) -> void:
 
 	if registry.has_attachment(asset_id, "att_smoke"):
 		_add_smoke(registry.attachment(asset_id, "att_smoke"))
+
+
+## A pair of counters and striped awnings give the market its own silhouette
+## while sharing the existing goods-yard footprint and loading attachments.
+func _add_ranch_fittings(parent: Node3D) -> void:
+	var fittings := Node3D.new()
+	fittings.name = "ranch_fittings"
+	parent.add_child(fittings)
+	var timber := StandardMaterial3D.new()
+	timber.albedo_color = Color(0.38, 0.23, 0.10)
+	for x in [-3.0, 3.0]:
+		for z in [-2.5, 0.0, 2.5]:
+			_market_box(fittings, Vector3(0.18, 1.4, 0.18), Vector3(x, 0.7, z), timber)
+		for y in [0.5, 1.05]:
+			_market_box(fittings, Vector3(0.12, 0.14, 5.0), Vector3(x, y, 0), timber)
+	_market_box(fittings, Vector3(2.6, 0.45, 0.75), Vector3(0, 0.4, 2.4), timber)
+	var water := StandardMaterial3D.new()
+	water.albedo_color = Color(0.25, 0.46, 0.49)
+	_market_box(fittings, Vector3(2.35, 0.05, 0.52), Vector3(0, 0.65, 2.4), water)
+
+
+func _add_market_stalls(parent: Node3D) -> void:
+	var stalls := Node3D.new()
+	stalls.name = "market_stalls"
+	parent.add_child(stalls)
+	var timber := StandardMaterial3D.new()
+	timber.albedo_color = Color(0.32, 0.20, 0.10)
+	timber.roughness = 0.95
+	var cloth := StandardMaterial3D.new()
+	cloth.albedo_color = Color(0.72, 0.23, 0.12)
+	cloth.roughness = 0.9
+	var linen := StandardMaterial3D.new()
+	linen.albedo_color = Color(0.90, 0.78, 0.53)
+	linen.roughness = 0.95
+	for z in [-1.8, 1.8]:
+		_market_box(stalls, Vector3(5.8, 0.20, 1.15), Vector3(0, 1.05, z), timber)
+		for x in [-2.8, 2.8]:
+			for dz in [-0.85, 0.85]:
+				_market_box(stalls, Vector3(0.16, 3.25, 0.16),
+						Vector3(x, 1.625, z + dz), timber)
+		for strip in 6:
+			var awning := _market_box(stalls, Vector3(1.02, 0.10, 2.1),
+					Vector3(float(strip) - 2.5, 3.25, z), cloth if strip % 2 == 0 else linen)
+			awning.rotation.x = -0.12
+			_market_box(stalls, Vector3(1.02, 0.27, 0.08),
+					Vector3(float(strip) - 2.5, 3.12, z + 1.04), cloth if strip % 2 == 0 else linen)
+
+
+func _market_box(parent: Node3D, size: Vector3, at: Vector3,
+		material: Material) -> MeshInstance3D:
+	var mesh := BoxMesh.new()
+	mesh.size = size
+	mesh.material = material
+	var node := MeshInstance3D.new()
+	node.mesh = mesh
+	node.position = at
+	parent.add_child(node)
+	return node
+
+
+func set_market_stock_target(target: int) -> bool:
+	if not def.is_market() or not MARKET_STOCK_TARGETS.has(target):
+		return false
+	market_stock_target = target
+	return true
+
+
+func food_stock_target() -> int:
+	if type_id == "supply_hut":
+		return 60
+	if type_id == "fort":
+		return 120
+	return market_stock_target if def.is_market() else 0
+
+
+func max_health() -> float:
+	match type_id:
+		"keep": return 800.0
+		"fort": return 600.0
+		"barracks": return 300.0
+		"market", "supply_hut": return 180.0
+	return 200.0
+
+
+func apply_damage(amount: float, incendiary: float = 0.0) -> bool:
+	if not is_finite(amount) or not is_finite(incendiary):
+		return health <= 0.0
+	health = maxf(0.0, health - maxf(0.0, amount))
+	fire = clampf(fire + maxf(0.0, incendiary), 0.0, 1.0)
+	_refresh_damage_visual()
+	return health <= 0.0
+
+
+## Fire is physical damage over game seconds. The owner removes a destroyed
+## building through its normal lifecycle so jobs and navigation stay valid.
+func tick_fire(delta: float) -> bool:
+	if delta <= 0.0 or not is_finite(delta):
+		return health <= 0.0
+	if fire > 0.0:
+		health = maxf(0.0, health - fire * max_health() * 0.025 * delta)
+		fire = maxf(0.0, fire - delta * 0.01)
+		_fire_time += delta
+	_refresh_damage_visual()
+	return health <= 0.0
+
+
+func _add_palisade(parent: Node3D) -> void:
+	var timber := StandardMaterial3D.new()
+	timber.albedo_color = Color(0.24, 0.17, 0.11)
+	for side in [-1.0, 1.0]:
+		for step in 12:
+			var along := -3.7 + float(step) * 0.67
+			_market_box(parent, Vector3(0.44, 3.5, 0.44), Vector3(side * 3.7, 1.75, along), timber)
+			if side > 0.0 or absf(along) > 1.4:
+				_market_box(parent, Vector3(0.44, 3.5, 0.44), Vector3(along, 1.75, side * 3.7), timber)
+	_add_military_banner(parent)
+
+
+func _add_military_banner(parent: Node3D) -> void:
+	var timber := StandardMaterial3D.new()
+	timber.albedo_color = Color(0.22, 0.15, 0.10)
+	var cloth := StandardMaterial3D.new()
+	cloth.albedo_color = Color(0.28, 0.43, 0.62)
+	_market_box(parent, Vector3(0.14, 5.0, 0.14), Vector3(-2.8, 2.5, -2.8), timber)
+	_market_box(parent, Vector3(1.8, 1.0, 0.06), Vector3(-1.9, 4.3, -2.8), cloth)
+
+
+func _refresh_damage_visual() -> void:
+	if _visual == null:
+		return
+	var stage := clampi(int((1.0 - health / max_health()) * 5.0), 0, 5)
+	if stage != _damage_stage:
+		_damage_stage = stage
+		if stage > 0 and _damage_material == null:
+			_damage_material = StandardMaterial3D.new()
+			_damage_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			_damage_material.roughness = 1.0
+		if _damage_material != null:
+			_damage_material.albedo_color = Color(0.07, 0.045, 0.03, float(stage) * 0.14)
+			_set_damage_overlay(_visual, _damage_material if stage > 0 else null)
+	if fire > 0.0 and _fire_visual == null:
+		_fire_visual = Node3D.new()
+		_fire_visual.name = "fire"
+		add_child(_fire_visual)
+		var flame_materials: Array[StandardMaterial3D] = []
+		for color in [Color(1.0, 0.16, 0.02, 0.65), Color(1.0, 0.40, 0.04, 0.78),
+				Color(1.0, 0.76, 0.18, 0.82)]:
+			var flame := StandardMaterial3D.new()
+			flame.albedo_color = color
+			flame.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			flame.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			flame_materials.append(flame)
+		# Small varied clusters sit outside the shell at wall and eave height.
+		# A fixed origin ring was hidden inside houses; full-height cones looked
+		# like orange stakes instead of tongues of fire.
+		var bounds := AABB(Vector3(-footprint.x * 0.5, 0, -footprint.y * 0.5),
+				Vector3(footprint.x, _height, footprint.y))
+		var mesh := _registry.mesh(asset_id)
+		var roof_vertices := PackedVector3Array()
+		if mesh != null and not type_id in ["market", "supply_hut", "fort", "barracks"]:
+			bounds = mesh.get_aabb()
+			for surface in mesh.get_surface_count():
+				var material := mesh.surface_get_material(surface)
+				if material != null and (material.resource_name == "thatch"
+						or material.resource_name.begins_with("roof_")):
+					roof_vertices.append_array(mesh.surface_get_arrays(surface)[Mesh.ARRAY_VERTEX])
+		var centre := bounds.get_center()
+		var corners: Array[Vector2] = [Vector2(-1, -1), Vector2(1, -1),
+				Vector2(1, 1), Vector2(-1, 1)]
+		for cluster in 4:
+			var anchor := Vector3(centre.x + corners[cluster].x * (bounds.size.x * 0.5 + 0.12),
+					0.05, centre.z + corners[cluster].y * bounds.size.z * 0.32)
+			if cluster % 2 == 0 and not roof_vertices.is_empty():
+				# Yard fences and chimneys enlarge the overall AABB. Anchor an
+				# eave fire to a real roof vertex so it cannot float beside it.
+				var closest := INF
+				var target := anchor
+				for vertex in roof_vertices:
+					var distance := Vector2(vertex.x - target.x, vertex.z - target.z).length_squared()
+					if distance < closest:
+						closest = distance
+						anchor = vertex + Vector3(corners[cluster].x * 0.05, 0.03, 0)
+			for strand in 3:
+				var shape := CylinderMesh.new()
+				shape.top_radius = 0.0
+				shape.bottom_radius = [0.46, 0.33, 0.22][strand]
+				shape.height = clampf(_height * 0.22, 1.6, 3.2) * [0.85, 1.2, 0.65][strand]
+				shape.radial_segments = 5
+				shape.material = flame_materials[strand]
+				var tongue := MeshInstance3D.new()
+				tongue.mesh = shape
+				tongue.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+				tongue.position = anchor + Vector3(corners[cluster].x * strand * 0.08, 0, (strand - 1) * 0.28)
+				tongue.set_meta("base_y", anchor.y)
+				_fire_visual.add_child(tongue)
+	if _fire_visual != null:
+		_fire_visual.visible = fire > 0.0
+		for i in _fire_visual.get_child_count():
+			var tongue := _fire_visual.get_child(i) as MeshInstance3D
+			var flicker := 0.80 + sin(_fire_time * 11.0 + float(i) * 1.9) * 0.20
+			tongue.scale = Vector3.ONE * maxf(0.15, fire) * flicker
+			tongue.scale.y *= 1.0 + sin(_fire_time * 7.0 + float(i) * 2.7) * 0.22
+			# Scaling around the centre must not lift small flames off the ground.
+			tongue.position.y = tongue.mesh.height * tongue.scale.y * 0.5 + float(tongue.get_meta("base_y"))
+
+
+func _set_damage_overlay(node: Node, material: Material) -> void:
+	if node is GeometryInstance3D:
+		node.material_overlay = material
+	for child in node.get_children():
+		_set_damage_overlay(child, material)
 
 
 ## The translucent shape of the finished building, standing over the site while
@@ -301,11 +549,17 @@ func finish_construction() -> void:
 ## into the settlement's stores.
 func begin_upgrade(next: BuildingDefs.Def, cost: Dictionary, seconds: float,
 				   registry: AssetRegistry) -> Dictionary:
+	var condition := health / max_health()
 	def = next
 	type_id = next.type_id
+	health = max_health() * condition
 	asset_id = next.asset
 	footprint = registry.footprint(asset_id)
 	_height = registry.height(asset_id)
+	if def.is_food_depot():
+		_height = maxf(_height, 3.6)
+	if type_id in ["fort", "barracks"]:
+		_height = maxf(_height, 5.0)
 
 	under_construction = true
 	build_progress = 0.0
@@ -339,6 +593,8 @@ func begin_upgrade(next: BuildingDefs.Def, cost: Dictionary, seconds: float,
 	_stock_shown.clear()
 
 	_build_visual(registry)
+	_damage_stage = -1
+	_refresh_damage_visual()
 	if _body != null:
 		_body.queue_free()
 		_body = null
@@ -364,6 +620,10 @@ func apply_state(entry: Dictionary) -> void:
 	build_seconds = float(entry.get("build_seconds", build_seconds))
 	crop_growth = float(entry.get("crop_growth", 0.0))
 	larder = float(entry.get("larder", 0.0))
+	market_stock_target = int(entry.get("market_stock_target", 80))
+	health = float(entry.get("health", max_health()))
+	fire = float(entry.get("fire", 0.0))
+	_refresh_damage_visual()
 
 	workers.assign(entry.get("workers", []))
 	residents.assign(entry.get("residents", []))
@@ -475,19 +735,16 @@ func total_stored() -> float:
 func space_for(res: int) -> float:
 	if not stores(res):
 		return 0.0
-	var used := total_stored()
+	var used := total_stored() + production_reserved
 	for v in incoming:
 		used += v
 	return maxf(0.0, capacity() - used)
 
 
-## Put goods in. Never accepts more than there is room for: `space_for` has
-## already reserved the pending deliveries, and adding that allowance back was
-## letting a full building keep accepting loads past its own capacity.
+## Unreserved deposits cannot occupy room promised to another delivery or
+## harvest. A job releases its own capacity claim immediately before adding.
 func add(res: int, amount: float) -> float:
-	var room := maxf(0.0, capacity() - total_stored())
-	if not stores(res):
-		return 0.0
+	var room := space_for(res)
 	var taken: float = minf(amount, room)
 	inventory[res] += taken
 	return taken
@@ -543,7 +800,7 @@ func create_fields(hm: Heightmap, nav: NavGrid,
 		return
 
 	var wanted := plot_capacity()
-	var origin := Config.world_to_cell(global_position)
+	var origin := nav.world_to_cell(global_position)
 	var radius_cells := int(def.work_radius / Config.CELL)
 	var claimed := {}
 	var frontier := {}
@@ -607,7 +864,7 @@ func create_fields(hm: Heightmap, nav: NavGrid,
 ## founded, so a farm rebuilt after the rest of the settlement already exists
 ## lays its field somewhere else — and since worked ground is protected from
 ## wear, that silently erased tracks the player had spent days making.
-func adopt_plots(plots: Array, hm: Heightmap, nav: NavGrid,
+func adopt_plots(plots: Array, _hm: Heightmap, nav: NavGrid,
 				 registry: AssetRegistry) -> void:
 	if not def.is_farm():
 		return
@@ -615,13 +872,14 @@ func adopt_plots(plots: Array, hm: Heightmap, nav: NavGrid,
 	# ordinary grass; Simulation._protect_fields then marks the plots this farm
 	# is actually working, which is the one place that decides it.
 	for p in _all_plots:
-		var old := Config.world_to_cell(p)
+		var old := nav.world_to_cell(p)
 		nav.set_cultivated(old.x, old.y, false)
 
 	_all_plots.clear()
 	for p in plots:
 		var world_p: Vector3 = p
-		world_p.y = hm.height_at(world_p.x, world_p.z)
+		# Keep the saved elevation, including plots whose surrounding terrain
+		# was edited after the farm laid them out.
 		_all_plots.append(world_p)
 
 	if _soil_mm:
@@ -646,7 +904,7 @@ func plot_capacity() -> int:
 ## Returns true when the set of worked plots actually changed, so the caller
 ## can re-apply whatever depends on it.
 func sync_fields_to_workers() -> bool:
-	if def.plots_per_worker <= 0 or _all_plots.is_empty():
+	if def.plots_per_worker <= 0:
 		return false
 	var active: int = clampi(workers.size() * def.plots_per_worker,
 			0, _all_plots.size())
@@ -783,6 +1041,10 @@ func refresh_stock_display() -> void:
 
 func _stock_positions() -> Array[Vector3]:
 	var out: Array[Vector3] = []
+	if def.is_food_depot():
+		# The physical grain pile sits on the front counter beneath the awning.
+		out.append(Vector3(-1.5, 1.18, -1.8))
+		return out
 	for i in 4:
 		var key := "att_stock_%d" % i
 		if _registry.has_attachment(asset_id, key):

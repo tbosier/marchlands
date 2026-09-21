@@ -39,6 +39,15 @@ var meals_taken := 0
 ## would spend every tick walking to an empty granary and back, and the farmers
 ## would never reap the crop that would have fed it.
 var meal_retry_at: float = 0.0
+## A route estimate for starting dinner before the walk itself makes hunger
+## urgent. Transient like paths; cached so active workers do not run A* per tick.
+var meal_route_check_at: float = 0.0
+var meal_walk_seconds: float = 0.0
+var meal_route_revision := -1
+var meal_delivery_seconds: float = 0.0
+var meal_route_job_id := -1
+var meal_delivery_target := Vector3.INF
+var meal_route_speed: float = 0.0
 var morale: float = 0.75
 ## True while they are inside their own house for the night: hidden, and not
 ## clickable, because a person indoors is not on the map to be selected.
@@ -63,6 +72,8 @@ var immigrant_target := Vector3.ZERO
 var _path: PackedVector3Array = PackedVector3Array()
 var _path_index := 0
 var _goal := Vector3.ZERO
+var _arrival_goal := Vector3.ZERO
+var _path_revision := -1
 var _has_goal := false
 var _repath_timer := 0.0
 var _stuck_timer := 0.0
@@ -76,6 +87,21 @@ var _parts := {}
 var _rest := {}
 var _carried_visual: Node3D
 var _body: Area3D
+
+
+func _notification(what: int) -> void:
+	if what != NOTIFICATION_PREDELETE:
+		return
+	# Detach per-person materials while their meshes still exist. Releasing
+	# the last tinted actor during scene teardown otherwise leaves a renderer
+	# instance querying a material RID already freed by its surface override.
+	# PREDELETE matters: reparenting a staged save also exits the tree, but
+	# must retain its clothing and faction colors.
+	for part in _parts.values():
+		if not is_instance_valid(part) or not part is MeshInstance3D:
+			continue
+		for surface in part.get_surface_override_material_count():
+			part.set_surface_override_material(surface, null)
 
 
 func setup(citizen_id: int, registry: AssetRegistry,
@@ -150,7 +176,7 @@ func apply_state(entry: Dictionary, registry: AssetRegistry = null) -> void:
 
 	var res := int(entry.get("carrying_res", -1))
 	var amount := float(entry.get("carrying_amount", 0.0))
-	if res >= 0 and amount > 0.01 and registry != null:
+	if res >= 0 and amount > 0.0 and registry != null:
 		pick_up(res, amount, registry)
 
 
@@ -202,6 +228,7 @@ func set_goal(target: Vector3, wear_rate: float = Config.WEAR_PEDESTRIAN) -> voi
 	if _has_goal and _goal.distance_squared_to(target) < 0.36:
 		return
 	_goal = target
+	_arrival_goal = target
 	_has_goal = true
 	unreachable = false
 	_repath_timer = 0.0
@@ -224,12 +251,20 @@ func clear_goal() -> void:
 func has_arrived() -> bool:
 	if not _has_goal:
 		return true
-	return Vector2(global_position.x - _goal.x,
-				   global_position.z - _goal.z).length() <= Config.ARRIVE_RADIUS
+	if unreachable:
+		return false
+	return Vector2(global_position.x - _arrival_goal.x,
+				   global_position.z - _arrival_goal.z).length() <= Config.ARRIVE_RADIUS
 
 
 func distance_to_goal() -> float:
 	return global_position.distance_to(_goal)
+
+
+func walking_speed() -> float:
+	var carry_penalty := 1.0 - 0.14 * clampf(
+			carrying_amount / float(Config.CARRY_CAPACITY), 0.0, 1.0)
+	return Config.WALK_SPEED * speed_scale * speed_modifier * carry_penalty
 
 
 ## Advance the citizen by `delta` in-game seconds. Returns the distance moved,
@@ -240,7 +275,8 @@ func advance(delta: float, world: World) -> float:
 		return 0.0
 
 	_repath_timer -= delta
-	if _path.is_empty() or _path_index >= _path.size() or _repath_timer <= 0.0:
+	if _path_revision != world.nav.revision or _repath_timer <= 0.0 \
+			or (not _path.is_empty() and _path_index >= _path.size()):
 		_repath(world)
 
 	if _path.is_empty():
@@ -248,16 +284,28 @@ func advance(delta: float, world: World) -> float:
 		return 0.0
 
 	var here := global_position
+	var start_cell := world.world_to_cell(here)
+	var escaping := world.nav.is_solid(start_cell.x, start_cell.y)
 	var target: Vector3 = _path[_path_index]
 	var flat_to_target := Vector2(target.x - here.x, target.z - here.z)
 
 	while flat_to_target.length() < 0.35 and _path_index < _path.size() - 1:
+		var next_waypoint := _path[_path_index + 1]
+		# A valid route can just clear the corner of an obstacle. Turning a
+		# third of a metre early cuts through that corner unless the shortcut
+		# from the person's actual position is also clear.
+		if not escaping and not world.nav._clear_line(Vector2(here.x, here.z),
+				Vector2(next_waypoint.x, next_waypoint.z)):
+			break
 		_path_index += 1
 		target = _path[_path_index]
 		flat_to_target = Vector2(target.x - here.x, target.z - here.z)
 
 	var dist := flat_to_target.length()
-	if dist < 0.001:
+	# Finish even the last sub-millimetre when a corner forbids an early turn.
+	# Stopping short here left a rounded position clipping the next diagonal,
+	# so both the corner guard and this tolerance refused to move forever.
+	if dist <= 0.0:
 		update_animation(delta, 0.0)
 		return 0.0
 
@@ -265,8 +313,7 @@ func advance(delta: float, world: World) -> float:
 	# Clamped, because `int(x / CELL)` on a position that has drifted to the
 	# edge of the world indexes past the grid, reads as water, and stops the
 	# citizen dead.
-	var cell := Config.world_to_cell(here)
-	var surf_mult: float = world.heightmap.surface_speed(cell.x, cell.y)
+	var surf_mult: float = world.surface_speed_at(here.x, here.z)
 	if surf_mult <= 0.0:
 		# Impassable ground — a settler scattered into the shallows, or a path
 		# that crossed something it should not have. Wade slowly towards the
@@ -282,7 +329,7 @@ func advance(delta: float, world: World) -> float:
 		var wade := away.normalized() * minf(
 				Config.WALK_SPEED * 0.35 * delta, away.length())
 		var to := here + Vector3(wade.x, 0.0, wade.y)
-		to.y = world.heightmap.height_at(to.x, to.z)
+		to.y = world.surface_height_at(to.x, to.z)
 		global_position = to
 		_path.clear()
 		# Move the wear anchor with them without stamping. Wading leaves no
@@ -291,16 +338,17 @@ func advance(delta: float, world: World) -> float:
 		_wear_anchor = to
 		update_animation(delta, wade.length() / maxf(delta, 0.0001))
 		return wade.length()
-	var carry_penalty := 1.0 - 0.14 * clampf(
-			carrying_amount / float(Config.CARRY_CAPACITY), 0.0, 1.0)
-
-	var speed: float = (Config.WALK_SPEED * speed_scale * speed_modifier
-			* road_mult * surf_mult * carry_penalty)
+	var speed: float = walking_speed() * road_mult * surf_mult
 	var step: float = minf(speed * delta, dist)
 	var dir := flat_to_target / dist
 	var moved := Vector3(dir.x, 0, dir.y) * step
 	var next := here + moved
-	next.y = world.heightmap.height_at(next.x, next.z)
+	if step == dist:
+		# Finish exactly on the waypoint rather than a rounded point beside
+		# it, which could keep a tight corner's next segment obstructed.
+		next.x = target.x
+		next.z = target.z
+	next.y = world.surface_height_at(next.x, next.z)
 	global_position = next
 
 	# Face the direction of travel.
@@ -335,7 +383,9 @@ func _repath(world: World) -> void:
 	_repath_timer = Config.PATH_CACHE_SECONDS
 	_path = world.nav.find_path(global_position, _goal)
 	_path_index = 0
+	_path_revision = world.nav.revision
 	unreachable = _path.is_empty()
+	_arrival_goal = _goal if unreachable else _path[_path.size() - 1]
 	_wear_anchor = global_position
 
 
@@ -431,6 +481,11 @@ func begin_work(seconds: float) -> void:
 	_work_timer = seconds
 
 
+## Injured veterans override this; ordinary citizens retain full ability.
+func workability() -> float:
+	return 1.0
+
+
 func work_tick(delta: float) -> bool:
 	_work_timer -= delta
 	return _work_timer <= 0.0
@@ -475,7 +530,16 @@ func update_hunger(day: float, delta_days: float) -> void:
 func take_meal(day: float) -> void:
 	meals_taken += 1
 	hunger = 0.0
-	next_meal = Config.next_meal_after(day)
+	# A late breakfast just before dinner still feeds the citizen for one meal
+	# interval. Otherwise the next calendar slot could be seconds away, making
+	# a remote worker turn back for food immediately after finally eating.
+	var minimum_gap := 1.0
+	var previous: float = Config.MEAL_TIMES.back() - 1.0
+	for meal_time in Config.MEAL_TIMES:
+		minimum_gap = minf(minimum_gap, meal_time - previous)
+		previous = meal_time
+	next_meal = maxf(Config.next_meal_after(day), day + minimum_gap)
+	meal_route_check_at = 0.0
 
 
 func is_hungry(day: float) -> bool:

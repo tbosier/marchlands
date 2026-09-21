@@ -26,7 +26,6 @@
     "lod2": 180
   },
   "triangle_budget": 900,
-  "has_collision": true,
   "parts": [],
   "attachments": {}
 }

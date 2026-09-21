@@ -34,6 +34,7 @@ class NodeRec:
 
 
 var records: Array[NodeRec] = []
+var _pick_tiles: Dictionary = {}
 var _by_cell: Dictionary = {}        # Vector2i -> Array[int]
 ## asset_id -> [near MultiMeshInstance3D, far MultiMeshInstance3D]. Vegetation
 ## cannot vary LOD per instance inside one MultiMesh, so each scatter is drawn
@@ -42,6 +43,11 @@ var _by_cell: Dictionary = {}        # Vector2i -> Array[int]
 var _multimeshes: Dictionary = {}
 ## Tile key -> the world position its MultiMeshInstance3D nodes sit at.
 var _mm_origin: Dictionary = {}
+var _pick_bounds: Dictionary = {}    # asset_id -> local AABB
+## Keep the visible transforms on the CPU too: the headless renderer has no
+## MultiMesh buffer to read back, and GPU readbacks are unnecessary for hover.
+var _visual_transforms: Dictionary = {}   # node id -> world Transform3D
+var _pick_world_bounds: Dictionary = {}  # node id -> broad-phase AABB
 
 ## Edge length of a scatter tile, in metres. Small enough that the near and far
 ## copies of a tile are a meaningful distance apart, large enough that the map
@@ -76,6 +82,8 @@ func generate(hm: Heightmap, registry: AssetRegistry, seed_value: int) -> void:
 
 	_plan_forest(plan)
 	_plan_minerals(plan)
+	if _hm.generation_version >= 2:
+		_plan_start_resources(plan)
 
 	for asset_id in plan.keys():
 		var entries: Array = plan[asset_id]
@@ -87,13 +95,16 @@ func generate(hm: Heightmap, registry: AssetRegistry, seed_value: int) -> void:
 
 
 func _plan_forest(plan: Dictionary) -> void:
+	if _hm.generation_version >= 2:
+		_plan_regional_forest(plan)
+		return
 	## Trees cluster in the woodland the heightmap classified, thinning at the
 	## edges so the forest has a soft, natural boundary.
 	var attempts := 5200
 	for _i in attempts:
-		var x := _rng.randf() * Config.WORLD_SIZE
-		var z := _rng.randf() * Config.WORLD_SIZE
-		var c := Config.world_to_cell(Vector3(x, 0, z))
+		var x := _rng.randf() * _hm.world_size
+		var z := _rng.randf() * _hm.world_size
+		var c := _world_to_cell(Vector3(x, 0, z))
 		var surf := _hm.cell_surface(c.x, c.y)
 		var density := 0.0
 		if surf == Heightmap.Surface.FOREST:
@@ -129,12 +140,13 @@ func _plan_forest(plan: Dictionary) -> void:
 func _plan_minerals(plan: Dictionary) -> void:
 	## Stone favours the high northern ground; iron sits in the north-west,
 	## following the design doc's starting scenario.
-	var stone_clusters := 14
-	var iron_clusters := 6
+	var regional_scale := maxi(1, roundi(_hm.world_size / Config.WORLD_SIZE))
+	var stone_clusters := 14 * regional_scale
+	var iron_clusters := 6 * regional_scale
 
 	for _c in stone_clusters:
-		var cx := _rng.randf_range(0.12, 0.88) * Config.WORLD_SIZE
-		var cz := _rng.randf_range(0.05, 0.55) * Config.WORLD_SIZE
+		var cx := _rng.randf_range(0.12, 0.88) * _hm.world_size
+		var cz := _rng.randf_range(0.05, 0.55) * _hm.world_size
 		for _k in _rng.randi_range(3, 7):
 			var x := cx + _rng.randf_range(-22.0, 22.0)
 			var z := cz + _rng.randf_range(-22.0, 22.0)
@@ -149,8 +161,8 @@ func _plan_minerals(plan: Dictionary) -> void:
 			})
 
 	for _c in iron_clusters:
-		var cx := _rng.randf_range(0.05, 0.42) * Config.WORLD_SIZE
-		var cz := _rng.randf_range(0.05, 0.42) * Config.WORLD_SIZE
+		var cx := _rng.randf_range(0.05, 0.42) * _hm.world_size
+		var cz := _rng.randf_range(0.05, 0.42) * _hm.world_size
 		for _k in _rng.randi_range(2, 4):
 			var x := cx + _rng.randf_range(-16.0, 16.0)
 			var z := cz + _rng.randf_range(-16.0, 16.0)
@@ -166,13 +178,13 @@ func _plan_minerals(plan: Dictionary) -> void:
 
 
 func _valid_mineral_site(x: float, z: float, min_height: float) -> bool:
-	if x < 8.0 or z < 8.0 or x > Config.WORLD_SIZE - 8.0 \
-			or z > Config.WORLD_SIZE - 8.0:
+	if x < 8.0 or z < 8.0 or x > _hm.world_size - 8.0 \
+			or z > _hm.world_size - 8.0:
 		return false
 	var h := _hm.height_at(x, z)
 	if h < min_height:
 		return false
-	var c := Config.world_to_cell(Vector3(x, 0, z))
+	var c := _world_to_cell(Vector3(x, 0, z))
 	return _hm.cell_surface(c.x, c.y) != Heightmap.Surface.WATER
 
 
@@ -199,6 +211,10 @@ func _build_multimesh(asset_id: String, entries: Array,
 	var far_mesh := registry.mesh(asset_id, 1)
 	if far_mesh == null:
 		far_mesh = near_mesh
+	_pick_bounds[asset_id] = near_mesh.get_aabb()
+	if asset_id == "iron_node_01":
+		near_mesh = _iron_mesh(near_mesh)
+		far_mesh = _iron_mesh(far_mesh)
 
 	# Group by tile first, so each MultiMesh is built once at its final size.
 	var by_tile: Dictionary = {}
@@ -235,6 +251,8 @@ func _build_multimesh(asset_id: String, entries: Array,
 			instances.append(mmi)
 
 		LOD.apply_to_multimesh(instances[0], instances[1])
+		if _hm != null and _hm.world_size > Config.WORLD_SIZE:
+			instances[1].visibility_range_end = 1000.0
 		_multimeshes[key] = instances
 
 		for i in tile_entries.size():
@@ -252,6 +270,24 @@ func _build_multimesh(asset_id: String, entries: Array,
 					Vector3.ONE * e["scale"])
 			records.append(rec)
 			_write_transform(rec, Transform3D(rec.basis, rec.position))
+
+
+## Keep the authored oxidized seams, but give ore a dark metallic host rock.
+## Copy only this asset's materials so ordinary stone and buildings stay stone.
+func _iron_mesh(source: Mesh) -> Mesh:
+	var styled := source.duplicate() as ArrayMesh
+	if styled == null:
+		return source
+	for surface in styled.get_surface_count():
+		var original := source.surface_get_material(surface)
+		var rust := original != null and original.resource_name == "brick_red"
+		var material := StandardMaterial3D.new()
+		material.resource_name = "ore_oxide" if rust else "ore_metal"
+		material.albedo_color = Color(0.72, 0.30, 0.10) if rust else Color(0.19, 0.23, 0.25)
+		material.metallic = 0.12 if rust else 0.68
+		material.roughness = 0.78 if rust else 0.38
+		styled.surface_set_material(surface, material)
+	return styled
 
 
 ## Clear everything inside a radius, as though the site had been cleared before
@@ -275,16 +311,26 @@ func clear_area(centre: Vector3, radius: float) -> int:
 
 func _index_cells() -> void:
 	_by_cell.clear()
+	_pick_tiles.clear()
 	for rec in records:
-		var c := Config.world_to_cell(rec.position)
+		var c := _world_to_cell(rec.position)
 		if not _by_cell.has(c):
 			_by_cell[c] = []
 		_by_cell[c].append(rec.id)
+		var tile := Vector2i(floori(rec.position.x / SCATTER_TILE), floori(rec.position.z / SCATTER_TILE))
+		var bounds: AABB = _pick_world_bounds.get(rec.id, AABB(rec.position, Vector3.ONE))
+		if not _pick_tiles.has(tile):
+			_pick_tiles[tile] = {"bounds": bounds, "ids": []}
+		_pick_tiles[tile].bounds = _pick_tiles[tile].bounds.merge(bounds)
+		_pick_tiles[tile].ids.append(rec.id)
 
 
 # --- Queries ----------------------------------------------------------------
 
 func _write_transform(rec: NodeRec, xform: Transform3D) -> void:
+	_visual_transforms[rec.id] = xform
+	if _pick_bounds.has(rec.asset_id):
+		_pick_world_bounds[rec.id] = xform * (_pick_bounds[rec.asset_id] as AABB)
 	# Instance transforms are local to the tile node they belong to.
 	var local := xform
 	local.origin -= _mm_origin.get(rec.mm_key, Vector3.ZERO) as Vector3
@@ -298,13 +344,54 @@ func get_node_rec(id: int) -> NodeRec:
 	return records[id]
 
 
+## Pick the nearest live resource through its transformed visual bounds.
+## Callers can cap max_distance at a terrain/building hit to respect occlusion.
+func pick_ray(origin: Vector3, direction: Vector3,
+		max_distance: float = 4000.0) -> NodeRec:
+	if direction.is_zero_approx() or max_distance <= 0.0:
+		return null
+	var ray := direction.normalized()
+	var best: NodeRec = null
+	var best_distance := max_distance
+	var candidates: Array[NodeRec] = []
+	if _pick_tiles.is_empty():
+		candidates = records
+	else:
+		for tile in _pick_tiles.values():
+			if tile.bounds.intersects_ray(origin, ray) == null:
+				continue
+			for id in tile.ids:
+				candidates.append(records[id])
+	for rec in candidates:
+		if rec.depleted or rec.falling >= 0.0 or not _pick_bounds.has(rec.asset_id):
+			continue
+		var transform: Transform3D = _visual_transforms.get(rec.id,
+				Transform3D(rec.basis, rec.position))
+		var bounds: AABB = _pick_bounds[rec.asset_id]
+		var world_bounds: AABB = (_pick_world_bounds[rec.id] if _pick_world_bounds.has(rec.id)
+				else transform * bounds)
+		if world_bounds.intersects_ray(origin, ray) == null:
+			continue
+		if is_zero_approx(transform.basis.determinant()):
+			continue
+		var inverse := transform.affine_inverse()
+		var hit: Variant = bounds.intersects_ray(inverse * origin, inverse.basis * ray)
+		if hit == null:
+			continue
+		var distance_to_hit := origin.distance_to(transform * (hit as Vector3))
+		if distance_to_hit < best_distance:
+			best_distance = distance_to_hit
+			best = rec
+	return best
+
+
 ## Nearest live, unclaimed node of `kind` within `radius` metres of `from`.
 func find_nearest(kind: int, from: Vector3, radius: float,
 				  exclude_reserved: bool = true) -> NodeRec:
 	var best: NodeRec = null
 	var best_d := radius * radius
 	var cell_radius := int(ceil(radius / Config.CELL))
-	var centre := Config.world_to_cell(from)
+	var centre := _world_to_cell(from)
 	for dz in range(-cell_radius, cell_radius + 1):
 		for dx in range(-cell_radius, cell_radius + 1):
 			var c := Vector2i(centre.x + dx, centre.y + dz)
@@ -565,3 +652,65 @@ func tick_regrowth(now_days: float) -> void:
 			rec.amount = rec.max_amount
 			rec.regrow_at = -1.0
 			_set_depleted(rec, false)
+
+
+## Every starting region has a small workable wood and construction stone;
+## larger regional deposits still reward exploring the ridges. Generated after
+## the old scatter only in version two, preserving old save resource IDs.
+func _plan_start_resources(plan: Dictionary) -> void:
+	var centre := Vector2.ONE * (_hm.world_size * 0.5)
+	for kind in [Kind.TREE, Kind.STONE, Kind.IRON]:
+		var count := 60 if kind == Kind.TREE else (14 if kind == Kind.STONE else 6)
+		var anchor := centre + (Vector2(-92, -72) if kind == Kind.TREE else
+				(Vector2(-115, 55) if kind == Kind.STONE else Vector2(-140, -100)))
+		for i in count:
+			var p := anchor + Vector2(_rng.randf_range(-28, 28), _rng.randf_range(-28, 28))
+			var cell := _world_to_cell(Vector3(p.x, 0, p.y))
+			if not _hm.is_passable(cell.x, cell.y):
+				continue
+			var asset := "oak_tree_01" if kind == Kind.TREE else (
+					"stone_node_01" if kind == Kind.STONE else "iron_node_01")
+			plan[asset].append({"position": Vector3(p.x, _hm.height_at(p.x, p.y), p.y),
+					"scale": _rng.randf_range(0.85, 1.2), "yaw": _rng.randf() * TAU,
+					"kind": kind, "amount": TREE_TIMBER if kind == Kind.TREE else
+					(STONE_YIELD if kind == Kind.STONE else IRON_YIELD)})
+
+
+func _world_to_cell(p: Vector3) -> Vector2i:
+	return _hm.world_to_cell(p) if _hm else Config.world_to_cell(p)
+
+
+func _plan_regional_forest(plan: Dictionary) -> void:
+	# Use stands, rather than distributing a thin dusting of trees across a
+	# 64-times-larger map. The number of independently culled instances grows
+	# with side length, and forest interiors keep believable local density.
+	var stands := maxi(10, roundi(_hm.world_size / Config.WORLD_SIZE * 12.0))
+	for stand in stands:
+		var anchor := Vector2.ZERO
+		var found := false
+		for attempt in 100:
+			anchor = Vector2(_rng.randf_range(40, _hm.world_size - 40),
+					_rng.randf_range(40, _hm.world_size - 40))
+			var cell := _world_to_cell(Vector3(anchor.x, 0, anchor.y))
+			if _hm.cell_surface(cell.x, cell.y) == Heightmap.Surface.FOREST:
+				found = true
+				break
+		if not found:
+			continue
+		for tree in 100:
+			var angle := _rng.randf() * TAU
+			var radius := sqrt(_rng.randf()) * 54.0
+			var point := anchor + Vector2(cos(angle), sin(angle)) * radius
+			if point.x < 4 or point.y < 4 or point.x >= _hm.world_size - 4 or point.y >= _hm.world_size - 4:
+				continue
+			var cell := _world_to_cell(Vector3(point.x, 0, point.y))
+			var ground := _hm.cell_surface(cell.x, cell.y)
+			if ground == Heightmap.Surface.WATER or ground == Heightmap.Surface.ROCK or _hm.cell_slope(cell.x, cell.y) > 0.5:
+				continue
+			if point.distance_to(Vector2.ONE * _hm.world_size * 0.5) < 85:
+				continue
+			var h := _hm.height_at(point.x, point.y)
+			var asset := "pine_tree_01" if h > 18.0 else ("oak_tree_01" if stand % 3 != 0 else "oak_tree_02")
+			plan[asset].append({"position": Vector3(point.x, h, point.y),
+					"scale": _rng.randf_range(0.82, 1.22), "yaw": _rng.randf() * TAU,
+					"kind": Kind.TREE, "amount": TREE_TIMBER})

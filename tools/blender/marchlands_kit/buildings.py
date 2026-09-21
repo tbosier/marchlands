@@ -4,7 +4,7 @@ Each generator returns an `Asset`: one merged mesh, the attachment points the
 game reads (entrance, cart bay, worksite, smoke, stock slots) and the footprint
 the placement system validates against.
 
-All buildings face -Y. Origin is the foundation centre at ground level.
+All buildings face -Y. Origin is the horizontal footprint centre at ground level.
 """
 
 from __future__ import annotations
@@ -27,6 +27,25 @@ class Asset:
 
     def attach(self, name: str, position) -> "Asset":
         self.attachments[name] = tuple(position)
+        return self
+
+    def center_footprint(self) -> "Asset":
+        """Fit placement bounds to the whole asset, including stairs and shafts.
+
+        Recenter before the exporter derives LODs, moving attachment hooks by
+        the same horizontal offset so they remain on their authored features.
+        Keep all heights unchanged and round footprint dimensions outwards to
+        the next decimetre so placement never understates the occupied space.
+        """
+        low = [min(v[axis] for v in self.builder.verts) for axis in (0, 1)]
+        high = [max(v[axis] for v in self.builder.verts) for axis in (0, 1)]
+        cx, cy = [(lo + hi) * 0.5 for lo, hi in zip(low, high)]
+        self.builder.verts = [(x - cx, y - cy, z)
+                              for x, y, z in self.builder.verts]
+        self.attachments = {name: (x - cx, y - cy, z)
+                            for name, (x, y, z) in self.attachments.items()}
+        self.footprint = tuple(math.ceil((hi - lo - 1e-9) * 10) / 10
+                               for lo, hi in zip(low, high))
         return self
 
 
@@ -205,7 +224,7 @@ def keep_tier1() -> Asset:
                  (sx, -d * 0.5 - 1.1 - (i // 2) * 1.5, 0.0))
     a.attach("att_smoke", smoke)
     a.attach("att_flag", (tx, ty, pole_z + 3.0))
-    return a
+    return a.center_footprint()
 
 
 # --------------------------------------------------------------------------
@@ -445,7 +464,7 @@ def granary() -> Asset:
     # Sacks stacked under the hoist, so a full granary looks full.
     a.attach("att_stock_0", (-1.7, -d * 0.5 - 1.5, 0.0))
     a.attach("att_stock_1", (1.7, -d * 0.5 - 1.5, 0.0))
-    return a
+    return a.center_footprint()
 
 
 # --------------------------------------------------------------------------

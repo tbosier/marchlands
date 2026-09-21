@@ -30,7 +30,6 @@
     "lod2": 96
   },
   "triangle_budget": 4000,
-  "has_collision": true,
   "parts": [],
   "attachments": {
     "att_entrance": [

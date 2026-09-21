@@ -5,7 +5,6 @@ One asset = one .glb containing:
       <asset_id>_lod0     visual mesh
       <asset_id>_lod1     (buildings + vegetation)
       <asset_id>_lod2     (buildings + vegetation)
-      <asset_id>_collision
       att_*               attachment empties the game reads by name
 
 The manifest written alongside it records everything the validators and the
@@ -18,7 +17,6 @@ import json
 import os
 
 import bpy
-import bmesh
 
 from . import lod as LOD
 from . import mesh as M
@@ -89,15 +87,14 @@ def _empty(name: str, location, parent: bpy.types.Object | None = None,
     return obj
 
 
-def build_asset_objects(asset, make_lods: bool = True,
-                        make_collision: bool = True):
+def build_asset_objects(asset, make_lods: bool = True):
     """Turn an Asset description into a parented Blender object hierarchy."""
     scene_coll = bpy.context.scene.collection
     root = bpy.data.objects.new(asset.asset_id, None)
     root.empty_display_type = "ARROWS"
     scene_coll.objects.link(root)
 
-    created = {"root": root, "lods": [], "collision": None, "parts": []}
+    created = {"root": root, "lods": [], "parts": []}
 
     if getattr(asset, "parts", None):
         # Characters: keep the pivot hierarchy instead of merging.
@@ -128,12 +125,6 @@ def build_asset_objects(asset, make_lods: bool = True,
                 smart_uv(obj)
                 obj.parent = root
                 created["lods"].append(obj)
-
-        if make_collision:
-            col = LOD.make_collision(lod0, asset.asset_id, asset.category,
-                                     scene_coll)
-            col.parent = root
-            created["collision"] = col
 
     for name, pos in asset.attachments.items():
         _empty(name, pos, parent=root)
@@ -182,7 +173,6 @@ def manifest_for(asset, created: dict) -> dict:
             **({"parts": sum(tri(o) for o in parts)} if parts else {}),
         },
         "triangle_budget": triangle_budget(asset.category, asset.asset_id),
-        "has_collision": created["collision"] is not None,
         "parts": [o.name for o in parts],
         "attachments": {k: [round(c, 4) for c in v]
                         for k, v in asset.attachments.items()},

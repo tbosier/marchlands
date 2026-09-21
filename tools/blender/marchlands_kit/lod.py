@@ -1,4 +1,4 @@
-"""LOD and collision generation.
+"""LOD generation.
 
 Two strategies, chosen per category in assets/specs/style.yaml:
 
@@ -10,17 +10,12 @@ Two strategies, chosen per category in assets/specs/style.yaml:
   * "decimate" — Blender's Decimate modifier at the ratios in the spec. Right
                  for foliage, which is dense and organic and has no silhouette
                  that a collapse can ruin.
-
-Collision meshes are convex-ish simplified hulls derived from the source
-geometry, which is what the game's placement and picking systems actually
-need — not the full silhouette.
 """
 
 from __future__ import annotations
 
 import bpy
 import bmesh
-from mathutils import Vector
 
 from . import mesh as M
 from .style import lod_detail_tier, lod_ratios, lod_strategy, style
@@ -62,6 +57,7 @@ def make_lod(source: bpy.types.Object, level: int,
         mod.ratio = ratio
         mod.use_collapse_triangulate = True
         _apply_modifiers(obj)
+        _strip_duplicate_faces(obj)
     return obj
 
 
@@ -92,55 +88,28 @@ def _apply_modifiers(obj: bpy.types.Object) -> None:
         bpy.data.meshes.remove(old)
 
 
-def make_collision(source: bpy.types.Object, asset_id: str,
-                   category: str,
-                   collection: bpy.types.Collection | None = None
-                   ) -> bpy.types.Object:
-    """A simplified collision shell.
+def _strip_duplicate_faces(obj: bpy.types.Object) -> None:
+    """Drop faces that repeat a face already kept, vertex for vertex.
 
-    Buildings get a slab matching their occupied volume (cheap and exactly what
-    the placement grid wants); everything else gets a convex hull of the source
-    geometry.
+    Collapse decimation regularly folds two source faces onto the same three
+    vertices and leaves both in the mesh. Nothing renders the second one — the
+    glTF exporter writes each distinct triangle once — so the only thing the
+    duplicates ever reached was the manifest, which counted them and therefore
+    claimed more triangles for a reduced LOD than the exported file contains.
+    The wheat crop declared 144 triangles at lod2 and shipped 72.
     """
-    name = f"{asset_id}_collision"
-
-    if category == "building":
-        bb_min, bb_max = _bounds(source)
-        size = bb_max - bb_min
-        centre = (bb_max + bb_min) * 0.5
-        mb = M.MeshBuilder(name)
-        v, f = M.box(size.x, size.y, size.z,
-                     center=(centre.x, centre.y, bb_min.z))
-        mb.add(v, f, "stone_grey")
-        obj = mb.to_object(collection, name=name)
-    else:
-        mesh = bpy.data.meshes.new(name)
-        obj = bpy.data.objects.new(name, mesh)
-        (collection or bpy.context.scene.collection).objects.link(obj)
-        bm = bmesh.new()
-        bm.from_mesh(source.data)
-        hull = bmesh.ops.convex_hull(bm, input=bm.verts[:])
-        bmesh.ops.delete(
-            bm,
-            geom=hull["geom_unused"] + hull["geom_interior"],
-            context="VERTS",
-        )
-        bmesh.ops.triangulate(bm, faces=bm.faces[:])
-        bm.to_mesh(mesh)
-        bm.free()
-        if source.data.materials:
-            mesh.materials.append(source.data.materials[0])
-
-    obj.display_type = "WIRE"
-    return obj
-
-
-def _bounds(obj: bpy.types.Object):
-    verts = [Vector(v.co) for v in obj.data.vertices]
-    if not verts:
-        return Vector((0, 0, 0)), Vector((0, 0, 0))
-    xs = [v.x for v in verts]
-    ys = [v.y for v in verts]
-    zs = [v.z for v in verts]
-    return (Vector((min(xs), min(ys), min(zs))),
-            Vector((max(xs), max(ys), max(zs))))
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    seen = set()
+    doomed = []
+    for face in bm.faces:
+        key = frozenset(v.index for v in face.verts)
+        if key in seen:
+            doomed.append(face)
+        else:
+            seen.add(key)
+    if doomed:
+        bmesh.ops.delete(bm, geom=doomed, context="FACES_ONLY")
+        bm.to_mesh(obj.data)
+        obj.data.update()
+    bm.free()

@@ -3,13 +3,15 @@
 #
 #   tools/build.sh assets      regenerate every asset from its generator
 #   tools/build.sh validate    check generated assets against the style spec
+#   tools/build.sh shaders     compile the shaders on a real GL driver
+#   tools/build.sh test        assets + regressions + scenarios + rendering + endurance
 #   tools/build.sh previews    render turntable previews
 #   tools/build.sh icons       render the build-tray icons
 #   tools/build.sh sync        copy generated assets into the Godot project
 #   tools/build.sh import      let Godot import the assets
 #   tools/build.sh run         play the game
 #   tools/build.sh harness S   run scripted scenario S headlessly + screenshot
-#   tools/build.sh all         assets -> validate -> sync -> import
+#   tools/build.sh all         assets -> validate -> sync -> import -> shaders
 #
 # Blender and Godot are looked for on PATH first (`pacman -S blender godot`),
 # then in tools/vendor/ for a self-contained checkout.
@@ -92,6 +94,29 @@ cmd_validate() {
 	python3 tools/validators/validate_assets.py "$@"
 }
 
+cmd_shaders() {
+	require GODOT godot
+	echo "==> compiling shaders"
+	# A separate target because the harness cannot do this job. Break a shader
+	# and run any of the eighteen scenarios headlessly: Godot prints SHADER
+	# ERROR, then exits 0, and the scenario prints ALL CHECKS PASSED. The
+	# diagnostic is there and nothing whatever reads it. (Measured, not
+	# assumed — with water.gdshader broken, smoke.json still passes.)
+	#
+	# So this runs the shaders past a real GL driver instead, which headless
+	# never does at any point, and reads what the engine says about them. The
+	# checker exits non-zero itself, which is the only reason this does not
+	# need the `if !` dance the Blender steps do.
+	#
+	# GODOT is exported rather than left to the checker's own search, so that a
+	# `GODOT=... tools/build.sh shaders` picks the same binary here as anywhere
+	# else in this file. The checker still starts Godot through godot_env.sh,
+	# so Godot itself writes nothing outside .godot-home/ — though xvfb-run,
+	# which is not ours and sits outside that wrapper, does make a short-lived
+	# authority file under TMPDIR.
+	GODOT="$GODOT" python3 tools/validators/check_shaders.py "$@"
+}
+
 cmd_previews() {
 	require BLENDER blender
 	echo "==> rendering previews"
@@ -148,6 +173,11 @@ cmd_run() {
 	godot --path game "$@"
 }
 
+cmd_test() {
+	require GODOT godot
+	GODOT="$GODOT" python3 tools/verify.py "$@"
+}
+
 cmd_harness() {
 	require GODOT godot
 	local script="${1:-tools/scenes/first_road.json}"
@@ -162,12 +192,15 @@ cmd_all() {
 	cmd_validate
 	cmd_sync
 	cmd_import
+	cmd_shaders
 	echo "==> done"
 }
 
 case "${1:-all}" in
 	assets)   shift; cmd_assets "$@" ;;
 	validate) shift; cmd_validate "$@" ;;
+	shaders)  shift; cmd_shaders "$@" ;;
+	test)     shift; cmd_test "$@" ;;
 	previews) shift; cmd_previews "$@" ;;
 	icons)    shift; cmd_icons "$@" ;;
 	sync)     shift; cmd_sync ;;
@@ -176,7 +209,7 @@ case "${1:-all}" in
 	harness)  shift; cmd_harness "$@" ;;
 	all)      cmd_all ;;
 	*)
-		sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
 		exit 1
 		;;
 esac

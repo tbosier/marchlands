@@ -18,6 +18,9 @@ var _all: Array[Building] = []
 var _totals := PackedFloat32Array()
 var _carried := PackedFloat32Array()
 var _larder := PackedFloat32Array()
+var trade: Node
+var _nav: NavGrid
+var _access_point: Callable
 
 
 func _init() -> void:
@@ -26,6 +29,18 @@ func _init() -> void:
 	_larder.resize(Config.RES_COUNT)
 	for i in Config.RES_COUNT:
 		_by_resource.append([] as Array[Building])
+
+
+func setup_navigation(nav: NavGrid, access_point: Callable) -> void:
+	_nav = nav
+	_access_point = access_point
+
+
+func _reachable(from: Vector3, building: Building) -> bool:
+	if _nav == null:
+		return true
+	var door: Vector3 = _access_point.call(building, "att_cart_bay")
+	return _nav.can_reach(from, door)
 
 
 # --- Membership -------------------------------------------------------------
@@ -76,9 +91,14 @@ func refresh_totals(citizens: Array[Citizen],
 	for b in buildings:
 		if b.larder > 0.0:
 			_larder[Config.Res.FOOD] += b.larder
+	if is_instance_valid(trade):
+		for res in Config.RES_COUNT:
+			_carried[res] += trade.transit(res)
 	for c in citizens:
 		if c.carrying_res >= 0 and c.carrying_amount > 0.0:
 			_carried[c.carrying_res] += c.carrying_amount
+		if c is Soldier:
+			_carried[Config.Res.FOOD] += c.rations
 
 
 ## What the kingdom owns, counting loads being carried and food already in
@@ -97,7 +117,10 @@ func in_larders(res: int) -> float:
 ## on someone's back is real, but no clerk can requisition it, and counting it
 ## let road works be commissioned and then paid for with nothing.
 func spendable(res: int) -> float:
-	return _totals[res]
+	var stock := 0.0
+	for b in _by_resource[res]:
+		stock += b.available(res)
+	return stock
 
 
 func in_transit(res: int) -> float:
@@ -106,7 +129,7 @@ func in_transit(res: int) -> float:
 
 func can_afford(cost: Dictionary) -> bool:
 	for res in cost:
-		if _totals[res] < float(cost[res]):
+		if spendable(res) < float(cost[res]):
 			return false
 	return true
 
@@ -122,6 +145,10 @@ func try_spend(cost: Dictionary) -> bool:
 ## Take `cost` out of the settlement's stores, nearest-to-dearest order
 ## unspecified — this is for abstracted spending (road works), not hauling.
 func spend(cost: Dictionary) -> void:
+	# Payment is synchronous: validate every resource before removing any,
+	# using live, unpromised stock rather than the interface's tick snapshot.
+	if not can_afford(cost):
+		return
 	for res in cost:
 		var remaining := float(cost[res])
 		for b in _by_resource[res]:
@@ -133,18 +160,18 @@ func spend(cost: Dictionary) -> void:
 			# counted by `refresh_totals`. Counting goods the settlement then
 			# refused to hand over meant `can_afford` could say yes and `spend`
 			# quietly take less, which bought road works for nothing.
-			remaining -= b.remove(res, remaining)
+			remaining -= b.remove(res, minf(remaining, b.available(res)))
 		_totals[res] = maxf(0.0, _totals[res] - (float(cost[res]) - remaining))
 
 
 # --- Lookup -----------------------------------------------------------------
 
 ## The best building to take `res` out of, near `from`.
-func find_source(res: int, from: Vector3, want: float) -> Building:
+func find_source(res: int, from: Vector3, want: float, exclude_id: int = -1) -> Building:
 	var best: Building = null
 	var best_score := -INF
 	for b in _by_resource[res]:
-		if b.under_construction:
+		if b.under_construction or b.id == exclude_id:
 			continue
 		var have: float = b.available(res)
 		if have < minf(want, 1.0):
@@ -152,9 +179,49 @@ func find_source(res: int, from: Vector3, want: float) -> Building:
 		var score := -from.distance_to(b.global_position)
 		if have >= want:
 			score += 40.0
-		if score > best_score:
+		if score > best_score and _reachable(from, b):
 			best_score = score
 			best = b
+	return best
+
+
+## Vendors and quartermasters replenish from genuine surplus. Keep enough at
+## each source for its local households and meals.
+func market_surplus(source: Building) -> float:
+	var local_reserve := maxf(float(Config.CARRY_CAPACITY),
+			float(source.def.houses) * Config.HUNGER_PER_DAY * Config.LARDER_DAYS)
+	if source.def.is_farm():
+		local_reserve = maxf(local_reserve, source.capacity() * 0.2)
+	return maxf(0.0, source.available(Config.Res.FOOD) - local_reserve)
+
+
+func find_market_source(market: Building) -> Building:
+	if not market.def.is_food_depot():
+		return null
+	var best: Building = null
+	var best_distance := INF
+	var seat: Building = null
+	for building in _all:
+		if building.def.role == BuildingDefs.Role.SEAT:
+			seat = building
+			break
+	for source in _by_resource[Config.Res.FOOD]:
+		if source.under_construction \
+				or source.id == market.id or market_surplus(source) < 1.0:
+			continue
+		var distance := market.global_position.distance_squared_to(source.global_position)
+		if market.def.is_market() and source.def.is_food_depot():
+			continue
+		if market.def.role == BuildingDefs.Role.SUPPLY:
+			if distance > Building.SUPPLY_RELAY_RANGE * Building.SUPPLY_RELAY_RANGE:
+				continue
+			if source.def.is_food_depot() and (seat == null or
+					source.position.distance_squared_to(seat.position)
+					>= market.position.distance_squared_to(seat.position)):
+				continue
+		if distance < best_distance and _reachable(market.global_position, source):
+			best_distance = distance
+			best = source
 	return best
 
 
@@ -170,7 +237,7 @@ func find_store(res: int, from: Vector3, exclude_id: int) -> Building:
 		# deliveries fill it packed the forge with ninety timber and no iron,
 		# and it stopped working. Workshops pull exactly what they need
 		# themselves, in Production._post_crafting.
-		if b.def.is_workshop():
+		if b.def.is_workshop() or b.def.is_food_depot() or b.def.is_ranch():
 			continue
 		if b.space_for(res) < 1.0:
 			continue
@@ -180,7 +247,7 @@ func find_store(res: int, from: Vector3, exclude_id: int) -> Building:
 				score += 60.0
 			BuildingDefs.Role.SEAT:
 				score += 30.0
-		if score > best_score:
+		if score > best_score and _reachable(from, b):
 			best_score = score
 			best = b
 	return best
@@ -189,7 +256,7 @@ func find_store(res: int, from: Vector3, exclude_id: int) -> Building:
 ## True when there is nowhere left in the kingdom to put this resource.
 func is_full_for(res: int) -> bool:
 	for b in _by_resource[res]:
-		if not b.under_construction and b.space_for(res) >= 1.0:
+		if not b.under_construction and not b.def.is_food_depot() and b.space_for(res) >= 1.0:
 			return false
 	return true
 

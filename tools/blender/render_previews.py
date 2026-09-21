@@ -158,7 +158,7 @@ def render_asset(asset_id: str, factory, frames: int, res: int) -> str:
     materials.build_all()
 
     asset = factory()
-    exporter.build_asset_objects(asset, make_lods=False, make_collision=False)
+    exporter.build_asset_objects(asset, make_lods=False)
 
     # Object locations set via .location do not reach matrix_world until the
     # depsgraph runs; without this the camera frames character parts at the

@@ -18,6 +18,7 @@ const MIN_DIST := 12.0
 const MAX_DIST := 340.0
 const NEAR_PITCH := -16.0
 const FAR_PITCH := -58.0
+const GROUND_CLEARANCE := 3.0
 
 @export var edge_pan_enabled := false
 
@@ -61,8 +62,8 @@ func camera() -> Camera3D:
 
 
 func look_at_position(p: Vector3, dist: float = -1.0) -> void:
-	_target_focus = p
-	focus = p
+	_target_focus = _constrain_focus(p)
+	focus = _target_focus
 	if dist > 0.0:
 		distance = clampf(dist, MIN_DIST, MAX_DIST)
 		_target_distance = distance
@@ -70,7 +71,7 @@ func look_at_position(p: Vector3, dist: float = -1.0) -> void:
 
 
 func focus_on(p: Vector3, dist: float = -1.0) -> void:
-	_target_focus = Vector3(p.x, p.y, p.z)
+	_target_focus = _constrain_focus(p)
 	if dist > 0.0:
 		_target_distance = clampf(dist, MIN_DIST, MAX_DIST)
 
@@ -126,13 +127,7 @@ func _process(delta: float) -> void:
 		var right := Vector3(cos(yaw), 0, -sin(yaw))
 		_target_focus += (right * move.x + forward * move.y) * speed * delta
 
-	var margin := 12.0
-	_target_focus.x = clampf(_target_focus.x, -margin,
-			Config.WORLD_SIZE + margin)
-	_target_focus.z = clampf(_target_focus.z, -margin,
-			Config.WORLD_SIZE + margin)
-	if _hm:
-		_target_focus.y = _hm.height_at(_target_focus.x, _target_focus.z)
+	_target_focus = _constrain_focus(_target_focus)
 
 	var k := clampf(delta * 11.0, 0.0, 1.0)
 	focus = focus.lerp(_target_focus, k)
@@ -168,6 +163,24 @@ func _apply() -> void:
 	var pitch := lerpf(NEAR_PITCH, FAR_PITCH, pow(t, 0.7))
 	_arm.rotation_degrees.x = pitch
 	_camera.position = Vector3(0, 0, distance)
+	_camera.rotation = Vector3.ZERO
+	if _hm:
+		var eye := _camera.global_position
+		var ground := maxf(Config.SEA_LEVEL,
+				Terrain.presentation_height(_hm, eye.x, eye.z))
+		if eye.y < ground + GROUND_CLEARANCE:
+			eye.y = ground + GROUND_CLEARANCE
+			_camera.global_position = eye
+			_camera.look_at(focus, Vector3.UP)
+
+
+func _constrain_focus(p: Vector3) -> Vector3:
+	var size_m := _hm.world_size if _hm else Config.WORLD_SIZE
+	p.x = clampf(p.x, 0.0, size_m)
+	p.z = clampf(p.z, 0.0, size_m)
+	if _hm:
+		p.y = maxf(Config.SEA_LEVEL, _hm.height_at(p.x, p.z))
+	return p
 
 
 ## Ray from the cursor into the world, for picking.

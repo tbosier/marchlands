@@ -35,6 +35,11 @@ var stores := Stores.new()
 var workforce := Workforce.new()
 var production := Production.new()
 var population := Population.new()
+var research := RoadResearch.new()
+var trade: Node
+var campaign: Node
+var husbandry: Node
+var bridges: Node
 
 var buildings: Array[Building] = []
 var citizens: Array[Citizen] = []
@@ -64,6 +69,7 @@ var _rng := RandomNumberGenerator.new()
 ## Entrance positions are asked for every tick by every worker; they only
 ## change when a building is placed, so they are worked out once.
 var _entrance_cache: Dictionary = {}
+var _entrance_revision := -1
 ## Worked out once a tick rather than once per citizen.
 var _is_night := false
 
@@ -85,7 +91,9 @@ func setup(world_node: World, asset_registry: AssetRegistry,
 	# always restored it that way; play did not, so saving and reloading made
 	# the map measurably more walkable than it had been a moment earlier.
 	world.nodes.depletion_changed.connect(_on_node_depletion_changed)
+	stores.setup_navigation(world.nav, entrance_of)
 	production.setup(jobs, stores, world)
+	production.research = research
 	population.setup(stores, jobs, seed_value)
 	population.alert.connect(func(text, pos): alert.emit(text, pos))
 
@@ -93,7 +101,7 @@ func setup(world_node: World, asset_registry: AssetRegistry,
 func _on_node_depletion_changed(rec) -> void:
 	if rec.kind == ResourceNodes.Kind.TREE:
 		return
-	var c := Config.world_to_cell(rec.position)
+	var c := world.world_to_cell(rec.position)
 	world.nav.set_blocked(c.x, c.y, not rec.depleted)
 	jobs.clear_refusals()
 
@@ -115,15 +123,24 @@ func tick(delta: float) -> void:
 
 	var prev_day := day
 	day += delta / Config.DAY_LENGTH
+	var learned := research.advance(delta / Config.DAY_LENGTH)
+	if learned != "":
+		alert.emit("Research completed: %s" % learned.replace("_", " ").capitalize(),
+				keep.global_position if keep != null else world.centre())
 
 	_is_night = Config.is_night(day)
-	stores.refresh_totals(citizens, buildings)
+	stores.refresh_totals(population_members(), buildings)
 	if workforce.update(buildings, citizens, buildings_by_id):
 		for b in buildings:
 			if b.sync_fields_to_workers():
 				# Staffing decides how much of the farm is under crop, and
 				# ground under crop is ground no track may form on.
 				_protect_fields(b, true)
+	if husbandry != null:
+		husbandry.tick(delta)
+	production.husbandry = husbandry
+	if bridges != null:
+		bridges.tick(delta)
 	production.tick(delta, buildings)
 
 	Perf.begin("sim.citizens")
@@ -132,7 +149,7 @@ func tick(delta: float) -> void:
 	Perf.end("sim.citizens")
 
 	if cart != null:
-		cart.follow(world.heightmap, delta)
+		cart.follow(world.heightmap, delta, world)
 	world.nodes.tick_falling(delta)
 
 	_repost_felling_orders()
@@ -159,6 +176,10 @@ func tick(delta: float) -> void:
 		_stock_timer = STOCK_DISPLAY_INTERVAL
 		for b in buildings:
 			b.refresh_stock_display()
+	if campaign != null:
+		campaign.tick(delta)
+	if trade != null:
+		trade.tick(delta)
 
 	Perf.end("sim.total")
 
@@ -235,11 +256,12 @@ func _consume_tools(elapsed_days: float) -> void:
 func _run_immigration() -> void:
 	if keep == null:
 		return
-	var decision := population.consider_immigration(buildings, citizens)
+	var decision := population.consider_immigration(buildings, population_members())
 	var count: int = decision.get("count", 0)
 	if count <= 0:
 		return
-	var entry := population.edge_entry_point(world)
+	var destination := entrance_of(keep, "att_entrance")
+	var entry := population.edge_entry_point(world, destination)
 	if entry == Vector3.INF:
 		return
 	for i in count:
@@ -248,11 +270,17 @@ func _run_immigration() -> void:
 		# the lake or past the edge of the map, where their surface speed is
 		# zero and they stand for ever.
 		var p := entry + population.scatter_offset()
-		var cell := Config.world_to_cell(p)
+		p.x = clampf(p.x, Config.CELL * 0.5, world.size_m - Config.CELL * 0.5)
+		p.z = clampf(p.z, Config.CELL * 0.5, world.size_m - Config.CELL * 0.5)
+		var cell := world.world_to_cell(p)
 		if world.nav.is_solid(cell.x, cell.y):
 			var free := world.nav.nearest_free(p)
 			p = Config.cell_to_world(free)
 			p.y = world.heightmap.height_at(p.x, p.z)
+		# Scattering can cross a river or a wall even when the party's shared
+		# entry is connected. Keep that settler at the verified entry instead.
+		if not world.nav.can_reach(p, destination):
+			p = entry
 		add_citizen(p, true)
 	var reasons: Array = decision.get("reasons", [])
 	alert.emit("%d settlers are travelling to your lands — %s."
@@ -333,6 +361,13 @@ func _tick_citizen(c: Citizen, delta: float) -> void:
 		return
 
 	c.update_hunger(day, delta / Config.DAY_LENGTH)
+	# Discharged veterans keep their issued food. It remains personal stock,
+	# and is eaten once before asking the household for another ration.
+	if c is Soldier and c.rations >= Config.MEAL_FOOD and c.is_hungry(day):
+		c.rations -= Config.MEAL_FOOD
+		c.take_meal(day)
+		if c.state == Citizen.State.EATING:
+			_end_meal(c)
 
 	# A meal errand, once begun, runs to its end. The citizen may be carrying
 	# the household's food, and neither nightfall nor the job board may take it
@@ -340,6 +375,13 @@ func _tick_citizen(c: Citizen, delta: float) -> void:
 	if c.state == Citizen.State.EATING:
 		_tick_meal(c, delta)
 		return
+	var start_meal := (c.is_hungry(day) and day >= c.meal_retry_at
+			and _should_start_meal(c))
+	if start_meal and not _can_eat_somewhere(c):
+		# Keep working if food is unavailable; restarting an empty meal errand
+		# would stop the farmers from producing the food they need.
+		c.meal_retry_at = day + Config.MEAL_RETRY_DAYS
+		start_meal = false
 
 	# Night. Everyone not holding something walks home and turns in. This is
 	# not decoration: the daily journey between home and work is one of the
@@ -349,31 +391,32 @@ func _tick_citizen(c: Citizen, delta: float) -> void:
 	# reset the walk to it, so a gatherer halfway to the quarry at dusk threw
 	# away the whole outbound journey and started again in the morning.
 	# Everyone is asleep, so nobody else wanted it anyway.
-	if _is_night and c.carrying_amount <= 0.01:
+	if _is_night and c.carrying_amount <= 0.01 and not start_meal:
 		_tick_sleep(c, delta)
 		return
 	if c.indoors:
 		c.set_indoors(false)
 		c.state = Citizen.State.IDLE
 
-	# A meal that has fallen due is taken between jobs — or straight away, if
-	# they are hungry enough that finishing the round first would be silly.
-	if c.is_hungry(day) and day >= c.meal_retry_at \
-			and c.carrying_amount <= 0.01 \
-			and (c.job == null or c.hunger >= Config.HUNGER_URGENT):
-		if _can_eat_somewhere(c):
-			if c.job != null:
-				_abandon(c)
-			c.state = Citizen.State.EATING
-			c.clear_goal()
-			_tick_meal(c, delta)
-			return
-		# There is nothing to eat anywhere. Stay at work rather than downing
-		# tools every few minutes to walk to a cupboard that is still bare:
-		# dropping the job resets the walk to it, so a starving march spent all
-		# day re-starting journeys and never reaped the crop that would have
-		# fed it. Hunger goes on rising; this only stops the thrashing.
-		c.meal_retry_at = day + Config.MEAL_RETRY_DAYS
+	# Dinner comes before sleep once it is due. Working citizens account for
+	# the walk to food instead of waiting to become urgent before setting off.
+	if start_meal:
+		# A loaded delivery is paused for dinner, not cancelled. Cancelling
+		# it erased the destination and sent scarce construction iron back
+		# to a full mine after every meal, so distant upgrades never finished.
+		if c.job != null and c.carrying_amount <= 0.01:
+			_abandon(c)
+		c.state = Citizen.State.EATING
+		c.clear_goal()
+		_tick_meal(c, delta)
+		return
+
+	if c.workability() <= 0.0:
+		if c.job != null:
+			_retire_job(c)
+		_idle_behaviour(c, delta)
+		c.task_label = "unable to work — injured arms"
+		return
 
 	if c.job == null and c.carrying_amount > 0.01:
 		# Someone holding goods with no job to justify them — a hauler whose
@@ -398,17 +441,35 @@ func _tick_citizen(c: Citizen, delta: float) -> void:
 
 	match c.job.kind:
 		JobBoard.Kind.HAUL: _tick_haul(c, delta)
+		JobBoard.Kind.SALVAGE:
+			if trade != null: trade.tick_recovery(c, delta)
+			else: _retire_job(c)
 		JobBoard.Kind.GATHER: _tick_gather(c, delta)
 		JobBoard.Kind.HARVEST: _tick_harvest(c, delta)
 		JobBoard.Kind.BUILD: _tick_build(c, delta)
 		JobBoard.Kind.FELL: _tick_fell(c, delta)
 		JobBoard.Kind.CRAFT: _tick_craft(c, delta)
+		JobBoard.Kind.BRIDGE_HAUL, JobBoard.Kind.BRIDGE_BUILD:
+			if bridges != null:
+				bridges.tick_job(c, delta)
+			else:
+				_retire_job(c)
+		JobBoard.Kind.TAME, JobBoard.Kind.TEND, JobBoard.Kind.BUTCHER:
+			if husbandry != null:
+				husbandry.tick_job(c, delta)
+			else:
+				_retire_job(c)
 		_: _abandon(c)
 
 
 func _seek_job(c: Citizen) -> void:
-	c.job = jobs.best_for(c.id, c.global_position, JobBoard.Accept.ANY,
-			c.workplace_id)
+	var workplace: Building = buildings_by_id.get(c.workplace_id)
+	if workplace != null and (workplace.def.is_food_depot() or workplace.def.is_ranch()):
+		c.job = jobs.best_for(c.id, c.global_position, JobBoard.Accept.OWN_SITE_ONLY,
+				c.workplace_id)
+	if c.job == null:
+		c.job = jobs.best_for(c.id, c.global_position, JobBoard.Accept.ANY,
+				c.workplace_id)
 	if c.job != null:
 		c.state = Citizen.State.TRAVELLING
 		c.set_goal(c.job.position)
@@ -418,7 +479,7 @@ func _seek_job(c: Citizen) -> void:
 func _abandon(c: Citizen) -> void:
 	_release_cart(c)
 	if c.job != null:
-		if c.job.kind == JobBoard.Kind.HAUL and c.job.loaded:
+		if c.job.kind in [JobBoard.Kind.HAUL, JobBoard.Kind.BRIDGE_HAUL, JobBoard.Kind.SALVAGE] and c.job.loaded:
 			# The goods are already on this citizen's back. Handing the job to
 			# somebody else would have them draw the same load from the source
 			# a second time; retire it instead, give back what it still holds,
@@ -470,7 +531,20 @@ func _restore_felling_claim(job: JobBoard.Job) -> void:
 		rec.reserved_by = FELLING_CLAIM
 
 
+func _release_output(job: JobBoard.Job) -> void:
+	if job.output_reserved <= 0.0:
+		return
+	var site: Building = buildings_by_id.get(job.dest_id)
+	if site != null:
+		site.production_reserved = maxf(0.0, site.production_reserved - job.output_reserved)
+	job.output_reserved = 0.0
+
+
 func _release_reservations(job: JobBoard.Job) -> void:
+	if job.bridge_id >= 0 and bridges != null:
+		bridges.release_reservations(job)
+		return
+	_release_output(job)
 	if job.kind == JobBoard.Kind.HAUL and job.res >= 0:
 		# A loaded haul consumed its source reservation when it picked up.
 		# Releasing it again drops the reservation covering *other* pending
@@ -494,7 +568,7 @@ func _tick_haul(c: Citizen, delta: float) -> void:
 	var src: Building = buildings_by_id.get(job.source_id)
 	var dst: Building = buildings_by_id.get(job.dest_id)
 	if src == null or dst == null:
-		_abandon(c)
+		_retire_job(c)
 		return
 
 	if c.carrying_amount <= 0.0:
@@ -579,7 +653,7 @@ func _tick_haul(c: Citizen, delta: float) -> void:
 func _release_cart(c: Citizen) -> void:
 	if cart != null and cart.carrier == c:
 		cart.unload()
-		cart.release(world.heightmap)
+		cart.release(world.heightmap, world)
 
 
 func _tick_gather(c: Citizen, delta: float) -> void:
@@ -588,10 +662,14 @@ func _tick_gather(c: Citizen, delta: float) -> void:
 	var node := world.nodes.get_node_rec(job.node_id)
 	if site == null or node == null \
 			or (node.depleted and c.carrying_amount <= 0.0):
-		_abandon(c)
+		_retire_job(c)
 		return
 
 	if c.carrying_amount <= 0.0 and c.state != Citizen.State.WORKING:
+		# Sleeping replaces the outbound route with the walk home. Restore the
+		# resource destination before testing arrival, or a cleared goal lets
+		# the worker harvest from their doorstep the following morning.
+		c.set_goal(node.position)
 		c.advance(delta, world)
 		if not c.has_arrived():
 			return
@@ -609,7 +687,7 @@ func _tick_gather(c: Citizen, delta: float) -> void:
 		var taken := world.nodes.harvest(node, Config.CARRY_CAPACITY, day)
 		node.reserved_by = -1
 		if taken <= 0.01:
-			_abandon(c)
+			_retire_job(c)
 			return
 		c.pick_up(job.res, taken, registry)
 		c.state = Citizen.State.TRAVELLING
@@ -620,6 +698,7 @@ func _tick_gather(c: Citizen, delta: float) -> void:
 	c.advance(delta, world)
 	if not c.has_arrived():
 		return
+	_release_output(job)
 	_deposit(c, site, job.res)
 	jobs.complete(job)
 	_go_idle(c)
@@ -629,7 +708,7 @@ func _tick_harvest(c: Citizen, delta: float) -> void:
 	var job := c.job
 	var farm: Building = buildings_by_id.get(job.dest_id)
 	if farm == null or farm.field_count() == 0:
-		_abandon(c)
+		_retire_job(c)
 		return
 
 	if c.carrying_amount <= 0.0 and c.state != Citizen.State.WORKING:
@@ -652,8 +731,7 @@ func _tick_harvest(c: Citizen, delta: float) -> void:
 		if not c.work_tick(delta):
 			c.update_animation(delta, 0.0)
 			return
-		var yield_amount: float = Config.CARRY_CAPACITY * lerpf(
-				0.6, 1.25, farm.crop_growth)
+		var yield_amount := Config.harvest_load(farm.crop_growth)
 		c.pick_up(Config.Res.FOOD, yield_amount, registry)
 		c.state = Citizen.State.TRAVELLING
 		c.task_label = "carrying grain"
@@ -667,6 +745,7 @@ func _tick_harvest(c: Citizen, delta: float) -> void:
 	c.advance(delta, world)
 	if not c.has_arrived():
 		return
+	_release_output(job)
 	_deposit(c, farm, Config.Res.FOOD)
 	jobs.complete(job)
 	_go_idle(c)
@@ -710,6 +789,10 @@ func _spill_into_stores(res: int, amount: float, from: Vector3,
 
 ## Walk a stray load to the nearest store and put it down.
 func _carry_stray_load(c: Citizen, delta: float) -> void:
+	if c.workability() <= 0.0:
+		c.clear_goal()
+		c.task_label = "unable to carry — injured arms"
+		return
 	var res := c.carrying_res
 	var dest := stores.find_store(res, c.global_position, -1)
 	if dest == null:
@@ -725,6 +808,12 @@ func _carry_stray_load(c: Citizen, delta: float) -> void:
 	if c.has_arrived():
 		_deposit(c, dest, res)
 		c.clear_goal()
+		if c.carrying_amount > 0.01:
+			# Another delivery can fill this store before arrival. Keep the
+			# remainder physical and give it a new route in this same tick.
+			var next_store := stores.find_store(res, c.global_position, dest.id)
+			if next_store != null:
+				c.set_goal(entrance_of(next_store, "att_cart_bay"))
 
 
 ## Standing at the bench. The smith walks to the worksite, works a spell, and
@@ -747,7 +836,7 @@ func _tick_craft(c: Citizen, delta: float) -> void:
 			return
 		c.begin_work(Config.CRAFT_BATCH * Config.WORK_TICKS_PER_UNIT
 				* 1.4 / tools_bonus)
-		c.task_label = "working the forge"
+		c.task_label = "curing hides" if shop.type_id == "tannery" else "working the forge"
 		c.face_towards(shop.global_position)
 		return
 
@@ -766,7 +855,7 @@ func _tick_fell(c: Citizen, delta: float) -> void:
 	var job := c.job
 	var node := world.nodes.get_node_rec(job.node_id)
 	if node == null or (node.depleted and c.carrying_amount <= 0.0):
-		_abandon(c)
+		_retire_job(c)
 		return
 
 	if c.carrying_amount <= 0.0 and c.state != Citizen.State.WORKING:
@@ -787,7 +876,7 @@ func _tick_fell(c: Citizen, delta: float) -> void:
 		var taken := world.nodes.fell(node, Config.CARRY_CAPACITY)
 		if taken <= 0.01:
 			node.reserved_by = -1
-			_abandon(c)
+			_retire_job(c)
 			return
 		# The order stands until the tree is gone; anything still in the trunk
 		# is another trip, not timber that evaporates.
@@ -851,7 +940,7 @@ func _tick_build(c: Citizen, delta: float) -> void:
 	c.task_label = "building %s" % site.display_name()
 	c.update_animation(delta, 0.0)
 
-	if site.advance_construction(delta):
+	if site.advance_construction(delta * c.workability()):
 		_on_building_completed(site)
 		_go_idle(c)
 
@@ -892,18 +981,143 @@ func _on_building_completed(site: Building) -> void:
 ## carrying food home from a store. That is the point of it — it makes where
 ## the granary stands matter, and it puts a second daily journey on the ground
 ## for the roads to form along.
-func _tick_meal(c: Citizen, delta: float) -> void:
+func _should_start_meal(c: Citizen) -> bool:
+	# Holding a stray load is not a job to finish first. A grain carrier also
+	# has their next ration to hand and can eat without interrupting its route.
+	if c.job == null or c.hunger >= Config.HUNGER_URGENT \
+			or (c.carrying_res == Config.Res.FOOD and c.carrying_amount >= Config.MEAL_FOOD):
+		return true
+	# Outbound workers must be allowed to reach the node and finish a batch.
+	# Turning them around whenever the return trip grows longer can prevent a
+	# distant mine from ever producing. Once loaded they can plan dinner on
+	# the return leg; urgent hunger still interrupts any kind of work above.
+	if c.carrying_amount <= 0.01:
+		return false
+	var delivery_target := _loaded_delivery_target(c.job)
+	var walking_speed := c.walking_speed()
+	if day >= c.meal_route_check_at or c.meal_route_revision != world.nav.revision \
+			or c.meal_route_job_id != c.job.id or c.meal_delivery_target != delivery_target \
+			or not is_equal_approx(c.meal_route_speed, walking_speed):
+		c.meal_walk_seconds = _meal_travel_seconds(c)
+		c.meal_delivery_seconds = world.nav.travel_cost(c.global_position, delivery_target) \
+				/ maxf(walking_speed, 0.01) if delivery_target != Vector3.INF else INF
+		c.meal_route_check_at = day + Config.MEAL_RETRY_DAYS
+		c.meal_route_revision = world.nav.revision
+		c.meal_route_job_id = c.job.id
+		c.meal_delivery_target = delivery_target
+		c.meal_route_speed = walking_speed
+	# A loaded construction haul may be heading away from food. If it can
+	# finish before urgency, let it arrive: repeatedly requiring enough time
+	# to walk back for dinner can turn it around at the same midpoint forever.
+	# The cache interval provides slack; actual urgent hunger still wins above.
+	var remaining := (Config.HUNGER_URGENT - c.hunger) * Config.STARVE_DAYS
+	if c.meal_delivery_seconds / Config.DAY_LENGTH + Config.MEAL_RETRY_DAYS < remaining:
+		return false
+	# Between estimates, time passes and the worker can walk farther from food.
+	# Budget one refresh interval for each instead of waiting until urgency and
+	# then adding a lengthy quarry-to-granary trip on top of the missed meal.
+	var travel_days := c.meal_walk_seconds / Config.DAY_LENGTH
+	return c.hunger + (travel_days + 2.0 * Config.MEAL_RETRY_DAYS) \
+			/ Config.STARVE_DAYS >= Config.HUNGER_URGENT
+
+
+func _loaded_delivery_target(job: JobBoard.Job) -> Vector3:
+	var destination: Building = buildings_by_id.get(job.dest_id)
+	if destination == null:
+		return Vector3.INF
+	var access := "att_cart_bay"
+	if job.kind == JobBoard.Kind.GATHER:
+		access = "att_stock_0"
+	elif job.kind == JobBoard.Kind.HARVEST:
+		access = "att_entrance"
+	return entrance_of(destination, access)
+
+
+func _home_has_meal(home: Building) -> bool:
+	return home.larder >= Config.MEAL_FOOD or (home.stores(Config.Res.FOOD)
+			and home.inventory[Config.Res.FOOD] >= Config.MEAL_FOOD)
+
+
+func _meal_home(c: Citizen) -> Building:
 	var home: Building = buildings_by_id.get(c.home_id)
-	var has_home: bool = (home != null and is_instance_valid(home)
-			and not home.under_construction and home.def.houses > 0)
+	if home == null or not is_instance_valid(home) or home.under_construction \
+			or home.def.houses <= 0:
+		return null
+	# A resident unable to carry can still eat a stocked household meal or
+	# visit a counter; they cannot fetch a bulk larder load with injured arms.
+	if c.workability() <= 0.0 and not _home_has_meal(home):
+		return null
+	var door := entrance_of(home, "att_entrance")
+	if not world.nav.can_reach(c.global_position, door):
+		return null
+	# Food already fetched for the household still goes home. Other distant
+	# workers eat at a nearer counter; a stocked home remains usable when it
+	# is closer or when no public store has food.
+	if not (c.job == null and c.carrying_res == Config.Res.FOOD
+			and c.carrying_amount > 0.01):
+		var distance := c.global_position.distance_to(door)
+		if distance > Config.SLEEP_WALK_MAX:
+			if not _home_has_meal(home):
+				return null
+			var counter := _nearest_food(c.global_position)
+			if counter != null and c.global_position.distance_to(
+					entrance_of(counter, "att_cart_bay")) < distance:
+				return null
+	return home
+
+
+func _meal_travel_seconds(c: Citizen) -> float:
+	var home := _meal_home(c)
+	var cost := 0.0
+	if home != null and _home_has_meal(home):
+		cost = world.nav.travel_cost(c.global_position, entrance_of(home, "att_entrance"))
+	else:
+		var source := _nearest_food(c.global_position)
+		if source == null:
+			return INF
+		var counter := entrance_of(source, "att_cart_bay")
+		cost = world.nav.travel_cost(c.global_position, counter)
+		# Empty hands fetch for a nearby household. A loaded worker eats at
+		# the counter, preserving their existing cargo and claimed delivery.
+		if home != null and c.carrying_amount <= 0.01:
+			cost += world.nav.travel_cost(counter, entrance_of(home, "att_entrance"))
+	return cost / maxf(c.walking_speed(), 0.01)
+
+
+func _tick_meal(c: Citizen, delta: float) -> void:
+	# A grain delivery can supply the carrier's ration. The remaining load
+	# still belongs to its original destination, not the household larder.
+	if c.job != null and c.carrying_res == Config.Res.FOOD \
+			and c.carrying_amount >= Config.MEAL_FOOD and c.is_hungry(day):
+		c.carrying_amount -= Config.MEAL_FOOD
+		if c.carrying_amount <= 0.0:
+			c.drop()
+		c.take_meal(day)
+		_end_meal(c)
+		return
+	var home := _meal_home(c)
+	var has_home := home != null
+	# A full store can leave a citizen holding timber for days. They can eat
+	# at home if it already has food; otherwise eat at a counter while keeping
+	# that load, instead of overwriting it with a second resource fetched home.
+	if has_home and c.carrying_amount > 0.01 \
+			and (c.carrying_res != Config.Res.FOOD or c.job != null) \
+			and not _home_has_meal(home):
+		has_home = false
 
 	# Leg 2: carrying the household's food home.
-	if c.carrying_amount > 0.01 and c.carrying_res == Config.Res.FOOD:
+	if c.job == null and c.carrying_amount > 0.01 and c.carrying_res == Config.Res.FOOD:
 		if not has_home:
+			if c.carrying_amount >= Config.MEAL_FOOD and c.is_hungry(day):
+				c.carrying_amount -= Config.MEAL_FOOD
+				if c.carrying_amount <= 0.0:
+					c.drop()
+				c.take_meal(day)
 			# Their house came down while they were at the granary. They keep
 			# hold of the food and walk it to a store instead.
 			_end_meal(c)
-			_carry_stray_load(c, delta)
+			if c.carrying_amount > 0.01:
+				_carry_stray_load(c, delta)
 			return
 		c.task_label = "carrying food home"
 		c.set_goal(entrance_of(home, "att_entrance"))
@@ -939,17 +1153,20 @@ func _tick_meal(c: Citizen, delta: float) -> void:
 				> Config.MEAL_FOOD * 0.9:
 			c.take_meal(day)
 		_end_meal(c)
+		if c.job == null and c.carrying_amount > 0.01:
+			_carry_stray_load(c, delta)
 		return
 
 	# There is food in the house: go home and eat it.
-	if home.larder >= Config.MEAL_FOOD or (home.stores(Config.Res.FOOD)
-			and home.inventory[Config.Res.FOOD] >= Config.MEAL_FOOD):
+	if _home_has_meal(home):
 		c.task_label = "going home to eat"
 		c.set_goal(entrance_of(home, "att_entrance"))
 		c.advance(delta, world)
 		if not c.has_arrived():
 			return
 		_sit_down(c, home)
+		if c.state != Citizen.State.EATING and c.job == null and c.carrying_amount > 0.01:
+			_carry_stray_load(c, delta)
 		return
 
 	# Leg 1: the larder is bare, so fetch enough to fill it.
@@ -983,6 +1200,14 @@ func _end_meal(c: Citizen) -> void:
 	c.state = Citizen.State.IDLE
 	c.task_label = "idle"
 	c.clear_goal()
+	if c.job != null:
+		var destination: Building = buildings_by_id.get(c.job.dest_id)
+		if c.job.cancelled or destination == null or c.carrying_amount <= 0.01:
+			_retire_job(c)
+			return
+		c.state = Citizen.State.TRAVELLING
+		c.task_label = c.job.describe()
+		c.set_goal(_loaded_delivery_target(c.job))
 
 
 ## No food anywhere. They go back to what they were doing and try again
@@ -991,14 +1216,18 @@ func _end_meal(c: Citizen) -> void:
 func _no_food(c: Citizen, delta: float) -> void:
 	c.meal_retry_at = day + Config.MEAL_RETRY_DAYS
 	_end_meal(c)
-	_idle_behaviour(c, delta)
+	if c.job == null:
+		_idle_behaviour(c, delta)
 
 
 ## Whether this citizen has anywhere to get a meal — their own larder first,
 ## then any store within reach of the settlement's food.
 func _can_eat_somewhere(c: Citizen) -> bool:
+	if c.carrying_res == Config.Res.FOOD and c.carrying_amount >= Config.MEAL_FOOD:
+		return true
 	var home: Building = buildings_by_id.get(c.home_id)
-	if home != null and is_instance_valid(home) and not home.under_construction:
+	if home != null and is_instance_valid(home) and not home.under_construction \
+			and world.nav.can_reach(c.global_position, entrance_of(home, "att_entrance")):
 		if home.larder >= Config.MEAL_FOOD:
 			return true
 		if home.stores(Config.Res.FOOD) \
@@ -1016,10 +1245,35 @@ func _nearest_food(from: Vector3) -> Building:
 				or b.inventory[Config.Res.FOOD] < Config.MEAL_FOOD:
 			continue
 		var d := from.distance_squared_to(b.global_position)
-		if d < best_d:
+		if d < best_d and world.nav.can_reach(from, entrance_of(b, "att_cart_bay")):
 			best_d = d
 			best = b
 	return best
+
+
+## Reachable households in walking distance make the market policy legible:
+## the target is real stock, not a radius that grants food for free.
+func market_service(market: Building) -> Dictionary:
+	var homes := 0
+	var residents := 0
+	if not is_instance_valid(market):
+		return {"homes": 0, "residents": 0, "daily_demand": 0.0,
+			"stock": 0.0, "incoming": 0.0, "target": 0, "days_supply": 0.0}
+	if market.def.is_food_depot():
+		var counter := entrance_of(market, "att_cart_bay")
+		for home in buildings:
+			if home.under_construction or home.def.houses <= 0 \
+					or home.position.distance_to(market.position) > Building.MARKET_SERVICE_RADIUS:
+				continue
+			if world.nav.can_reach(counter, entrance_of(home, "att_entrance")):
+				homes += 1
+				residents += home.residents.size()
+	var demand := float(residents) * Config.HUNGER_PER_DAY
+	var stock := market.inventory[Config.Res.FOOD]
+	return {"homes": homes, "residents": residents, "daily_demand": demand,
+		"stock": stock, "incoming": market.incoming[Config.Res.FOOD],
+		"target": market.food_stock_target(),
+		"days_supply": stock / demand if demand > 0.0 else 0.0}
 
 
 ## Night: home, and indoors.
@@ -1041,6 +1295,9 @@ func _tick_sleep(c: Citizen, delta: float) -> void:
 		return
 
 	var door := entrance_of(anchor, "att_entrance")
+	if not world.nav.can_reach(c.global_position, door):
+		_bed_down(c, delta)
+		return
 	var walk := c.global_position.distance_to(door)
 	# Too far to be worth going home for. They camp where they are, keeping
 	# their route so the morning carries on from here rather than from the
@@ -1077,6 +1334,11 @@ func _idle_behaviour(c: Citizen, delta: float) -> void:
 	if anchor == null:
 		return
 	var target := entrance_of(anchor, "att_entrance")
+	if not world.nav.can_reach(c.global_position, target):
+		c.task_label = "idle"
+		c.clear_goal()
+		c.update_animation(delta, 0.0)
+		return
 	if c.global_position.distance_to(target) > 5.0:
 		c.task_label = "going home"
 		c.set_goal(target)
@@ -1091,6 +1353,11 @@ func _idle_behaviour(c: Citizen, delta: float) -> void:
 ## asset does not declare the attachment. Cached, because this is asked for on
 ## every tick of every hauling job.
 func entrance_of(b: Building, preferred: String) -> Vector3:
+	# A neighbour can block a cached doorstep, and demolition can open the
+	# original one again. Both changes invalidate all affected access points.
+	if _entrance_revision != world.nav.revision:
+		_entrance_cache.clear()
+		_entrance_revision = world.nav.revision
 	var key := "%d:%s" % [b.id, preferred]
 	var hit: Variant = _entrance_cache.get(key)
 	if hit != null:
@@ -1105,6 +1372,9 @@ func entrance_of(b: Building, preferred: String) -> Vector3:
 		local = Vector3(0, 0, -b.footprint.y * 0.5 - 1.5)
 
 	var p: Vector3 = b.global_transform * local
+	var cell := world.world_to_cell(p)
+	if world.nav.is_solid(cell.x, cell.y):
+		p = Config.cell_to_world(world.nav.nearest_free(p))
 	p.y = world.heightmap.height_at(p.x, p.z)
 	_entrance_cache[key] = p
 	return p
@@ -1146,9 +1416,11 @@ func place_building(type_id: String, position: Vector3, yaw: float,
 	var plan := b.plan_footprint()
 	var half_w: float = plan.x * 0.5
 	var half_d: float = plan.y * 0.5
-	var ground := (world.heightmap.flatten(position, half_w + 1.5, half_d + 1.5)
-			if flatten_ground
-			else world.heightmap.height_at(position.x, position.z))
+	# Later terrain edits can change the height beneath an existing building.
+	# Restoring its original footing must not move it to that newer height.
+	var ground := position.y if restoring else (
+			world.heightmap.flatten(position, half_w + 1.5, half_d + 1.5)
+			if flatten_ground else world.heightmap.height_at(position.x, position.z))
 	b.position = Vector3(position.x, ground, position.z)
 	b.rotation.y = yaw
 	b.ground_y = ground
@@ -1200,6 +1472,8 @@ func can_upgrade(b: Building) -> Dictionary:
 		return {"ok": false, "reason": "finish building it first"}
 	if not b.def.can_upgrade():
 		return {"ok": false, "reason": "nothing to grow into"}
+	if not research.allows_building_upgrade(b.type_id):
+		return {"ok": false, "reason": research.building_upgrade_reason(b.type_id)}
 	var next := BuildingDefs.get_def(b.def.upgrades_to)
 	if next == null:
 		return {"ok": false, "reason": "unknown upgrade"}
@@ -1287,7 +1561,9 @@ func upgrade(b: Building) -> Dictionary:
 	return {"ok": true, "reason": "", "def": next}
 
 
-func demolish(b: Building) -> Dictionary:
+func demolish(b: Building, salvage: bool = true) -> Dictionary:
+	if husbandry != null and b.def.is_ranch():
+		husbandry.remove_ranch(b.id)
 	var refunded := {}
 
 	# Anything already on site, plus anything the building was storing.
@@ -1313,7 +1589,7 @@ func demolish(b: Building) -> Dictionary:
 		var worker: Citizen = citizens_by_id.get(job.claimed_by)
 		if worker != null:
 			_release_cart(worker)
-			if worker.carrying_amount > 0.0:
+			if salvage and worker.carrying_amount > 0.0:
 				var carried := worker.carrying_res
 				refunded[carried] = (float(refunded.get(carried, 0.0))
 						+ worker.drop())
@@ -1346,6 +1622,11 @@ func demolish(b: Building) -> Dictionary:
 
 	# Put the goods somewhere real, or they have simply been deleted.
 	var lost := {}
+	if not salvage:
+		# Fire destroys what was on site. Loads still on the road remain with
+		# their carriers and follow the ordinary stray-load recovery path.
+		lost = refunded.duplicate()
+		refunded.clear()
 	for res in refunded:
 		var remaining := float(refunded[res])
 		while remaining > 0.5:
@@ -1378,13 +1659,13 @@ func _protect_fields(b: Building, value: bool = true,
 					 clear_existing: bool = true) -> void:
 	for p in b.all_plots():
 		world.wear.set_protected(p, Config.CELL * 0.5, false)
-		var fallow := Config.world_to_cell(p)
+		var fallow := world.world_to_cell(p)
 		world.nav.set_cultivated(fallow.x, fallow.y, false)
 	if not value:
 		return
 	for p in b.fields:
 		world.wear.set_protected(p, Config.CELL * 0.5, true, clear_existing)
-		var worked := Config.world_to_cell(p)
+		var worked := world.world_to_cell(p)
 		world.nav.set_cultivated(worked.x, worked.y, true)
 
 
@@ -1412,14 +1693,16 @@ func can_place(type_id: String, position: Vector3,
 	var fp := Vector2(raw.x * c + raw.y * sn, raw.x * sn + raw.y * c)
 	var half_w: float = fp.x * 0.5 + 0.5
 	var half_d: float = fp.y * 0.5 + 0.5
+	if bridges != null and bridges.overlaps_footprint(position, half_w, half_d):
+		return {"ok": false, "reason": "leave the bridge and its bank approaches clear", "footprint": fp}
 
 	if position.x - half_w < 2.0 or position.z - half_d < 2.0 \
-			or position.x + half_w > Config.WORLD_SIZE - 2.0 \
-			or position.z + half_d > Config.WORLD_SIZE - 2.0:
+			or position.x + half_w > world.size_m - 2.0 \
+			or position.z + half_d > world.size_m - 2.0:
 		return {"ok": false, "reason": "outside the march", "footprint": fp}
 
-	var c0 := Config.world_to_cell(position - Vector3(half_w, 0, half_d))
-	var c1 := Config.world_to_cell(position + Vector3(half_w, 0, half_d))
+	var c0 := world.world_to_cell(position - Vector3(half_w, 0, half_d))
+	var c1 := world.world_to_cell(position + Vector3(half_w, 0, half_d))
 	var worst_slope := 0.0
 	for cz in range(c0.y, c1.y + 1):
 		for cx in range(c0.x, c1.x + 1):
@@ -1446,6 +1729,16 @@ func can_place(type_id: String, position: Vector3,
 		if here.intersects(there):
 			return {"ok": false,
 					"reason": "overlaps %s" % other.display_name(),
+					"footprint": fp}
+	if campaign != null:
+		for enemy: Building in campaign.enemy_buildings.values():
+			if not is_instance_valid(enemy):
+				continue
+			var enemy_size := enemy.plan_footprint()
+			var enemy_ground := Rect2(enemy.global_position.x - enemy_size.x * 0.5,
+					enemy.global_position.z - enemy_size.y * 0.5, enemy_size.x, enemy_size.y)
+			if here.intersects(enemy_ground):
+				return {"ok": false, "reason": "overlaps rival %s" % enemy.display_name(),
 					"footprint": fp}
 
 	# Resource buildings need something to work on.
@@ -1475,7 +1768,7 @@ func spend(cost: Dictionary) -> void:
 
 
 func food_days_remaining() -> float:
-	return population.food_days_remaining(citizens)
+	return population.food_days_remaining(population_members())
 
 
 func housing_capacity() -> int:
@@ -1486,12 +1779,81 @@ func housing_capacity() -> int:
 # Population
 # ---------------------------------------------------------------------------
 
+func population_members() -> Array[Citizen]:
+	var members: Array[Citizen] = citizens.duplicate()
+	if campaign != null:
+		for unit in campaign.units.values():
+			if unit.faction == 0 and unit.health > 0.0:
+				members.append(unit)
+	if trade != null:
+		for route in trade.caravans.values():
+			members.append(route.merchant)
+	return members
+
+
+## Transfer one existing person out of civilian work. Their home remains
+## occupied throughout service; only death or demolition releases that place.
+func detach_for_service(c: Citizen) -> void:
+	if citizens_by_id.get(c.id) != c:
+		return
+	var previous_job := c.job
+	_retire_job(c)
+	if previous_job != null:
+		_restore_felling_claim(previous_job)
+	for building in buildings:
+		if building.workers.has(c.id):
+			building.workers.erase(c.id)
+			if building.sync_fields_to_workers():
+				_protect_fields(building, true, false)
+	c.workplace_id = -1
+	c.set_indoors(false)
+	citizens.erase(c)
+	citizens_by_id.erase(c.id)
+	workforce.mark_all_dirty()
+	_update_stats()
+
+
+func return_from_service(c: Citizen, citizen_id: int) -> void:
+	c.id = citizen_id
+	c.name = "citizen_%d" % citizen_id
+	c.reparent(world.citizens_root)
+	if c is Soldier:
+		c.set_civilian_mode(true)
+	else:
+		c._body.collision_layer = 4
+		c._body.set_meta("citizen_id", citizen_id)
+	c.workplace_id = -1
+	c.profession = "labourer"
+	_go_idle(c)
+	citizens.append(c)
+	citizens_by_id[c.id] = c
+	_next_citizen_id = maxi(_next_citizen_id, c.id + 1)
+	workforce.mark_all_dirty()
+	stores.refresh_totals(population_members(), buildings)
+	_update_stats()
+
+
+func allocate_citizen_identity() -> int:
+	var citizen_id := _next_citizen_id
+	_next_citizen_id += 1
+	return citizen_id
+
+
 func add_citizen(position: Vector3, as_immigrant: bool = false,
-				 forced_asset: String = "", forced_id: int = -1) -> Citizen:
-	var c := Citizen.new()
-	c.setup(forced_id if forced_id > 0 else _next_citizen_id, registry, _rng,
-			forced_asset)
-	_next_citizen_id = maxi(_next_citizen_id, c.id) + 1
+				 forced_asset: String = "", forced_id: int = -1,
+				 body_state: Dictionary = {}) -> Citizen:
+	var citizen_id := forced_id if forced_id > 0 else _next_citizen_id
+	var c: Citizen
+	if body_state.is_empty():
+		c = Citizen.new()
+		c.setup(citizen_id, registry, _rng, forced_asset)
+	else:
+		var veteran := Soldier.new()
+		veteran.setup_unit(registry, world.heightmap, citizen_id, 0, position, forced_asset)
+		veteran.restore_body(body_state)
+		veteran.set_civilian_mode(true)
+		c = veteran
+	_next_citizen_id = maxi(_next_citizen_id, c.id + 1)
 	c.position = Vector3(position.x,
 			world.heightmap.height_at(position.x, position.z), position.z)
 	world.citizens_root.add_child(c)
@@ -1544,8 +1906,14 @@ func set_day_marker(value: float) -> void:
 
 
 func set_next_ids(building_id: int, citizen_id: int) -> void:
-	_next_building_id = maxi(_next_building_id, building_id)
-	_next_citizen_id = maxi(_next_citizen_id, citizen_id)
+	# Forced IDs can arrive in any order during restoration. Derive the floor
+	# from the actual entities, not the temporary allocation counter.
+	_next_building_id = maxi(1, building_id)
+	_next_citizen_id = maxi(1, citizen_id)
+	for b in buildings:
+		_next_building_id = maxi(_next_building_id, b.id + 1)
+	for c in citizens:
+		_next_citizen_id = maxi(_next_citizen_id, c.id + 1)
 
 
 ## Re-derive everything a load deliberately did not write: the entrance cache,
@@ -1579,7 +1947,7 @@ func finish_restore() -> void:
 	# Last, because every building placed above flattened the ground beneath
 	# it, and a cell's travel weight is part slope.
 	world.nav.rebuild_all()
-	stores.refresh_totals(citizens, buildings)
+	stores.refresh_totals(population_members(), buildings)
 	_update_stats()
 
 
@@ -1593,7 +1961,7 @@ func _tick_immigrant(c: Citizen, delta: float) -> void:
 
 
 func _update_stats() -> void:
-	stat_population = citizens.size()
+	stat_population = population_members().size()
 	stat_homeless = 0
 	stat_idle = 0
 	for c in citizens:

@@ -19,7 +19,7 @@ extends RefCounted
 ##     allocating one closure per idle citizen per tick was, measurably, the
 ##     largest single source of garbage in the game.
 
-enum Kind { HAUL, GATHER, BUILD, HARVEST, FELL, CRAFT }
+enum Kind { HAUL, GATHER, BUILD, HARVEST, FELL, CRAFT, TAME, TEND, BUTCHER, BRIDGE_HAUL, BRIDGE_BUILD, SALVAGE }
 
 ## Filters a citizen can apply when looking for work.
 enum Accept {
@@ -35,11 +35,20 @@ class Job:
 	var kind := Kind.HAUL
 	var res := -1
 	var amount := 0.0
+	## Maximum output whose storage capacity this gather/harvest job owns.
+	## Kept separate from HAUL quantities and released on deposit/cancellation.
+	var output_reserved := 0.0
 	## Building this job draws from, or -1. Resource nodes live in `node_id`:
 	## sharing one field made completing building 7 cancel a gathering job on
 	## resource node 7, stranding that node's reservation forever.
 	var source_id := -1
 	var node_id := -1
+	## Livestock IDs have their own namespace, independent of resource nodes.
+	var cow_id := -1
+	## Bridges are independent of building IDs; never overload dest_id.
+	var bridge_id := -1
+	## Abandoned trading carts use their own identifier namespace.
+	var wreck_id := -1
 	var dest_id := -1
 	var position := Vector3.ZERO     ## where the work starts
 	## A specific spot chosen when the job is first executed (which field to
@@ -59,6 +68,9 @@ class Job:
 	## on the carrier rather than in the source's store. The reservation that
 	## covered them has already been consumed and must not be released twice.
 	var loaded := false
+	## Staffed services procure their own stock. Ordinary hauling stays open
+	## to every labourer; a market order belongs to that market's vendors.
+	var required_workplace := -1
 
 	func describe() -> String:
 		match kind:
@@ -75,6 +87,18 @@ class Job:
 				return "Clear ground"
 			Kind.CRAFT:
 				return "Make %s" % Res.display(res)
+			Kind.TAME:
+				return "Tame cattle"
+			Kind.TEND:
+				return "Tend the herd"
+			Kind.BUTCHER:
+				return "Prepare food and hides"
+			Kind.BRIDGE_HAUL:
+				return "Carry %s to bridge" % Res.display(res)
+			Kind.BRIDGE_BUILD:
+				return "Build timber bridge"
+			Kind.SALVAGE:
+				return "Recover %s from lost cart" % Res.display(res)
 		return "Work"
 
 
@@ -173,6 +197,8 @@ func _accepts(job: Job, filter: int, workplace_id: int,
 			  citizen_id: int) -> bool:
 	if job.refused_by.has(citizen_id):
 		return false
+	if job.required_workplace >= 0:
+		return job.required_workplace == workplace_id
 	# Gathering and harvesting belong to a specific site; hauling and building
 	# are open to anyone, which is what keeps logistics moving when the
 	# specialists are busy.

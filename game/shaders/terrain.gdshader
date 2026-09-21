@@ -32,6 +32,8 @@ render_mode cull_back, diffuse_lambert;
 
 uniform sampler2D wear_map : filter_linear, repeat_disable;
 uniform float world_size = 768.0;
+uniform vec2 wear_origin = vec2(0.0);
+uniform float wear_size = 0.0;
 
 uniform vec3 color_grass : source_color = vec3(0.36, 0.46, 0.25);
 uniform vec3 color_grass_dry : source_color = vec3(0.52, 0.54, 0.31);
@@ -104,7 +106,7 @@ void vertex() {
 }
 
 void fragment() {
-	vec2 uv = v_world.xz / world_size;
+	vec2 uv = (v_world.xz - wear_origin) / (wear_size > 0.0 ? wear_size : world_size);
 	vec4 field = texture(wear_map, uv);
 
 	vec3 n = normalize(v_normal);

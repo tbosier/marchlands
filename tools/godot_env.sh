@@ -3,15 +3,16 @@
 #
 # Keeps a checkout self-contained (nothing lands in ~/.config or ~/.local) and
 # means the harness's screenshots and logs are always findable at a known path.
-# Everything it creates lives under .godot-home/, which is gitignored.
+# Everything it creates lives under .godot-home/, which is gitignored. The
+# verification gate uses MARCHLANDS_GODOT_HOME to isolate its saves/settings.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOME_DIR="$ROOT/.godot-home"
-mkdir -p "$HOME_DIR"/{data,config,cache}
+GODOT_USER_DIR="${MARCHLANDS_GODOT_HOME:-$ROOT/.godot-home}"
+mkdir -p "$GODOT_USER_DIR"/{data,config,cache}
 
-export XDG_DATA_HOME="$HOME_DIR/data"
-export XDG_CONFIG_HOME="$HOME_DIR/config"
-export XDG_CACHE_HOME="$HOME_DIR/cache"
+export XDG_DATA_HOME="$GODOT_USER_DIR/data"
+export XDG_CONFIG_HOME="$GODOT_USER_DIR/config"
+export XDG_CACHE_HOME="$GODOT_USER_DIR/cache"
 
 GODOT_BIN="${GODOT:-}"
 if [[ -z "$GODOT_BIN" ]]; then

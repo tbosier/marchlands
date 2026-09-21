@@ -138,7 +138,7 @@ def wood_cart() -> Asset:
     a = Asset("wood_cart", "prop", mb, (1.6, 3.4))
     a.attach("att_worksite", (0.0, -bed_l * 0.5 - 1.35, 0.0))
     a.attach("att_stock_0", (0.0, 0.0, axle_z + 0.22))
-    return a
+    return a.center_footprint()
 
 
 PROPS = {

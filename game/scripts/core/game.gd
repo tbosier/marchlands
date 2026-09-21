@@ -14,7 +14,7 @@ const START_TOOLS := 50.0
 const START_TIMBER := 40.0
 const START_STONE := 20.0
 
-enum Mode { SELECT, PLACE, CLEAR }
+enum Mode { SELECT, PLACE, CLEAR, BRIDGE }
 
 var registry := AssetRegistry.new()
 var clock := Clock.new()
@@ -36,6 +36,22 @@ var selected_building: Building = null
 var selected_citizen: Citizen = null
 var selected_road := Vector3.ZERO
 var has_road_selection := false
+var research_open := false
+var army_open := false
+var selected_resource := -1
+var selected_cow := -1
+var trade_open := false
+var selected_caravan := -1
+var selected_bridge := -1
+var _bridge_start := Vector3.INF
+var _bridge_hover := Vector3.INF
+var _bridge_preview: Node3D
+var _world_generation_pending := false
+var selected_units: Array[int] = []
+var road_scope := "busiest"
+var _road_quotes: Dictionary = {}
+var _road_preview: MultiMeshInstance3D
+var _road_quote_level := -1
 ## `route_extent` is a flood fill over thousands of texels. The road panel is
 ## refreshed four times a second for as long as a route stays selected, so the
 ## answer is worked out once per selection rather than per refresh.
@@ -81,6 +97,79 @@ func _ready() -> void:
 	hud.build_cancelled.connect(_cancel_placement)
 	hud.speed_requested.connect(func(i): clock.set_speed(i))
 	hud.upgrade_route_requested.connect(request_route_upgrade)
+	hud.road_scope_requested.connect(func(scope):
+		road_scope = scope
+		_draw_road_preview()
+		_refresh_selection())
+	hud.research_open_requested.connect(func():
+		_clear_selection()
+		research_open = true
+		_refresh_selection())
+	hud.research_requested.connect(request_research)
+	hud.market_target_requested.connect(func(b, target):
+		if not is_instance_valid(b) or sim.buildings_by_id.get(b.id) != b:
+			return
+		b.set_market_stock_target(target)
+		_refresh_selection())
+	hud.army_open_requested.connect(func():
+		_clear_selection()
+		army_open = true
+		_refresh_selection())
+	hud.recruit_requested.connect(func():
+		var error: String = sim.campaign.recruit()
+		if error != "": _on_alert(error, sim.keep.position)
+		_refresh_selection())
+	hud.muster_requested.connect(func():
+		selected_units.assign(sim.campaign.friendly_ids())
+		_on_alert("Force selected — right-click to march or attack", sim.keep.position))
+	hud.rival_focus_requested.connect(func(): camera.focus_on(sim.campaign.rival_position, 100.0))
+	hud.armor_requested.connect(func(id, tier):
+		var error := MilitaryEquipment.fit(sim, id, tier)
+		_on_alert(error if error != "" else "Armor fitted at the barracks.", sim.keep.position)
+		_refresh_selection())
+	hud.demobilize_requested.connect(func(id):
+		var error: String = sim.campaign.demobilize(id)
+		_on_alert(error if error != "" else "Soldier returned to civilian life.", sim.keep.position)
+		_refresh_selection())
+	hud.domesticate_requested.connect(func(id):
+		var error: String = sim.husbandry.request_domestication(id)
+		_on_alert(error if error != "" else "A rancher will approach and lead this animal home.", sim.keep.position)
+		_refresh_selection())
+	hud.cattle_focus_requested.connect(_focus_wild_cattle)
+	hud.new_world_requested.connect(func(seed_value: int, size_m: int):
+		if _world_generation_pending: return
+		_world_generation_pending = true
+		_on_alert("Generating a new landscape…", world.centre())
+		await get_tree().process_frame
+		var error := new_world(seed_value, size_m)
+		_world_generation_pending = false
+		_on_alert(error if error != "" else "A new march begins.", world.centre()))
+	hud.trade_open_requested.connect(func():
+		_cancel_placement()
+		_clear_selection()
+		trade_open = true
+		_refresh_selection())
+	hud.trade_dispatch_requested.connect(func(origin: int, target: int):
+		var error: String = sim.trade.dispatch(origin, target)
+		_on_alert(error if error != "" else "A citizen is loading the trade cart.", sim.keep.position)
+		_refresh_selection()
+		hud.refresh())
+	hud.caravan_recall_requested.connect(func(id: int):
+		var error: String = sim.trade.recall(id)
+		if error != "": _on_alert(error, camera.focus)
+		_refresh_selection())
+	hud.caravan_repeat_requested.connect(func(id: int, enabled: bool):
+		sim.trade.set_repeat(id, enabled)
+		_refresh_selection())
+	hud.bridge_tool_requested.connect(_begin_bridge)
+	hud.wreck_recovery_requested.connect(func(id: int, enabled: bool):
+		var error: String = sim.trade.request_recovery(id) if enabled else sim.trade.cancel_recovery(id)
+		if error != "": _on_alert(error, camera.focus)
+		_refresh_selection())
+	hud.bridge_remove_requested.connect(func(id: int):
+		var result: Dictionary = sim.bridges.remove(id)
+		if not result.ok: _on_alert(result.reason, camera.focus)
+		_refresh_selection())
 	hud.demolish_requested.connect(_on_demolish_requested)
 	hud.upgrade_requested.connect(_on_upgrade_requested)
 	hud.clear_ground_requested.connect(_toggle_clear_tool)
@@ -90,9 +179,13 @@ func _ready() -> void:
 	dev.name = "dev_overlay"
 	layer.add_child(dev)
 	dev.setup(sim, clock, world, camera)
+	if sim.campaign != null: dev.bind_campaign(sim.campaign)
 
 	_make_ghost_materials()
 	_setup_scenario()
+	_setup_campaign()
+	_setup_husbandry()
+	_setup_connections()
 
 	for arg in OS.get_cmdline_user_args():
 		if arg == "--dev":
@@ -112,7 +205,7 @@ func _build_world_and_sim(world_seed: int) -> void:
 	world = World.new()
 	world.name = "world"
 	add_child(world)
-	world.generate(registry, world_seed)
+	world.generate(registry, world_seed, _world_settings_from_args())
 
 	sim = Simulation.new()
 	sim.name = "simulation"
@@ -126,6 +219,60 @@ func _seed_from_args() -> int:
 		if arg.begins_with("--seed="):
 			return int(arg.substr(7))
 	return 20260911
+
+
+func _world_settings_from_args() -> Dictionary:
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--world-size="):
+			var preset := arg.substr(13).to_lower()
+			var sizes := {"small": 768, "medium": 1536, "large": 3072, "xlarge": 6144,
+				"extra_large": 6144, "extra-large": 6144, "xl": 6144}
+			return {"size_m": sizes.get(preset, 768), "generation_version": 2}
+	return {}
+
+
+## Build in isolation so a rejected setting or invalid opening cannot erase
+## the settlement the player was looking at.
+func new_world(seed_value: int, size_m: int) -> String:
+	var settings := {"size_m": size_m, "generation_version": 2}
+	var error := SaveGame.Validation._world_settings(settings)
+	if error != "" or seed_value < -SaveGame.Validation.MAX_SEED or seed_value > SaveGame.Validation.MAX_SEED:
+		return error if error != "" else "Seed is outside the supported range"
+	var staged := SaveGame.RestoreState.new()
+	staged.own_world_3d = true
+	staged.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	staged.process_mode = Node.PROCESS_MODE_DISABLED
+	staged.registry = registry
+	add_child(staged)
+	staged.world = World.new()
+	staged.world.name = "world"
+	staged.add_child(staged.world)
+	staged.world.generate(registry, seed_value, settings)
+	staged.sim = Simulation.new()
+	staged.sim.name = "simulation"
+	staged.add_child(staged.sim)
+	staged.sim.setup(staged.world, registry, seed_value)
+	var previous_world := world
+	var previous_sim := sim
+	world = staged.world
+	sim = staged.sim
+	_setup_scenario()
+	_setup_campaign()
+	_setup_husbandry()
+	_setup_connections()
+	world = previous_world
+	sim = previous_sim
+	# Generated state has no historical records to validate. Avoid copying and
+	# rescanning the entire large wear field just to start an untouched world.
+	error = "The opening settlement is incomplete" if staged.sim.keep == null \
+			or staged.sim.citizens.size() != Config.START_CITIZENS else ""
+	if error != "":
+		dev.bind_campaign(sim.campaign)
+		staged.free()
+		return "Could not start this march: " + error
+	error = _adopt_world(staged)
+	camera.look_at_position(sim.keep.global_position, 78.0)
+	return error
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +306,10 @@ func load_game(slot: String = SaveGame.QUICK_SLOT) -> String:
 		var why: String = problems[0] if not problems.is_empty() else "unknown"
 		_on_alert("Could not load: %s" % why, camera.focus)
 		return why
-	restore_from(data)
+	var invalid := restore_from(data)
+	if invalid != "":
+		_on_alert("Could not load: %s" % invalid, camera.focus)
+		return invalid
 	_on_alert("Loaded '%s' — day %d" % [slot, int(data.get("day", 0)) + 1],
 			camera.focus)
 	return ""
@@ -167,18 +317,48 @@ func load_game(slot: String = SaveGame.QUICK_SLOT) -> String:
 
 ## Replace the current march with a saved one, in place.
 ##
-## The world and the simulation are thrown away and rebuilt from the save's
-## seed, which is both simpler and safer than unpicking a running settlement:
-## every system has a correct construction path and has been exercised by every
-## session ever played, whereas a repopulate-in-place path would be new code on
-## the one operation you cannot afford to get subtly wrong.
+## Validate, then build the replacement in an isolated viewport. The live
+## march stays intact until the new world has accepted all its saved records.
 ##
 ## The camera, the interface and the dev overlay survive: the view stays where
 ## the player left it, and whatever they had open stays open.
-func restore_from(data: Dictionary) -> void:
+func restore_from(data: Dictionary) -> String:
+	data = SaveGame.migrate(data)
+	var invalid := SaveGame.validate(data, registry)
+	if invalid != "":
+		return invalid
+	var staged := SaveGame.RestoreState.new()
+	staged.own_world_3d = true
+	staged.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	staged.process_mode = Node.PROCESS_MODE_DISABLED
+	staged.registry = registry
+	add_child(staged)
+	staged.world = World.new()
+	staged.world.name = "world"
+	staged.add_child(staged.world)
+	staged.world.generate(registry, data.seed, data.get("world_settings", {}))
+	invalid = SaveGame.Validation.validate_world(data, staged.world)
+	if invalid != "":
+		staged.free()
+		return invalid
+	staged.sim = Simulation.new()
+	staged.sim.name = "simulation"
+	staged.add_child(staged.sim)
+	staged.sim.setup(staged.world, registry, data.seed)
+	invalid = SaveGame.restore(staged, data)
+	if invalid != "":
+		staged.free()
+		return invalid
+
+	return _adopt_world(staged)
+
+
+func _adopt_world(staged: SaveGame.RestoreState) -> String:
 	_cancel_placement()
 	_exit_clear_tool()
 	_clear_selection()
+	_road_extent_at = Vector3.INF
+	_road_extent = 0
 
 	# Freed outright rather than queued: the replacements take the same node
 	# names, and a queued node still holds its name until the end of the frame.
@@ -187,13 +367,22 @@ func restore_from(data: Dictionary) -> void:
 	remove_child(world)
 	world.free()
 
-	_build_world_and_sim(int(data.get("seed", world_seed_fallback())))
+	world = staged.world
+	sim = staged.sim
+	staged.remove_child(world)
+	staged.remove_child(sim)
+	add_child(world)
+	add_child(sim)
+	sim.alert.connect(_on_alert)
+	clock.elapsed_days = staged.clock.elapsed_days
+	clock.set_day_marker(floori(clock.elapsed_days))
+	clock.restore_speed(staged.clock.speed_index, staged.clock.resume_speed_index())
+	staged.free()
 	# The camera and interface outlived the world they were pointed at.
 	camera.bind_terrain(world.heightmap)
 	hud.setup(sim, clock)
 	dev.setup(sim, clock, world, camera)
-
-	SaveGame.restore(self, data)
+	if sim.campaign != null: dev.bind_campaign(sim.campaign)
 
 	# The camera is only moved when where it was looking makes no sense any
 	# more — a save loaded over a session the player had panned somewhere else
@@ -203,12 +392,7 @@ func restore_from(data: Dictionary) -> void:
 		camera.look_at_position(sim.keep.global_position, camera.distance)
 	world.set_time_of_day(clock.day_fraction(), clock.season_fraction())
 	hud.refresh()
-
-
-## The seed to fall back on when a save does not name one. Only reachable via a
-## hand-edited file; a real save always carries its seed.
-func world_seed_fallback() -> int:
-	return _seed_from_args()
+	return ""
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +410,7 @@ func _setup_scenario() -> void:
 	var felled := world.nodes.clear_area(centre, START_CLEARING)
 	for rec in world.nodes.records:
 		if rec.depleted and rec.kind != ResourceNodes.Kind.TREE:
-			var c := Config.world_to_cell(rec.position)
+			var c := world.world_to_cell(rec.position)
 			world.nav.set_blocked(c.x, c.y, false)
 	var keep := sim.place_building("keep", centre, PI, true)
 	keep.inventory[Config.Res.FOOD] = START_FOOD
@@ -270,7 +454,7 @@ func _setup_scenario() -> void:
 ## Nudge a proposed position to somewhere actually buildable nearby.
 func _settle(p: Vector3) -> Vector3:
 	p.y = world.heightmap.height_at(p.x, p.z)
-	var c := Config.world_to_cell(p)
+	var c := world.world_to_cell(p)
 	if world.heightmap.cell_slope(c.x, c.y) < Config.MAX_BUILD_SLOPE \
 			and world.heightmap.cell_surface(c.x, c.y) != Heightmap.Surface.WATER:
 		return p
@@ -278,7 +462,7 @@ func _settle(p: Vector3) -> Vector3:
 		for a in 12:
 			var ang := TAU * a / 12.0
 			var q := p + Vector3(cos(ang) * r * 4.0, 0, sin(ang) * r * 4.0)
-			var qc := Config.world_to_cell(q)
+			var qc := world.world_to_cell(q)
 			if world.heightmap.cell_slope(qc.x, qc.y) < Config.MAX_BUILD_SLOPE \
 					and world.heightmap.cell_surface(qc.x, qc.y) \
 						!= Heightmap.Surface.WATER:
@@ -292,7 +476,11 @@ func _settle(p: Vector3) -> Vector3:
 # ---------------------------------------------------------------------------
 
 func _process(delta: float) -> void:
-	var sim_delta := clock.advance(delta)
+	if mode == Mode.BRIDGE:
+		_update_bridge_preview()
+	if sim.campaign != null and sim.campaign.defeated:
+		clock.set_speed(0)
+	var sim_delta := clock.advance(minf(delta, 0.25))
 	if sim_delta > 0.0:
 		# At high speeds a single frame can represent several seconds of world
 		# time. Stepping it in slices keeps movement and wear accumulation
@@ -315,11 +503,58 @@ func _process(delta: float) -> void:
 		_ui_timer = 0.25
 		hud.refresh()
 		_refresh_selection()
+		_refresh_unit_rings()
+		if mode == Mode.SELECT:
+			_refresh_resource_hover()
 
 	Perf.flush_frame()
 
 
 func _refresh_selection() -> void:
+	if mode == Mode.BRIDGE:
+		return
+	if trade_open or selected_caravan >= 0:
+		if selected_caravan >= 0 and not sim.trade.caravans.has(selected_caravan): selected_caravan = -1
+		hud.show_trade(sim.trade.info(), selected_caravan)
+		return
+	if selected_bridge >= 0:
+		var bridge_info: Dictionary = sim.bridges.info(selected_bridge)
+		if not bridge_info.is_empty():
+			hud.show_bridge(bridge_info)
+			return
+		selected_bridge = -1
+	_prune_selection()
+	if research_open:
+		var quotes: Array = []
+		var state: Dictionary = sim.research.capture()
+		for id in RoadResearch.TECH_IDS:
+			var q: Dictionary = sim.research.quote(id, _has_market())
+			q.completed = state.completed.has(id)
+			q.active = state.active == id
+			q.remaining_days = state.remaining_days if q.active else 0.0
+			quotes.append(q)
+		hud.show_research(quotes)
+		return
+	if army_open and sim.campaign != null:
+		hud.show_army(sim.campaign.info())
+		return
+	if selected_cow >= 0 and sim.husbandry != null:
+		var info: Dictionary = sim.husbandry.get_info(selected_cow)
+		if not info.is_empty():
+			hud.show_cow(info)
+			return
+		selected_cow = -1
+		hud.clear_selection()
+	if not selected_units.is_empty() and sim.campaign != null:
+		var unit: Node = sim.campaign.units.get(selected_units[0])
+		if is_instance_valid(unit):
+			hud.show_soldier(unit)
+			return
+	if selected_resource >= 0:
+		var rec := world.nodes.get_node_rec(selected_resource)
+		if rec != null:
+			hud.show_resource(_resource_info(rec))
+			return
 	if selected_building != null and is_instance_valid(selected_building):
 		hud.show_building(selected_building)
 	elif selected_citizen != null and is_instance_valid(selected_citizen):
@@ -333,6 +568,7 @@ func _refresh_selection() -> void:
 # ---------------------------------------------------------------------------
 
 func _unhandled_input(event: InputEvent) -> void:
+	_prune_selection()
 	if event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
 			KEY_SPACE:
@@ -348,11 +584,13 @@ func _unhandled_input(event: InputEvent) -> void:
 				clock.set_speed(clock.speed_index + 1)
 				hud.refresh()
 			KEY_ESCAPE:
-				if mode == Mode.CLEAR:
+				if mode == Mode.BRIDGE:
+					_cancel_bridge()
+				elif mode == Mode.CLEAR:
 					_exit_clear_tool()
 				elif mode == Mode.PLACE:
 					_cancel_placement()
-				elif selected_building or selected_citizen or has_road_selection:
+				elif selected_building or selected_citizen or has_road_selection or research_open or army_open or trade_open or selected_caravan >= 0 or selected_bridge >= 0 or selected_resource >= 0 or selected_cow >= 0 or not selected_units.is_empty():
 					_clear_selection()
 				else:
 					hud.clear_alerts()
@@ -393,14 +631,19 @@ func _unhandled_input(event: InputEvent) -> void:
 			return
 		if mb.button_index == MOUSE_BUTTON_LEFT:
 			match mode:
+				Mode.BRIDGE: _bridge_click(mb.position)
 				Mode.PLACE: _try_place()
 				Mode.CLEAR: _order_clear_at(mb.position)
 				_: _pick_at(mb.position)
 		elif mb.button_index == MOUSE_BUTTON_RIGHT:
-			if mode == Mode.PLACE:
+			if mode == Mode.BRIDGE:
+				_cancel_bridge()
+			elif mode == Mode.PLACE:
 				_cancel_placement()
 			elif mode == Mode.CLEAR:
 				_exit_clear_tool()
+			elif not selected_units.is_empty():
+				_order_units(mb.position)
 			else:
 				_clear_selection()
 
@@ -441,6 +684,7 @@ func _ghost_material(tint: Color) -> StandardMaterial3D:
 
 
 func _on_build_requested(type_id: String) -> void:
+	_cancel_bridge()
 	_clear_selection()
 	_exit_clear_tool()
 	mode = Mode.PLACE
@@ -454,6 +698,11 @@ func _spawn_ghost() -> void:
 		_ghost.queue_free()
 	var def := BuildingDefs.get_def(place_type)
 	_ghost = registry.instantiate(def.asset, 0)
+	var dressing := Building.new()
+	if def.is_food_depot(): dressing._add_market_stalls(_ghost)
+	if place_type == "fort": dressing._add_palisade(_ghost)
+	if place_type == "barracks": dressing._add_military_banner(_ghost)
+	dressing.free()
 	_ghost.name = "placement_ghost"
 	world.effects_root.add_child(_ghost)
 
@@ -499,7 +748,7 @@ func _order_clear_at(screen_pos: Vector2) -> void:
 
 
 func _on_demolish_requested(b: Building) -> void:
-	if b == null or not is_instance_valid(b):
+	if not is_instance_valid(b) or sim.buildings_by_id.get(b.id) != b:
 		return
 	var allowed := sim.can_demolish(b)
 	if not allowed["ok"]:
@@ -532,6 +781,7 @@ func _on_demolish_requested(b: Building) -> void:
 
 
 func _cancel_placement() -> void:
+	_cancel_bridge()
 	mode = Mode.SELECT
 	place_type = ""
 	if _ghost:
@@ -611,6 +861,15 @@ func _show_placement_tooltip(check: Dictionary, affordable: bool,
 
 	var road := world.wear.road_level_at(place_position.x, place_position.z)
 	lines.append("Ground  %s" % Config.ROAD_NAMES[road])
+	if place_type in ["supply_hut", "fort"]:
+		var closest := INF
+		for source in sim.buildings:
+			if source.under_construction or not source.stores(Config.Res.FOOD): continue
+			if source.def.is_food_depot() and sim.keep != null and source.position.distance_to(sim.keep.position) >= place_position.distance_to(sim.keep.position): continue
+			closest = minf(closest, source.position.distance_to(place_position))
+		lines.append("Supply link  %d m / 160 m" % closest if closest != INF else "No upstream food store")
+		if closest > Building.SUPPLY_RELAY_RANGE:
+			lines.append("[color=#e0a85c]Place another food relay closer first[/color]")
 
 	if not check["ok"]:
 		lines.append("[color=#d97368]Cannot build: %s[/color]"
@@ -637,6 +896,11 @@ func _nearest_citizen(p: Vector3) -> Citizen:
 func _try_place() -> void:
 	if not place_valid:
 		return
+	# Input can deliver two clicks before the ghost gets another frame.
+	# Recheck the live map after the first click has claimed its footprint.
+	if not sim.can_place(place_type, place_position, place_yaw).ok:
+		place_valid = false
+		return
 	var def := BuildingDefs.get_def(place_type)
 	var cost := def.cost
 	# Nothing is deducted here. A blueprint's cost is the materials haulers
@@ -662,7 +926,37 @@ func _try_place() -> void:
 # Selection
 # ---------------------------------------------------------------------------
 
+func _prune_selection() -> void:
+	for id in selected_units.duplicate():
+		var unit: Node = sim.campaign.units.get(id) if sim.campaign != null else null
+		if not is_instance_valid(unit) or unit.health <= 0.0:
+			selected_units.erase(id)
+	if not is_instance_valid(selected_building) \
+			or sim.buildings_by_id.get(selected_building.id) != selected_building:
+		selected_building = null
+	if not is_instance_valid(selected_citizen) \
+			or sim.citizens_by_id.get(selected_citizen.id) != selected_citizen:
+		selected_citizen = null
+	if selected_units.is_empty() and selected_building == null \
+			and selected_citizen == null and not has_road_selection \
+			and not research_open and not army_open and not trade_open and selected_caravan < 0 and selected_bridge < 0 and mode != Mode.BRIDGE and selected_resource < 0 and selected_cow < 0:
+		hud.clear_selection()
+
+
 func _clear_selection() -> void:
+	trade_open = false
+	selected_caravan = -1
+	selected_bridge = -1
+	research_open = false
+	army_open = false
+	selected_resource = -1
+	selected_cow = -1
+	selected_units.clear()
+	_road_quotes.clear()
+	_road_extent_at = Vector3.INF
+	if is_instance_valid(_road_preview):
+		_road_preview.queue_free()
+		_road_preview = null
 	selected_building = null
 	selected_citizen = null
 	has_road_selection = false
@@ -676,11 +970,37 @@ func _pick_at(screen_pos: Vector2) -> void:
 			ray["origin"], ray["origin"] + ray["direction"] * 3000.0)
 	query.collide_with_areas = true
 	query.collide_with_bodies = true
-	query.collision_mask = 2 | 4
+	query.collision_mask = 2 | 4 | 8 | 16 | 32 | 64
 	var result := space.intersect_ray(query)
 
 	if not result.is_empty():
 		var collider: Node = result["collider"]
+		if collider.has_meta("caravan_id"):
+			_clear_selection()
+			selected_caravan = int(collider.get_meta("caravan_id"))
+			trade_open = true
+			_refresh_selection()
+			return
+		if collider.has_meta("bridge_id"):
+			_clear_selection()
+			selected_bridge = int(collider.get_meta("bridge_id"))
+			_refresh_selection()
+			return
+		if collider.has_meta("cow_id"):
+			_clear_selection()
+			selected_cow = int(collider.get_meta("cow_id"))
+			_refresh_selection()
+			return
+		if collider.has_meta("unit_id"):
+			_clear_selection()
+			selected_units.append(int(collider.get_meta("unit_id")))
+			_refresh_selection()
+			return
+		if collider.has_meta("rival_building_id"):
+			_clear_selection()
+			army_open = true
+			_refresh_selection()
+			return
 		if collider.has_meta("building_id"):
 			_clear_selection()
 			selected_building = sim.buildings_by_id.get(
@@ -703,60 +1023,203 @@ func _pick_at(screen_pos: Vector2) -> void:
 		_clear_selection()
 		return
 	_clear_selection()
+	var resource := world.nodes.pick_ray(ray.origin, ray.direction, ray.origin.distance_to(hit.position) + 1.0)
+	if resource != null:
+		selected_resource = resource.id
+		hud.show_resource(_resource_info(resource))
+		return
 	selected_road = hit["position"]
 	has_road_selection = true
 	hud.show_road(_road_info(selected_road))
 
 
 func _road_info(p: Vector3) -> Dictionary:
-	var wear := world.wear.wear_at(p.x, p.z)
-	var level := Config.road_level_for_wear(wear)
-	var cost := {
-		Config.Res.TIMBER: Config.UPGRADE_COST_TIMBER,
-		Config.Res.STONE: Config.UPGRADE_COST_STONE,
-	}
-	if p.distance_squared_to(_road_extent_at) > 0.01:
+	var level := world.wear.road_level_at(p.x, p.z)
+	var target := mini(Config.RoadLevel.PAVED, maxi(Config.RoadLevel.DIRT, level + 1))
+	if _road_quotes.is_empty() or p.distance_squared_to(_road_extent_at) > 0.01 or target != _road_quote_level:
 		_road_extent_at = p
-		_road_extent = world.wear.route_extent(p, 6000)
-	return {
-		"wear": wear,
-		"level": level,
-		"position": p,
-		"extent": _road_extent,
-		"affordable": sim.can_afford(cost),
-		"locked": world.wear.locked[
-			clampi(int(p.z / Config.WEAR_CELL), 0, Config.WEAR_RES - 1)
-			* Config.WEAR_RES
-			+ clampi(int(p.x / Config.WEAR_CELL), 0, Config.WEAR_RES - 1)],
-	}
+		_road_quote_level = target
+		for scope in ["busiest", "local", "all"]:
+			_road_quotes[scope] = world.wear.preview_upgrade(p, target, scope)
+		_draw_road_preview()
+	var proposal: Dictionary = _road_quotes[road_scope]
+	var reason: String = proposal.get("error", "")
+	if not sim.research.allows_road_upgrade(target):
+		reason = "Research %s at the keep first." % ("Paving" if target == Config.RoadLevel.PAVED else "Roadworks")
+	elif proposal.count == 0:
+		reason = "No used ground needs this improvement. Let traffic form a route first."
+	elif not sim.can_afford(proposal.cost):
+		reason = "More building materials are needed."
+	return {"level": level, "target": target, "scope": road_scope,
+		"proposal": proposal, "options": _road_quotes, "reason": reason,
+		"can_upgrade": reason == ""}
+
+
+func _draw_road_preview() -> void:
+	if _road_quotes.is_empty(): return
+	if is_instance_valid(_road_preview):
+		_road_preview.queue_free()
+	_road_preview = MultiMeshInstance3D.new()
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(Config.WEAR_CELL * 0.92, 0.08, Config.WEAR_CELL * 0.92)
+	var material := _ghost_material(Color(0.94, 0.77, 0.32))
+	mesh.material = material
+	var multi := MultiMesh.new()
+	multi.transform_format = MultiMesh.TRANSFORM_3D
+	multi.mesh = mesh
+	var cells: PackedInt32Array = _road_quotes[road_scope].cells
+	multi.instance_count = cells.size()
+	for i in cells.size():
+		var idx := cells[i]
+		var x := (idx % world.wear.res + 0.5) * Config.WEAR_CELL
+		var z := (idx / world.wear.res + 0.5) * Config.WEAR_CELL
+		multi.set_instance_transform(i, Transform3D(Basis.IDENTITY, Vector3(x, world.heightmap.height_at(x,z) + 0.12, z)))
+	_road_preview.multimesh = multi
+	_road_preview.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(_road_preview)
 
 
 func request_route_upgrade() -> void:
-	if not has_road_selection:
-		return
+	if not has_road_selection: return
+	var shown: Dictionary = _road_quotes.get(road_scope, {})
 	var info := _road_info(selected_road)
-	var level: int = info["level"]
-	if level < Config.RoadLevel.WORN or level >= Config.RoadLevel.PAVED:
+	# Refreshing the panel may choose a new target when natural traffic has
+	# just reached Dirt. Never replace the price the player clicked silently.
+	if not shown.is_empty() and (shown.level != info.proposal.level
+			or shown.cells != info.proposal.cells or shown.cost != info.proposal.cost):
+		_on_alert("The route changed; review the refreshed quote.", selected_road)
+		_refresh_selection()
 		return
-	var cost := {
-		Config.Res.TIMBER: Config.UPGRADE_COST_TIMBER,
-		Config.Res.STONE: Config.UPGRADE_COST_STONE,
-	}
-	if not sim.stores.try_spend(cost):
+	if not info.can_upgrade:
+		_on_alert(info.reason, selected_road)
 		return
-	var next: int = level + 1
-	# The paved stretch is a different shape from the worn one that was there.
-	_road_extent_at = Vector3.INF
-	var changed := world.wear.upgrade_route(selected_road, next)
+	var proposal: Dictionary = info.proposal
+	var problem := world.wear.validate_upgrade(proposal)
+	if problem != "":
+		var refreshed := world.wear.preview_upgrade(selected_road, info.target, road_scope)
+		if refreshed.get("error", "") == "" and refreshed.cells == proposal.cells and refreshed.cost == proposal.cost:
+			proposal = refreshed
+		else:
+			_road_quotes.clear()
+			_on_alert("The route changed; review the refreshed quote.", selected_road)
+			_refresh_selection()
+			return
+	if not sim.stores.try_spend(proposal.cost): return
+	world.wear.apply_upgrade(proposal)
 	world.nav.apply_road_changes(world.wear.refresh_levels())
 	world.wear.flush_texture()
-	_on_alert("Route improved to %s" % Config.ROAD_NAMES[next], selected_road)
-	hud.show_road(_road_info(selected_road))
-	hud.refresh()
+	_road_quotes.clear()
+	_on_alert("Improved %d m² to %s" % [proposal.area_m2, Config.ROAD_NAMES[info.target]], selected_road)
+	_refresh_selection()
+
+
+func _has_market() -> bool:
+	for b in sim.buildings:
+		if b.type_id == "market" and not b.under_construction:
+			return true
+	return false
+
+
+func request_research(id: String) -> void:
+	var error: String = sim.research.start(id, _has_market(), sim.stores.try_spend)
+	_on_alert(error if error != "" else "Research funded — progress is shown at the keep.", sim.keep.position)
+	_refresh_selection()
+
+
+func _resource_info(rec: ResourceNodes.NodeRec) -> Dictionary:
+	var title := "Woodland"
+	var description := "A logging camp gathers timber here. Cleared trees can regrow."
+	if rec.kind == ResourceNodes.Kind.STONE:
+		title = "Stone outcrop"
+		description = "Build a quarry nearby. This deposit is finite."
+	elif rec.kind == ResourceNodes.Kind.IRON:
+		title = "Iron ore"
+		description = "Build a mine nearby to supply a smith. Dark rock with rusty veins marks iron."
+	return {"id": rec.id, "title": title, "description": description, "amount": rec.amount}
+
+
+func _refresh_resource_hover() -> void:
+	var mouse := get_viewport().get_mouse_position()
+	if hud.blocks_mouse(mouse):
+		hud.hide_cursor_tooltip()
+		return
+	var ray := camera.screen_ray(mouse)
+	var hit := world.terrain.raycast(ray.origin, ray.direction)
+	var distance: float = ray.origin.distance_to(hit.position) + 1.0 if hit.hit else 4000.0
+	var rec := world.nodes.pick_ray(ray.origin, ray.direction, distance)
+	if rec == null:
+		hud.hide_cursor_tooltip()
+		return
+	var info := _resource_info(rec)
+	hud.show_cursor_tooltip(["[b]%s[/b]" % info.title, "%d remaining · click for details" % info.amount], mouse)
+
+
+func _setup_campaign() -> void:
+	sim.campaign = FrontierCampaign.new()
+	sim.add_child(sim.campaign)
+	sim.campaign.setup(sim, world, registry)
+	sim.campaign.generate_rival()
+	dev.bind_campaign(sim.campaign)
+
+
+func _setup_husbandry() -> void:
+	sim.husbandry = Husbandry.new()
+	sim.add_child(sim.husbandry)
+	sim.husbandry.setup(sim, world, registry)
+	sim.husbandry.generate_herds()
+
+
+func _setup_connections() -> void:
+	sim.bridges = Bridges.new()
+	sim.add_child(sim.bridges)
+	sim.bridges.setup(sim, world, registry)
+	sim.trade = TradeRoutes.new()
+	sim.add_child(sim.trade)
+	sim.trade.setup(sim, world, registry)
+
+
+func _focus_wild_cattle() -> void:
+	if sim.husbandry == null: return
+	for id in sim.husbandry.cows:
+		var info: Dictionary = sim.husbandry.get_info(id)
+		if info.get("wild", false):
+			_clear_selection()
+			selected_cow = id
+			camera.focus_on(info.position, 45.0)
+			_refresh_selection()
+			return
+	_on_alert("No wild cattle remain. Protect your breeding herd.", sim.keep.position)
+
+
+func _order_units(screen_pos: Vector2) -> void:
+	var ray := camera.screen_ray(screen_pos)
+	var hit := world.terrain.raycast(ray.origin, ray.direction)
+	if not hit.hit: return
+	var target: Dictionary = sim.campaign.pick_target(ray.origin, ray.direction)
+	sim.campaign.command(selected_units, hit.position, target)
+	_refresh_selection()
 
 
 func _focus_selection() -> void:
-	if selected_building:
+	_prune_selection()
+	if selected_caravan >= 0 and sim.trade != null and sim.trade.caravans.has(selected_caravan):
+		camera.focus_on(sim.trade.caravans[selected_caravan].merchant.global_position, 28.0)
+	elif selected_bridge >= 0 and sim.bridges != null:
+		var bridge_info: Dictionary = sim.bridges.info(selected_bridge)
+		if not bridge_info.is_empty(): camera.focus_on((bridge_info.a + bridge_info.b) * 0.5, 55.0)
+	elif not selected_units.is_empty() and sim.campaign != null:
+		var unit: Node = sim.campaign.units.get(selected_units[0])
+		if is_instance_valid(unit):
+			camera.focus_on(unit.global_position, 28.0)
+	elif selected_cow >= 0 and sim.husbandry != null:
+		var cow_info: Dictionary = sim.husbandry.get_info(selected_cow)
+		if not cow_info.is_empty():
+			camera.focus_on(cow_info.position, 35.0)
+	elif selected_resource >= 0:
+		var resource := world.nodes.get_node_rec(selected_resource)
+		if resource != null:
+			camera.focus_on(resource.position, 35.0)
+	elif selected_building:
 		camera.focus_on(selected_building.global_position, 55.0)
 	elif selected_citizen:
 		camera.focus_on(selected_citizen.global_position, 28.0)
@@ -766,7 +1229,7 @@ func _focus_selection() -> void:
 
 ## Grow a building into its next tier (design doc 6.4).
 func _on_upgrade_requested(b: Building) -> void:
-	if b == null or not is_instance_valid(b):
+	if not is_instance_valid(b) or sim.buildings_by_id.get(b.id) != b:
 		return
 	var result := sim.upgrade(b)
 	if not result["ok"]:
@@ -887,3 +1350,102 @@ func _save_screenshot(tag: String) -> String:
 	image.save_png(path)
 	print("screenshot: ", ProjectSettings.globalize_path(path))
 	return ProjectSettings.globalize_path(path)
+
+
+func _refresh_unit_rings() -> void:
+	if sim.campaign == null: return
+	for unit in sim.campaign.units.values():
+		var ring := unit.get_node_or_null("selection_ring") as MeshInstance3D
+		var selected := selected_units.has(unit.id)
+		if selected and ring == null:
+			ring = MeshInstance3D.new()
+			ring.name = "selection_ring"
+			var mesh := TorusMesh.new()
+			mesh.inner_radius = 0.7
+			mesh.outer_radius = 1.0
+			mesh.rings = 16
+			mesh.ring_segments = 6
+			var mat := StandardMaterial3D.new()
+			mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			mat.albedo_color = Color(0.94, 0.77, 0.32)
+			mesh.material = mat
+			ring.mesh = mesh
+			ring.scale.y = 0.15
+			ring.position.y = 0.06
+			ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			unit.add_child(ring)
+		if ring != null: ring.visible = selected
+
+
+func _begin_bridge() -> void:
+	_cancel_placement()
+	_exit_clear_tool()
+	_clear_selection()
+	hud.set_tray_open(false)
+	mode = Mode.BRIDGE
+	_bridge_start = Vector3.INF
+	_bridge_hover = Vector3.INF
+	hud.set_hint("Click opposite banks to build a timber bridge · right-click cancels")
+	hud.show_bridge_preview({}, false)
+
+
+func _cancel_bridge() -> void:
+	if is_instance_valid(_bridge_preview): _bridge_preview.queue_free()
+	_bridge_preview = null
+	_bridge_start = Vector3.INF
+	_bridge_hover = Vector3.INF
+	if mode == Mode.BRIDGE:
+		mode = Mode.SELECT
+		hud.clear_selection()
+		hud.set_hint("WASD pan · wheel zoom · middle-drag rotate · click to select")
+
+
+func _bridge_hit(screen_position: Vector2) -> Dictionary:
+	var ray := camera.screen_ray(screen_position)
+	return world.terrain.raycast(ray.origin, ray.direction)
+
+
+func _bridge_click(screen_position: Vector2) -> void:
+	var hit := _bridge_hit(screen_position)
+	if not hit.hit: return
+	if not _bridge_start.is_finite():
+		var cell := world.world_to_cell(hit.position)
+		if world.nav.is_solid(cell.x, cell.y):
+			_on_alert("Choose a clear, dry river bank first.", hit.position)
+			return
+		_bridge_start = hit.position
+		_bridge_hover = Vector3.INF
+		_update_bridge_preview()
+		return
+	var result: Dictionary = sim.bridges.place(_bridge_start, hit.position)
+	if not result.ok:
+		_on_alert(result.reason, hit.position)
+		return
+	var id := int(result.id)
+	_cancel_bridge()
+	_clear_selection()
+	selected_bridge = id
+	_on_alert("Timber bridge ordered. Builders will deliver its materials.", hit.position)
+	_refresh_selection()
+
+
+func _update_bridge_preview() -> void:
+	if not _bridge_start.is_finite(): return
+	var mouse := get_viewport().get_mouse_position()
+	if hud.blocks_mouse(mouse): return
+	var hit := _bridge_hit(mouse)
+	if not hit.hit: return
+	var at: Vector3 = hit.position
+	# Geometry and path comparison only need refreshing after the pointer
+	# crosses a navigation cell; do not run a route search every render frame.
+	if _bridge_hover.is_finite() and world.world_to_cell(at) == world.world_to_cell(_bridge_hover): return
+	_bridge_hover = at
+	var quote: Dictionary = sim.bridges.quote(_bridge_start, at)
+	if is_instance_valid(_bridge_preview): _bridge_preview.queue_free()
+	_bridge_preview = null
+	if quote.has("a") and quote.has("b") and quote.a.distance_to(quote.b) >= 1.0:
+		var preview := BridgeVisual.new()
+		world.effects_root.add_child(preview)
+		preview.setup(-1, quote.a, quote.b, Bridges.WIDTH, 1.0, true, quote.ok)
+		_bridge_preview = preview
+	hud.show_bridge_preview(quote, true)

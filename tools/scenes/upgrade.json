@@ -39,12 +39,28 @@
     "note": "a march that runs thirty-two days has to be able to feed itself: without a farm it eats its opening stores and then starves, which is correct behaviour and makes a poor fixture for testing upgrades"
   },
   {
+    "op": "build",
+    "type": "market",
+    "offset": [
+      -40,
+      -36
+    ],
+    "radius": 50,
+    "pay": true,
+    "note": "Market is built with hauled materials; research uses the real payment and calendar."
+  },
+  {
     "op": "simulate",
     "days": 8.0
   },
   {
     "op": "note",
     "text": "the granary becomes a grain warehouse, in place"
+  },
+  {
+    "op": "research",
+    "id": "civic_building",
+    "complete": true
   },
   {
     "op": "upgrade_building",
@@ -127,6 +143,11 @@
   {
     "op": "simulate",
     "days": 10.0
+  },
+  {
+    "op": "research",
+    "id": "metallurgy",
+    "complete": true
   },
   {
     "op": "upgrade_building",

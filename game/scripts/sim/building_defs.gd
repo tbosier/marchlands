@@ -11,7 +11,7 @@ extends RefCounted
 ## Deliberately small (design doc 33: do not start with hundreds of buildings).
 
 enum Role { SEAT, HOUSING, STORAGE, GATHER_WOOD, GATHER_STONE,
-		GATHER_IRON, WORKSHOP, FARM, GRANARY }
+		GATHER_IRON, WORKSHOP, FARM, GRANARY, MARKET, SUPPLY, BARRACKS, RANCH }
 
 ## Roles whose buildings exist to hold goods for the settlement at large.
 const STORAGE_ROLES := [Role.STORAGE, Role.GRANARY, Role.SEAT]
@@ -77,6 +77,15 @@ class Def:
 
 	func is_farm() -> bool:
 		return role == Role.FARM
+
+	func is_ranch() -> bool:
+		return role == Role.RANCH
+
+	func is_market() -> bool:
+		return role == Role.MARKET
+
+	func is_food_depot() -> bool:
+		return role == Role.MARKET or role == Role.SUPPLY
 
 	func stores_resource(res: int) -> bool:
 		return stores.has(res)
@@ -145,7 +154,7 @@ static func _build() -> void:
 		"houses": 6,
 		"storage": 400.0,
 		"stores": [Config.Res.FOOD, Config.Res.TIMBER, Config.Res.STONE,
-				   Config.Res.IRON, Config.Res.TOOLS],
+				   Config.Res.IRON, Config.Res.TOOLS, Config.Res.HIDES, Config.Res.LEATHER],
 		"buildable": false,
 	})
 	_add({
@@ -169,7 +178,62 @@ static func _build() -> void:
 		"build_time": 12.0,
 		"storage": 250.0,
 		"stores": [Config.Res.FOOD, Config.Res.TIMBER, Config.Res.STONE,
-				   Config.Res.IRON, Config.Res.TOOLS],
+				   Config.Res.IRON, Config.Res.TOOLS, Config.Res.HIDES, Config.Res.LEATHER],
+	})
+	_add({
+		"type_id": "market",
+		"asset": "stockpile",
+		"display_name": "Market",
+		"role": Role.MARKET,
+		"profession": "vendor",
+		"description": "Two vendors bring food to nearby homes. Choose a stocking "
+				+ "target to balance local supplies against food kept elsewhere.",
+		"cost": {Config.Res.TIMBER: 24, Config.Res.STONE: 8},
+		"build_time": 24.0,
+		"worker_slots": 2,
+		"storage": 120.0,
+		"stores": [Config.Res.FOOD],
+	})
+	_add({
+		"type_id": "supply_hut",
+		"asset": "stockpile",
+		"display_name": "Supply Hut",
+		"role": Role.SUPPLY,
+		"profession": "quartermaster",
+		"description": "Two quartermasters carry food forward from stores and "
+				+ "markets. Holds sixty rations close to travelling troops.",
+		"cost": {Config.Res.TIMBER: 30, Config.Res.STONE: 12},
+		"build_time": 28.0,
+		"worker_slots": 2,
+		"storage": 80.0,
+		"stores": [Config.Res.FOOD],
+		"upgrades_to": "fort",
+		"upgrade_cost": {Config.Res.TIMBER: 45, Config.Res.STONE: 35, Config.Res.TOOLS: 8},
+		"upgrade_time": 40.0,
+	})
+	_add({
+		"type_id": "fort",
+		"asset": "stockpile",
+		"display_name": "Fort",
+		"role": Role.SUPPLY,
+		"profession": "quartermaster",
+		"description": "A fortified supply yard. Its two quartermasters keep "
+				+ "one hundred and twenty rations behind a timber palisade.",
+		"build_time": 40.0,
+		"worker_slots": 2,
+		"storage": 180.0,
+		"stores": [Config.Res.FOOD],
+		"buildable": false,
+	})
+	_add({
+		"type_id": "barracks",
+		"asset": "logging_camp",
+		"display_name": "Barracks",
+		"role": Role.BARRACKS,
+		"description": "Muster a militia company here. Soldiers need real food "
+				+ "from a market, supply hut or another reachable store.",
+		"cost": {Config.Res.TIMBER: 40, Config.Res.STONE: 20},
+		"build_time": 32.0,
 	})
 	_add({
 		"type_id": "logging_camp",
@@ -299,6 +363,27 @@ static func _build() -> void:
 		"storage": 1400.0,
 		"stores": [Config.Res.FOOD],
 		"buildable": false,
+	})
+	_add({
+		"type_id": "ranch", "asset": "stockpile", "display_name": "Cattle Ranch",
+		"role": Role.RANCH, "profession": "rancher",
+		"description": "Two ranchers tame wild cattle and lead them home. Research ranching "
+				+ "to breed a herd and turn surplus adult cattle into food and hides.",
+		"cost": {Config.Res.TIMBER: 24, Config.Res.STONE: 8}, "build_time": 24.0,
+		"worker_slots": 2, "storage": 100.0,
+		"stores": [Config.Res.FOOD, Config.Res.HIDES], "produces": Config.Res.HIDES,
+		"work_radius": 240.0,
+	})
+	_add({
+		"type_id": "tannery", "asset": "logging_camp", "display_name": "Tannery",
+		"role": Role.WORKSHOP, "profession": "tanner",
+		"description": "After leatherworking research, two tanners cure real hides with bark "
+				+ "from timber into leather for armour.",
+		"cost": {Config.Res.TIMBER: 24, Config.Res.STONE: 10}, "build_time": 26.0,
+		"worker_slots": 2, "storage": 80.0,
+		"stores": [Config.Res.HIDES, Config.Res.TIMBER, Config.Res.LEATHER],
+		"produces": Config.Res.LEATHER,
+		"consumes": {Config.Res.HIDES: 1.0, Config.Res.TIMBER: 0.25},
 	})
 
 

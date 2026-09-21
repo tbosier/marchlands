@@ -34,6 +34,24 @@
     "rate": 16.0
   },
   {
+    "op": "build",
+    "type": "quarry",
+    "near": "stone",
+    "radius": 300,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "market",
+    "offset": [
+      -40,
+      -36
+    ],
+    "radius": 50,
+    "pay": true,
+    "note": "Market is built with hauled materials; research uses the real payment and calendar."
+  },
+  {
     "op": "run",
     "days": 1.0
   },
@@ -82,6 +100,11 @@
     "op": "assert",
     "check": "population_at_least",
     "value": 22
+  },
+  {
+    "op": "research",
+    "id": "roadworks",
+    "complete": true
   },
   {
     "op": "upgrade_route",

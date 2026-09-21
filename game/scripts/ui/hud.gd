@@ -20,6 +20,26 @@ signal build_requested(type_id: String)
 signal build_cancelled()
 signal speed_requested(index: int)
 signal upgrade_route_requested()
+signal road_scope_requested(scope: String)
+signal research_open_requested()
+signal research_requested(tech_id: String)
+signal army_open_requested()
+signal recruit_requested()
+signal muster_requested()
+signal rival_focus_requested()
+signal armor_requested(unit_id: int, tier: String)
+signal demobilize_requested(unit_id: int)
+signal domesticate_requested(cow_id: int)
+signal cattle_focus_requested()
+signal trade_open_requested()
+signal trade_dispatch_requested(origin_id: int, target_id: int)
+signal caravan_recall_requested(caravan_id: int)
+signal caravan_repeat_requested(caravan_id: int, enabled: bool)
+signal wreck_recovery_requested(wreck_id: int, enabled: bool)
+signal bridge_tool_requested()
+signal bridge_remove_requested(bridge_id: int)
+signal new_world_requested(seed_value: int, size_m: int)
+signal market_target_requested(building: Building, target: int)
 signal demolish_requested(building: Building)
 signal upgrade_requested(building: Building)
 signal clear_ground_requested()
@@ -81,6 +101,8 @@ var _selection_title: Label
 var _selection_rule: HSeparator
 var _selection_body: RichTextLabel
 var _selection_actions: VBoxContainer
+var _selection_scroll: ScrollContainer
+var _selection_content: VBoxContainer
 var _alert_box: VBoxContainer
 var _hint_label: Label
 var _tooltip: PanelContainer
@@ -91,6 +113,7 @@ var _date_label: Label
 var _top_row: HBoxContainer
 var _build_toggle: Button
 var _build_tray: HBoxContainer
+var _build_scroll: ScrollContainer
 var _clear_button: Button
 var _build_bar: PanelContainer
 var _controls_row: HBoxContainer
@@ -102,6 +125,10 @@ var _built := false
 var _clock: Clock
 var _active_build := ""
 var _compact := false
+var _primary_actions: Array[Button] = []
+var _world_dialog: ConfirmationDialog
+var _world_size_choice: OptionButton
+var _world_seed_input: LineEdit
 var _selection_scroll_limit := 600.0
 var _idle_reason := ""
 var _base_hint := ""
@@ -147,7 +174,9 @@ func setup(sim: Simulation, clock: Clock) -> void:
 	# the selection panel ends up off the left edge of the screen where a
 	# player clicking a building never sees it. Offsets have to be set too,
 	# and the whole thing re-fitted whenever the window changes.
-	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	# The viewport size is assigned explicitly below; equal anchors keep
+	# Godot from overriding it after _ready and warning on every launch.
+	set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	get_viewport().size_changed.connect(_fit_to_viewport)
 
@@ -200,7 +229,7 @@ func _relayout(rect: Vector2) -> void:
 	# Degrade until the top bar fits, cheapest loss first. The resource names
 	# go before the wordmark does: at that width the coloured tick and the
 	# number still say which store is which.
-	for stage in 3:
+	for stage in 4:
 		if _top_fits(width):
 			break
 		match stage:
@@ -214,6 +243,9 @@ func _relayout(rect: Vector2) -> void:
 			2:
 				if _title_label:
 					_title_label.visible = false
+			3:
+				for b in _speed_buttons:
+					b.custom_minimum_size.x = 34.0
 
 	# Below this there is no room for both a name and a price on a build
 	# card; the price stays reachable on the tooltip.
@@ -231,7 +263,7 @@ func _relayout(rect: Vector2) -> void:
 		# about 710 px, so below roughly 760 px the right-hand end of the tray
 		# is off the screen and there is nothing here that recovers it. A
 		# horizontal ScrollContainer is the fix and is not attempted blind.
-		var per: float = (width - 268.0) / float(maxi(1, _build_buttons.size()))
+		var per: float = (width - 440.0) / float(maxi(1, _build_buttons.size()))
 		var button_w: float = clampf(per, 64.0, 152.0 if not tight else 116.0)
 		b.custom_minimum_size = Vector2(button_w, TRAY_CARD_H)
 
@@ -267,20 +299,16 @@ func _relayout(rect: Vector2) -> void:
 		_selection_panel.offset_right = -12.0
 		_selection_panel.offset_bottom = _selection_panel.offset_top
 		if _selection_body:
-			_selection_body.custom_minimum_size = Vector2(panel_w - 30.0, 0)
-		# How much room the panel has between the top bar and the build bar.
-		# Note that this is a measurement, not yet an enforcement: the body has
-		# scroll_active off and fit_content on, so a very long selection — a
-		# workshop with a full staff list — still grows past this rather than
-		# scrolling inside it.
+			_selection_body.custom_minimum_size = Vector2.ZERO
 		var avail: float = rect.y - _selection_panel.offset_top - 96.0
-		_selection_panel.custom_minimum_size = Vector2(0, 0)
+		_selection_panel.custom_minimum_size = Vector2(panel_w, 0)
 		_selection_scroll_limit = maxf(120.0, avail)
 		if _selection_body:
 			_selection_body.custom_minimum_size.y = 0
 			_selection_body.fit_content = true
 		_selection_panel.size.y = minf(_selection_panel.size.y,
 				_selection_scroll_limit)
+		_fit_selection_height.call_deferred()
 	if _alert_box:
 		var alert_w: float = clampf(width * 0.40, 220.0, 330.0)
 		_alert_box.custom_minimum_size = Vector2(alert_w, 0)
@@ -292,7 +320,7 @@ func _relayout(rect: Vector2) -> void:
 func _apply_top_spacing() -> void:
 	if _top_row:
 		_top_row.add_theme_constant_override(
-				"separation", 9 if _compact else 18)
+				"separation", 5 if _compact else 18)
 	for label in _res_name_labels:
 		label.visible = not _compact
 
@@ -609,13 +637,13 @@ func _build_bottom_bar() -> void:
 	add_child(bar)
 
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 10)
+	row.add_theme_constant_override("separation", 6)
 	bar.add_child(row)
 
 	_build_toggle = Button.new()
 	_build_toggle.text = "▲  Build"
 	_build_toggle.toggle_mode = true
-	_build_toggle.custom_minimum_size = Vector2(106, 32)
+	_build_toggle.custom_minimum_size = Vector2(92, 32)
 	_build_toggle.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	_build_toggle.add_theme_font_size_override("font_size", F_BODY)
 	_build_toggle.tooltip_text = "Show the build options   (B)"
@@ -624,10 +652,38 @@ func _build_bottom_bar() -> void:
 	_build_toggle.toggled.connect(_on_build_tray_toggled)
 	row.add_child(_build_toggle)
 
+	for entry in [["Research", research_open_requested], ["Army", army_open_requested],
+			["Wild cattle", cattle_focus_requested], ["Trade", trade_open_requested],
+			["Bridge", bridge_tool_requested]]:
+		var action := Button.new()
+		action.text = entry[0]
+		action.custom_minimum_size = Vector2(58, 32)
+		action.add_theme_font_size_override("font_size", F_SMALL)
+		action.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		_style_button(action)
+		action.pressed.connect(func(): entry[1].emit())
+		row.add_child(action)
+		_primary_actions.append(action)
+	var world_button := Button.new()
+	world_button.text = "World"
+	world_button.custom_minimum_size = Vector2(58, 32)
+	world_button.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	world_button.add_theme_font_size_override("font_size", F_SMALL)
+	_style_button(world_button)
+	world_button.pressed.connect(_show_world_dialog)
+	row.add_child(world_button)
+	_primary_actions.append(world_button)
+
+	_build_scroll = ScrollContainer.new()
+	_build_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_build_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_build_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	_build_scroll.visible = false
+	row.add_child(_build_scroll)
 	_build_tray = HBoxContainer.new()
 	_build_tray.add_theme_constant_override("separation", 6)
 	_build_tray.visible = false
-	row.add_child(_build_tray)
+	_build_scroll.add_child(_build_tray)
 
 	for type_id in BuildingDefs.buildable():
 		var def := BuildingDefs.get_def(type_id)
@@ -746,7 +802,10 @@ func _fit_label(label: Label, available: float, sizes: Array) -> void:
 
 
 func _on_build_tray_toggled(pressed: bool) -> void:
+	for action in _primary_actions:
+		action.visible = not pressed
 	_build_tray.visible = pressed
+	_build_scroll.visible = pressed
 	_build_toggle.text = "▼  Build" if pressed else "▲  Build"
 	if _build_bar:
 		_build_bar.offset_top = -BAR_OPEN_H if pressed else -BAR_CLOSED_H
@@ -815,11 +874,21 @@ func _build_selection_panel() -> void:
 	_selection_rule.add_theme_stylebox_override("separator", line)
 	_selection_rule.add_theme_constant_override("separation", 3)
 	col.add_child(_selection_rule)
+	_selection_scroll = ScrollContainer.new()
+	_selection_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_selection_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	_selection_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.add_child(_selection_scroll)
+	_selection_content = VBoxContainer.new()
+	_selection_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_selection_content.add_theme_constant_override("separation", 7)
+	_selection_scroll.add_child(_selection_content)
+	_selection_content.minimum_size_changed.connect(_fit_selection_height.call_deferred)
 
 	_selection_body = RichTextLabel.new()
 	_selection_body.bbcode_enabled = true
 	_selection_body.fit_content = true
-	_selection_body.custom_minimum_size = Vector2(280, 0)
+	_selection_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_selection_body.add_theme_font_size_override("normal_font_size", F_SMALL)
 	_selection_body.add_theme_font_size_override("bold_font_size", F_SMALL)
 	_selection_body.add_theme_color_override("default_color", INK)
@@ -827,11 +896,22 @@ func _build_selection_panel() -> void:
 	# 12 px over a moving scene, and this costs nothing but pixels.
 	_selection_body.add_theme_constant_override("line_separation", 3)
 	_selection_body.scroll_active = false
-	col.add_child(_selection_body)
+	_selection_content.add_child(_selection_body)
 
 	_selection_actions = VBoxContainer.new()
 	_selection_actions.add_theme_constant_override("separation", 5)
-	col.add_child(_selection_actions)
+	_selection_content.add_child(_selection_actions)
+	_build_bar.resized.connect(_fit_selection_height.call_deferred)
+
+
+func _fit_selection_height() -> void:
+	if not is_instance_valid(_selection_scroll):
+		return
+	var available := get_viewport_rect().size.y - _selection_panel.offset_top - _build_bar.size.y - 12.0
+	var frame := _selection_panel.get_combined_minimum_size().y - _selection_scroll.custom_minimum_size.y
+	var content_height := _selection_content.get_combined_minimum_size().y
+	_selection_scroll.custom_minimum_size.y = minf(content_height, maxf(40.0, available - frame))
+	_selection_panel.size.y = _selection_panel.get_combined_minimum_size().y
 
 
 ## An action button in the selection panel: full width, so the panel reads as a
@@ -910,6 +990,7 @@ func set_active_build(type_id: String) -> void:
 		if _build_toggle and not _build_toggle.button_pressed:
 			_build_toggle.button_pressed = true
 			_build_tray.visible = true
+			_build_scroll.visible = true
 			_build_toggle.text = "▼  Build"
 			_apply_hint_visibility()
 	if type_id == "":
@@ -969,17 +1050,24 @@ func _refresh_readouts() -> void:
 			BAD if food_days < 4.0 else (WARN if food_days < 10.0 else INK))
 
 	var homeless := _sim.stat_homeless
+	var soldiers: int = _sim.campaign.friendly_ids().size() if _sim.campaign != null else 0
+	var merchants: int = _sim.trade.caravans.size() if _sim.trade != null else 0
+	var civilians := _sim.citizens.size()
 	if _compact:
-		_pop_label.text = "Pop %d" % _sim.stat_population
+		_pop_label.text = "C%d S%d" % [civilians, soldiers] if soldiers > 0 else "Pop %d" % civilians
+		if merchants > 0:
+			_pop_label.text = "C%d S%d M%d" % [civilians, soldiers, merchants] if soldiers > 0 else "C%d M%d" % [civilians, merchants]
 	else:
-		_pop_label.text = "Population %d  (%d homeless, %d idle)" % [
-				_sim.stat_population, homeless, _sim.stat_idle]
+		_pop_label.text = "%d people · %d civilians · %d soldiers" % [civilians + soldiers, civilians, soldiers] \
+				if soldiers > 0 else "Population %d  (%d homeless, %d idle)" % [civilians, homeless, _sim.stat_idle]
+		if merchants > 0:
+			_pop_label.text = "%d people · %d civilians · %d soldiers · %d merchants" % [civilians + soldiers + merchants, civilians, soldiers, merchants]
 	_pop_label.add_theme_color_override("font_color",
 			WARN if homeless > 0 else INK)
 
 	# Idle people are a symptom; the tooltip carries the diagnosis.
 	var reason := _sim.idle_diagnosis()
-	_pop_label.tooltip_text = (reason if reason != ""
+	_pop_label.tooltip_text = "%d people: %d civilians and %d soldiers; %d merchants. Soldiers and merchants do not produce locally.\n" % [civilians + soldiers + merchants, civilians, soldiers, merchants] + (reason if reason != ""
 			else "%d of %d at work" % [_sim.stat_population - _sim.stat_idle,
 					_sim.stat_population])
 	if reason != "":
@@ -1015,6 +1103,7 @@ func _actions_changed(signature: String) -> bool:
 	if signature == _actions_signature:
 		return false
 	_actions_signature = signature
+	_selection_scroll.scroll_vertical = 0
 	for child in _selection_actions.get_children():
 		_selection_actions.remove_child(child)
 		child.queue_free()
@@ -1029,7 +1118,18 @@ func clear_selection() -> void:
 		child.queue_free()
 
 
+## A button can outlive its building until the next panel refresh. A weak
+## reference also prevents an old queued click from targeting a reused ID
+## after a save replaces the simulation.
+func _live_building(reference: WeakRef) -> Building:
+	var building := reference.get_ref() as Building
+	if building == null or not is_instance_valid(_sim):
+		return null
+	return building if _sim.buildings_by_id.get(building.id) == building else null
+
+
 func show_building(b: Building) -> void:
+	var building_ref: WeakRef = weakref(b)
 	_selection_panel.visible = true
 	_selection_title.text = b.display_name()
 	# A different building, or the same one that has changed between being a
@@ -1046,7 +1146,10 @@ func show_building(b: Building) -> void:
 		lines.append("[b]Under construction[/b]")
 		if rebuild:
 			var cancel := _action_button("Cancel site  (materials returned)")
-			cancel.pressed.connect(func(): demolish_requested.emit(b))
+			cancel.pressed.connect(func():
+				var live := _live_building(building_ref)
+				if live != null:
+					demolish_requested.emit(live))
 			_selection_actions.add_child(cancel)
 		var cost := b.build_cost
 		for res in cost.keys():
@@ -1058,6 +1161,36 @@ func show_building(b: Building) -> void:
 		lines.append("  Construction: %d%%" % int(b.build_progress * 100.0))
 	else:
 		_add_upgrade_action(b, rebuild)
+		if b.fire > 0.0:
+			lines.append("\n[color=#e0a85c]Burning — the fire is spreading through the building[/color]")
+		elif b.health < b.max_health() * 0.7:
+			lines.append("\n[color=#e0a85c]Scorched and damaged[/color]")
+		if b.type_id in ["supply_hut", "fort"]:
+			lines.append("\n[b]Military food relay[/b]\nStock target %d · supply link up to 160 m\nSoldiers refill within 24 m. Assignments are automatic when workers are available." % b.food_stock_target())
+		if b.type_id == "ranch" and _sim.husbandry != null:
+			lines.append("\n[b]Herd[/b] %d cattle · %d adults\nKeep two adults for breeding. Ranchers tend the herd and turn surplus animals into food and hides." % [
+				_sim.husbandry.herd_at(b.id).size(), _sim.husbandry.herd_at(b.id, true).size()])
+			if not _sim.research.completed.has("ranching"):
+				lines.append("[color=#e0a85c]Domesticate a wild cow, then research Ranching to begin breeding and hide production.[/color]")
+		if b.type_id == "tannery" and not _sim.research.completed.has("leatherworking"):
+			lines.append("\n[color=#e0a85c]Research Leatherworking to turn hides into leather.[/color]")
+		if b.type_id == "market":
+			var service := _sim.market_service(b)
+			lines.append("\n[b]Market district[/b] %d homes · %d residents" % [service.homes, service.residents])
+			lines.append("Food target %d · %.1f days in stock\nIncoming food: %.0f" % [service.target, service.days_supply, service.incoming])
+			if b.workers.is_empty():
+				lines.append("[color=#e0a85c]Vendors needed to collect supplies[/color]")
+			for target in [40, 80, 120]:
+				if rebuild:
+					var policy := _action_button("Keep %d food" % target)
+					policy.pressed.connect(func():
+						var live := _live_building(building_ref)
+						if live != null:
+							market_target_requested.emit(live, target))
+					_selection_actions.add_child(policy)
+				var policy_button: Button = _selection_actions.get_child([40,80,120].find(target))
+				policy_button.text = ("✓ " if b.market_stock_target == target else "") + "Keep %d food" % target
+
 		if b.def.houses > 0:
 			lines.append("")
 			lines.append("[b]Larder[/b] %d / %d  [color=#a9a49b]%s[/color]"
@@ -1116,9 +1249,13 @@ func _add_upgrade_action(b: Building, rebuild: bool) -> void:
 	var check: Dictionary = _sim.can_upgrade(b)
 	var button: Button = null
 	if rebuild:
+		var building_ref: WeakRef = weakref(b)
 		button = _action_button("Make into a %s  (%s)" % [
 				next.display_name, Res.cost_text(b.def.upgrade_cost)])
-		button.pressed.connect(func(): upgrade_requested.emit(b))
+		button.pressed.connect(func():
+			var live := _live_building(building_ref)
+			if live != null:
+				upgrade_requested.emit(live))
 		_selection_actions.add_child(button)
 	elif _selection_actions.get_child_count() > 0:
 		# This branch is the only action a finished building offers, so it is
@@ -1173,52 +1310,144 @@ func show_citizen(c: Citizen) -> void:
 				% [meal_word, c.meals_taken],
 		"[b]Morale[/b] %d%%" % int(c.morale * 100.0),
 	]
+	if c is Soldier:
+		lines.append("[b]Injuries[/b] %s" % c.injury_summary())
+		lines.append("[b]Work capacity[/b] %d%%" % roundi(c.workability() * 100.0))
 	_selection_body.text = "\n".join(lines)
 
 
 func show_road(info: Dictionary) -> void:
 	_selection_panel.visible = true
-	_selection_title.text = "Route"
-
-	var level: int = info["level"]
-	# The route's grade is what decides whether there is an upgrade button and
-	# what it says; nothing else about the panel changes which buttons exist.
-	var rebuild := _actions_changed("road:%d" % level)
-	var lines: Array[String] = [
-		"[color=#a9a49b]%s[/color]" % Config.ROAD_NAMES[level],
-		"",
-		"[b]Traffic[/b] %d" % int(info["wear"]),
-		"[b]Movement[/b] %.2fx" % Config.ROAD_SPEED[level],
-	]
-	if info.get("locked", 0) > 0:
-		lines.append("[b]Maintained[/b] by your order")
-
-	if info.get("extent", 0) > 0:
-		lines.append("[b]Extent[/b] roughly %d m of route"
-				% int(info["extent"] * Config.WEAR_CELL * 0.55))
-
-	if level >= Config.RoadLevel.WORN and level < Config.RoadLevel.PAVED:
-		var next: int = level + 1
-		lines.append("")
-		lines.append("Upgrade to [b]%s[/b] for %d timber, %d stone."
-				% [Config.ROAD_NAMES[next], Config.UPGRADE_COST_TIMBER,
-				   Config.UPGRADE_COST_STONE])
-		var button: Button = null
-		if rebuild:
-			button = _action_button("Upgrade route to %s"
-					% Config.ROAD_NAMES[next])
-			button.pressed.connect(func(): upgrade_route_requested.emit())
-			_selection_actions.add_child(button)
-		elif _selection_actions.get_child_count() > 0:
-			button = _selection_actions.get_child(0) as Button
-		if button != null:
-			button.disabled = not bool(info.get("affordable", false))
-	elif level < Config.RoadLevel.WORN:
-		lines.append("")
-		lines.append("[color=#a9a49b]Nobody walks here yet. Routes must be "
-				+ "worn in before they can be improved.[/color]")
-
+	_selection_title.text = "Improve a route"
+	var rebuild := _actions_changed("road:%d:%s" % [info.level, info.scope])
+	var proposal: Dictionary = info.proposal
+	var lines: Array[String] = ["Traffic creates the route. Research and materials improve it.",
+		"", "[b]Surface[/b] %s → %s" % [Config.ROAD_NAMES[info.level], Config.ROAD_NAMES[info.target]],
+		"[b]Selected[/b] %d m² of %d m² connected" % [proposal.area_m2, proposal.network_count * Config.WEAR_CELL * Config.WEAR_CELL],
+		"[b]Materials[/b] %s" % Res.cost_text(proposal.cost)]
+	if info.reason != "":
+		lines.append("[color=#e0a85c]%s[/color]" % info.reason)
+	lines.append("The highlighted ground is the exact area you will improve.")
 	_selection_body.text = "\n".join(lines)
+	var scopes := ["busiest", "local", "all"]
+	var labels := ["Busiest route · about 20%", "Main routes · about half", "Entire connected network"]
+	for i in scopes.size():
+		var button: Button
+		if rebuild:
+			button = _action_button(labels[i])
+			button.pressed.connect(func(): road_scope_requested.emit(scopes[i]))
+			_selection_actions.add_child(button)
+		else:
+			button = _selection_actions.get_child(i)
+		button.text = ("✓ " if info.scope == scopes[i] else "") + labels[i] \
+				+ "\n" + Res.cost_text(info.options[scopes[i]].cost)
+		button.tooltip_text = Res.cost_text(info.options[scopes[i]].cost)
+	var commit: Button
+	if rebuild:
+		commit = _action_button("Commission improvement")
+		commit.pressed.connect(func(): upgrade_route_requested.emit())
+		_selection_actions.add_child(commit)
+	else:
+		commit = _selection_actions.get_child(3)
+	commit.disabled = not info.can_upgrade
+	commit.tooltip_text = info.reason
+
+
+func show_research(quotes: Array) -> void:
+	_selection_panel.visible = true
+	_selection_title.text = "Research at the keep"
+	var rebuild := _actions_changed("research")
+	var lines: Array[String] = ["A working market supports the town's engineers. Fund one study at a time; building and road work still costs materials afterward."]
+	for i in quotes.size():
+		var q: Dictionary = quotes[i]
+		var status: String = "Complete" if q.completed else q.reason
+		if q.active:
+			status = "%d%% · %.1f days remaining" % [q.progress * 100.0, q.remaining_days]
+		lines.append("\n[b]%s[/b] — %s" % [q.name, status if status != "" else "Ready"])
+		var button: Button
+		if rebuild:
+			button = _action_button("")
+			button.pressed.connect(func(): research_requested.emit(q.id))
+			_selection_actions.add_child(button)
+		else:
+			button = _selection_actions.get_child(i)
+		button.text = "%s · %s" % [q.name, "Learned" if q.completed else Res.cost_text(q.cost)]
+		button.tooltip_text = "%s · %.0f days\n%s\n%s" % [q.name, q.duration_days,
+				q.get("benefit", ""), q.reason]
+		button.disabled = not q.can_start or not _sim.can_afford(q.cost)
+	_selection_body.text = "\n".join(lines)
+
+
+func show_resource(info: Dictionary) -> void:
+	_selection_panel.visible = true
+	_selection_title.text = info.title
+	_actions_changed("resource:%d" % info.id)
+	_selection_body.text = "[b]Remaining[/b] %d\n\n%s" % [info.amount, info.description]
+
+
+func show_army(info: Dictionary) -> void:
+	_selection_panel.visible = true
+	_selection_title.text = "The march's army"
+	var rebuild := _actions_changed("army")
+	_selection_body.text = "Civilians: %d · Soldiers: %d\nRations in packs: %.0f\n\nEach recruit leaves a civilian job. Conscript everyone and production stops. Select a soldier to fit researched armor or return them to civilian life.\n\nSupply huts need food and civilian workers; keep each relay within 160 m of an upstream store.\n\nMuster selects your force. Right-click to march or attack.\n\n[b]%s[/b]\n%s" % [_sim.citizens.size(), info.units, info.rations, info.rival_name, info.status]
+	if rebuild:
+		var recruit := _action_button("Recruit · 5 tools, up to 10 food")
+		recruit.tooltip_text = "Enlist an existing resident. Returning veterans keep their remaining rations."
+		recruit.pressed.connect(func(): recruit_requested.emit())
+		_selection_actions.add_child(recruit)
+		var muster := _action_button("Muster all swordsmen")
+		muster.pressed.connect(func(): muster_requested.emit())
+		_selection_actions.add_child(muster)
+		var rival := _action_button("Find the rival town")
+		rival.pressed.connect(func(): rival_focus_requested.emit())
+		_selection_actions.add_child(rival)
+	_selection_actions.get_child(0).disabled = not info.can_recruit
+
+
+func show_soldier(unit: Node) -> void:
+	_selection_panel.visible = true
+	_selection_title.text = unit.given_name if unit.faction == 0 else "Rival guard"
+	var rebuild := _actions_changed("unit:%d" % unit.id)
+	_selection_body.text = "[b]Orders[/b] %s\n[b]Food[/b] %.1f days\n[b]Armor[/b] %s\n\n%s\n\n%s" % [unit.task_label, unit.rations,
+		String(unit.armor_tier).capitalize(), unit.injury_summary(),
+		"Armor is fitted at a barracks. Protection depends on the struck body part and attack. Injuries persist after discharge." if unit.faction == 0 else "This guard defends the rival settlement."]
+	if unit.faction != 0: return
+	var unit_id: int = unit.id
+	for i in MilitaryEquipment.TIERS.size():
+		var tier: String = MilitaryEquipment.TIERS[i]
+		var offer := MilitaryEquipment.quote(_sim, unit_id, tier)
+		var button: Button
+		if rebuild:
+			button = _action_button("")
+			button.pressed.connect(func(): armor_requested.emit(unit_id, tier))
+			_selection_actions.add_child(button)
+		else:
+			button = _selection_actions.get_child(i)
+		button.text = "Remove armor" if tier == "none" else "%s · %s" % [tier.capitalize(), Res.cost_text(offer.cost)]
+		button.disabled = not offer.can_fit
+		button.tooltip_text = offer.reason if offer.reason != "" else "Fit to this soldier. Existing equipment is not refunded."
+	if rebuild:
+		var discharge := _action_button("Return to civilian life")
+		discharge.pressed.connect(func(): demobilize_requested.emit(unit_id))
+		_selection_actions.add_child(discharge)
+
+
+func show_cow(info: Dictionary) -> void:
+	_selection_panel.visible = true
+	_selection_title.text = "Wild cattle" if info.wild else "Ranch cattle"
+	var rebuild := _actions_changed("cow:%d:%s" % [info.id, info.wild])
+	_selection_body.text = "%s\n\nBuild and staff a ranch, then send a rancher to approach a wild animal and lead it home. Your first successful domestication unlocks Ranching research. Keep a breeding pair; surplus cattle provide food and hides. A tannery turns hides into leather for armor." % info.status
+	if info.wild:
+		var id: int = info.id
+		var button: Button
+		if rebuild:
+			button = _action_button("Send rancher to domesticate")
+			button.pressed.connect(func(): domesticate_requested.emit(id))
+			_selection_actions.add_child(button)
+		else:
+			button = _selection_actions.get_child(0)
+		button.disabled = not info.can_domesticate
+		button.tooltip_text = info.reason
 
 
 # --- Cursor tooltip (placement feedback, design doc 6.1) --------------------
@@ -1295,10 +1524,10 @@ func push_alert(text: String, position: Vector3) -> void:
 	# which is enough for the eye to catch that something is new without it
 	# costing any attention.
 	panel.modulate.a = 0.0
-	create_tween().tween_property(panel, "modulate:a", 1.0, 0.18)
+	panel.create_tween().tween_property(panel, "modulate:a", 1.0, 0.18)
 
 	# They also fade on their own, so ignoring them costs nothing either.
-	var tween := create_tween()
+	var tween := panel.create_tween()
 	tween.tween_interval(14.0)
 	tween.tween_property(panel, "modulate:a", 0.0, 1.6)
 	tween.tween_callback(func(): _dismiss_alert(panel))
@@ -1330,9 +1559,165 @@ func _blocks(node: Node, at: Vector2) -> bool:
 		var control: Control = child
 		if not control.visible:
 			continue
+		if control.clip_contents and not control.get_global_rect().has_point(at):
+			continue
 		if control.mouse_filter != Control.MOUSE_FILTER_IGNORE \
 				and control.get_global_rect().has_point(at):
 			return true
 		if _blocks(control, at):
 			return true
 	return false
+
+
+func _show_world_dialog() -> void:
+	if _world_dialog == null:
+		_world_dialog = ConfirmationDialog.new()
+		_world_dialog.title = "Start a new march"
+		_world_dialog.ok_button_text = "Create world"
+		_world_dialog.min_size = Vector2i(440, 250)
+		var rows := VBoxContainer.new()
+		rows.add_theme_constant_override("separation", 12)
+		_world_dialog.add_child(rows)
+		var notice := Label.new()
+		notice.text = "Choose the landscape for a new settlement.\nThis replaces the current march. Save it first with Ctrl+S."
+		notice.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		notice.custom_minimum_size.x = 400
+		rows.add_child(notice)
+		_world_size_choice = OptionButton.new()
+		for preset in [["Small · 768 m", 768], ["Medium · 1.5 km", 1536],
+				["Large · 3.1 km", 3072], ["Extra large · 6.1 km", 6144]]:
+			_world_size_choice.add_item(preset[0], preset[1])
+		rows.add_child(_world_size_choice)
+		_world_seed_input = LineEdit.new()
+		_world_seed_input.placeholder_text = "World seed (whole number)"
+		_world_seed_input.text = str(_sim.world.world_seed) if _sim != null else "20260911"
+		rows.add_child(_world_seed_input)
+		var note := Label.new()
+		note.text = "Rivers, forested valleys and mountain passes.\nLarger worlds take longer to generate and travel across."
+		rows.add_child(note)
+		add_child(_world_dialog)
+		_world_dialog.confirmed.connect(func():
+			if not _world_seed_input.text.is_valid_int():
+				push_alert("Enter a whole number for the world seed.", Vector3.ZERO)
+				return
+			new_world_requested.emit(int(_world_seed_input.text), _world_size_choice.get_selected_id()))
+	_world_dialog.popup_centered(Vector2i(460, 280))
+
+
+func show_trade(info: Dictionary, selected_id: int = -1) -> void:
+	_selection_panel.visible = true
+	_selection_title.text = "Trade with Ashcombe"
+	var quote: Dictionary = info.get("quote", {})
+	var rows: Array = info.get("caravans", [])
+	var keys: Array = []
+	for row in rows: keys.append(row.id)
+	for wreck in info.get("lost_carts", []): keys.append("wreck:%d:%s" % [wreck.id, str(wreck.recovery_requested)])
+	var rebuild := _actions_changed("trade:%s:%d:%d" % [str(keys), selected_id, int(quote.get("origin_id", -1))])
+	var lines: Array[String] = ["Assign a citizen and cart to carry real goods between markets.",
+		"", "[b]Merchants away[/b] %d" % info.get("merchants", 0),
+		"[b]Offer[/b] %d timber for %d iron" % [quote.get("export_amount", 24), quote.get("import_amount", 8)],
+		"[b]Travel food[/b] %d · keep two days of food at home" % quote.get("provisions", 0)]
+	if quote.get("travel_seconds", 0.0) > 0:
+		lines.append("[b]Estimated round trip[/b] %.1f days before loading and stops" % (float(quote.travel_seconds) / Config.DAY_LENGTH))
+	if not quote.get("ok", false): lines.append("[color=#e0a85c]%s[/color]" % quote.get("reason", "Unavailable"))
+	for row in rows:
+		if selected_id >= 0 and row.id != selected_id: continue
+		lines.append("\n[b]%s[/b] · %s\n%s" % [row.name, row.state, row.status])
+		lines.append("Food %.1f · %s · trips %d" % [row.provisions,
+				"Empty cart" if row.cargo_res < 0 else "%d %s" % [row.cargo_amount, Res.display(row.cargo_res)], row.completed_trips])
+	if int(info.get("wrecks", 0)) > 0:
+		lines.append("\nLost carts: %d. Send civilian workers to collect their goods." % info.wrecks)
+		for wreck in info.get("lost_carts", []):
+			var goods: Array[String] = []
+			for res in Config.RES_COUNT:
+				if wreck.cargo[res] > 0: goods.append("%.1f %s" % [wreck.cargo[res], Res.display(res)])
+			lines.append("%s: %s" % [wreck.name, ", ".join(goods)])
+	_selection_body.text = "\n".join(lines)
+	var dispatch: Button
+	if rebuild:
+		dispatch = _action_button("Dispatch citizen caravan")
+		dispatch.name = "dispatch"
+		_selection_actions.add_child(dispatch)
+		var origin := int(quote.get("origin_id", -1))
+		var target := int(quote.get("target_id", -1))
+		dispatch.pressed.connect(func(): trade_dispatch_requested.emit(origin, target))
+		var neighbor := _action_button("Find trading town")
+		_selection_actions.add_child(neighbor)
+		neighbor.pressed.connect(func(): rival_focus_requested.emit())
+		for row in rows:
+			if selected_id >= 0 and row.id != selected_id: continue
+			var route_id := int(row.id)
+			var follow := _action_button("Find " + String(row.name))
+			_selection_actions.add_child(follow)
+			follow.pressed.connect(func():
+				if _sim.trade != null and _sim.trade.caravans.has(route_id):
+					focus_requested.emit(_sim.trade.caravans[route_id].merchant.global_position))
+			var recall := _action_button("Return home · " + String(row.name))
+			_selection_actions.add_child(recall)
+			recall.pressed.connect(func(): caravan_recall_requested.emit(route_id))
+			var repeat_button := _action_button("")
+			repeat_button.name = "repeat_%d" % route_id
+			_selection_actions.add_child(repeat_button)
+			repeat_button.pressed.connect(func():
+				if _sim.trade != null and _sim.trade.caravans.has(route_id):
+					caravan_repeat_requested.emit(route_id, not _sim.trade.caravans[route_id].repeat))
+		for wreck in info.get("lost_carts", []):
+			var wreck_id := int(wreck.id)
+			var location: Vector3 = wreck.position
+			var find := _action_button("Find lost cart · " + String(wreck.name))
+			_selection_actions.add_child(find)
+			find.pressed.connect(func(): focus_requested.emit(location))
+			var recovering: bool = wreck.recovery_requested
+			var salvage := _action_button(("Cancel recovery · " if recovering else "Recover goods · ") + String(wreck.name))
+			_selection_actions.add_child(salvage)
+			salvage.pressed.connect(func(): wreck_recovery_requested.emit(wreck_id, not recovering))
+	else:
+		dispatch = _selection_actions.get_node_or_null("dispatch")
+	if dispatch != null:
+		dispatch.disabled = not quote.get("ok", false)
+		dispatch.tooltip_text = quote.get("reason", "")
+	for row in rows:
+		var button: Button = _selection_actions.get_node_or_null("repeat_%d" % int(row.id))
+		if button != null: button.text = "Repeat trips: %s · %s" % ["on" if row.repeat else "off", row.name]
+
+
+func show_bridge(info: Dictionary) -> void:
+	_selection_panel.visible = true
+	_selection_title.text = "Timber bridge"
+	var bridge_id := int(info.id)
+	var rebuild := _actions_changed("bridge:%d" % bridge_id)
+	var lines: Array[String] = [String(info.get("status", "Building")),
+		"[b]Span[/b] %.0f m" % float(info.length), "[b]Work[/b] %d%%" % roundi(float(info.progress) * 100.0)]
+	for res in info.cost:
+		lines.append("%s delivered: %d / %d" % [Res.display(res), info.delivered.get(res, 0), info.cost[res]])
+	lines.append("\nCompleted crossings carry people and carts. Their traffic forms the approaches.")
+	_selection_body.text = "\n".join(lines)
+	var remove: Button
+	if rebuild:
+		remove = _action_button("Remove bridge")
+		remove.name = "remove_bridge"
+		_selection_actions.add_child(remove)
+		remove.pressed.connect(func(): bridge_remove_requested.emit(bridge_id))
+	else:
+		remove = _selection_actions.get_node_or_null("remove_bridge")
+	if remove != null:
+		remove.disabled = not info.get("can_remove", false)
+		remove.tooltip_text = "Wait until people and carts have cleared the crossing." if remove.disabled else "Cancel construction or dismantle the crossing."
+
+
+func show_bridge_preview(quote: Dictionary, chosen_bank: bool) -> void:
+	_selection_panel.visible = true
+	_selection_title.text = "Place timber bridge"
+	_actions_changed("bridge_preview")
+	var lines: Array[String] = ["Click the first bank, then the opposite bank. Right-click or Esc cancels.",
+		"No research required. Workers deliver the materials before building the deck."]
+	if chosen_bank:
+		lines.append("\n" + String(quote.get("reason", "Choose the opposite bank.")))
+		if quote.has("length"):
+			lines.append("[b]Span[/b] %.0f m · maximum 64 m" % float(quote.length))
+		for res in quote.get("cost", {}):
+			lines.append("%d %s" % [quote.cost[res], Res.display(res)])
+		if float(quote.get("detour_saved", -1)) >= 0:
+			lines.append("[b]Walking detour saved[/b] about %.0f m" % float(quote.detour_saved))
+		if quote.get("ok", false): lines.append("[color=#8fc58c]Click to begin construction.[/color]")
+	_selection_body.text = "\n".join(lines)

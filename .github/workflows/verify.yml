@@ -1,0 +1,68 @@
+name: Verify Marchlands
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 7 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      GODOT_VERSION: 4.7.2
+      # Official godot-builds release asset digest, pinned with the version.
+      GODOT_SHA256: cadd3204e728a35d3f13adb7fd0d7902636b79f6b95c40c265eb73b6c35329e4
+      LIBGL_ALWAYS_SOFTWARE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install verification dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3 rsync unzip xvfb xauth libgl1-mesa-dri libglx-mesa0 libxi6 libxrandr2 libxcursor1 libxinerama1
+
+      - name: Install pinned Godot
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/$archive" \
+            "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}-stable/$archive"
+          printf '%s  %s\n' "$GODOT_SHA256" "$RUNNER_TEMP/$archive" | sha256sum --check
+          mkdir -p tools/vendor
+          unzip -q "$RUNNER_TEMP/$archive" -d tools/vendor
+          mv "tools/vendor/Godot_v${GODOT_VERSION}-stable_linux.x86_64" tools/vendor/godot
+          chmod +x tools/vendor/godot
+          tools/vendor/godot --version
+
+      - name: Run complete verification gate
+        run: tools/build.sh test
+
+      - name: Upload logs, metrics, and screenshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/verification/
+            artifacts/*.png
+            artifacts/expansion_ui/
+            artifacts/society_ui/
+            artifacts/connections_ui/
+            artifacts/bridges/
+            artifacts/world_presentation/
+            artifacts/*long_run*.json
+          if-no-files-found: warn
+          retention-days: 14

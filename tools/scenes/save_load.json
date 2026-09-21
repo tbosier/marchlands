@@ -34,6 +34,24 @@
     "op": "clear_trees"
   },
   {
+    "op": "build",
+    "type": "quarry",
+    "near": "stone",
+    "radius": 300,
+    "instant": true
+  },
+  {
+    "op": "build",
+    "type": "market",
+    "offset": [
+      -40,
+      -36
+    ],
+    "radius": 50,
+    "pay": true,
+    "note": "Market is built with hauled materials; research uses the real payment and calendar."
+  },
+  {
     "op": "simulate",
     "days": 9.0
   },
@@ -45,6 +63,11 @@
     "op": "assert",
     "check": "wear_above",
     "value": 100
+  },
+  {
+    "op": "research",
+    "id": "roadworks",
+    "complete": true
   },
   {
     "op": "upgrade_route",
@@ -142,9 +165,9 @@
   },
   {
     "op": "assert",
-    "check": "work_in_progress",
-    "value": 1,
-    "note": "sampled while the haulers are still on the road: the house is finished well inside half a day, and a settlement with nothing left to do is not evidence that loading broke it"
+    "check": "last_build_progress",
+    "value": 0.01,
+    "note": "the newly ordered house must make progress; finishing it before this check is also success"
   },
   {
     "op": "simulate",
@@ -162,6 +185,11 @@
     "op": "assert",
     "check": "buildings_complete",
     "value": 10
+  },
+  {
+    "op": "assert",
+    "check": "last_build_progress",
+    "value": 1.0
   },
   {
     "op": "assert",

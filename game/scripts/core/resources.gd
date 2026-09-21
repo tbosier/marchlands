@@ -45,6 +45,10 @@ static func all() -> Array[Def]:
 					"stone_pile", "crate", Color(0.52, 0.42, 0.40)),
 			Def.new(Config.Res.TOOLS, "tools", "Tools",
 					"crate", "crate", Color(0.45, 0.50, 0.55)),
+			Def.new(Config.Res.HIDES, "hides", "Hides",
+					"grain_sack", "crate", Color(0.65, 0.43, 0.25)),
+			Def.new(Config.Res.LEATHER, "leather", "Leather",
+					"grain_sack", "crate", Color(0.43, 0.25, 0.13)),
 		]
 	return _defs
 
