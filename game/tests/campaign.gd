@@ -15,9 +15,9 @@ func _town_food(campaign: FrontierCampaign) -> float:
 func _generation_and_persistence() -> void:
 	var game := _new_game(42)
 	var campaign: FrontierCampaign = game.sim.campaign
-	_check(campaign.enemy_buildings.size() == 5 and campaign.units.size() == 3
+	_check(campaign.enemy_buildings.size() == 6 and campaign.units.size() == 3
 			and campaign._workers.size() == 3,
-			"the seeded rival has a keep, homes, farm, granary, growers and guards")
+			"the seeded rival has a keep, homes, farm, granary, well, growers and guards")
 	var keep := campaign._enemy_type("keep")
 	var farm := campaign._enemy_type("farm")
 	_check(keep != null and farm != null and farm.field_count() > 0
@@ -46,13 +46,17 @@ func _generation_and_persistence() -> void:
 	node.depleted = false
 	var nodes := game.world.nodes.capture()
 	var wear := game.world.wear.capture()
+	var terrain := game.world.heightmap.heights.duplicate()
+	var terrain_edits := game.world.heightmap.capture()
 	var saved := campaign.capture()
 	_check(FrontierCampaign.validate(saved) == "", "the live rival and marching growers produce a valid save")
 	_check(campaign.restore(saved) == "" and campaign.capture() == saved,
 			"campaign state round-trips exact positions, cargo, orders, fields and timers")
 	_check(game.world.nodes.capture() == nodes and game.world.wear.capture() == wear,
 			"campaign restoration preserves saved resources and road history")
-	_check(campaign.restore(saved) == "" and campaign.enemy_buildings.size() == 5
+	_check(game.world.heightmap.heights == terrain and game.world.heightmap.capture() == terrain_edits,
+			"restoring rival buildings does not grade their foundations a second time")
+	_check(campaign.restore(saved) == "" and campaign.enemy_buildings.size() == 6
 			and campaign.units.size() == 3 and campaign._workers.size() == 3,
 			"repeated restore replaces entities instead of duplicating the rival town")
 	var malformed: Array = [false, {"personality": "peaceful"}]
@@ -112,7 +116,7 @@ func _generation_and_persistence() -> void:
 		var seeded := _new_game(world_seed)
 		var rival: FrontierCampaign = seeded.sim.campaign
 		var seeded_farm := rival._enemy_type("farm")
-		_check(rival.enemy_buildings.size() == 5 and seeded_farm != null
+		_check(rival.enemy_buildings.size() == 6 and seeded_farm != null
 				and seeded_farm.field_count() == 3,
 				"seed %d also generates a complete rival on workable farmland" % world_seed)
 		seeded.free()
@@ -299,8 +303,22 @@ func _military() -> void:
 	await process_frame
 
 
+func _foundation_save() -> void:
+	var game := _new_game(20260911)
+	var saved := SaveGame.capture(game)
+	var terrain := game.world.heightmap.heights.duplicate()
+	var buildings: Array = game.sim.campaign.capture().buildings
+	var error := game.restore_from(saved)
+	_check(error == "" and game.world.heightmap.heights == terrain
+			and game.sim.campaign.capture().buildings == buildings,
+			"full save/load preserves rival foundation grading and exact building positions: " + error)
+	game.free()
+	await process_frame
+
+
 func _run() -> void:
 	await _generation_and_persistence()
+	await _foundation_save()
 	await _military()
 	print("Campaign regression failures: %d" % _failures)
 	quit(1 if _failures else 0)

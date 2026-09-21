@@ -10,8 +10,8 @@ render_mode cull_back, diffuse_lambert;
 // shader is simply reading the world's memory of where people walked.
 //
 //   wear.r : accumulated traffic, perceptually shaped  (0..1)
-//   wear.g : fertility, used to tint good farmland
 //   wear.b : player-commissioned road level / 5
+// Fertility has a separate static world map shared by all detail levels.
 //
 // Three things this shader has to do that the first version did not.
 //
@@ -31,6 +31,7 @@ render_mode cull_back, diffuse_lambert;
 // summer.
 
 uniform sampler2D wear_map : filter_linear, repeat_disable;
+uniform sampler2D fertility_map : filter_linear, repeat_disable;
 uniform float world_size = 768.0;
 uniform vec2 wear_origin = vec2(0.0);
 uniform float wear_size = 0.0;
@@ -108,6 +109,7 @@ void vertex() {
 void fragment() {
 	vec2 uv = (v_world.xz - wear_origin) / (wear_size > 0.0 ? wear_size : world_size);
 	vec4 field = texture(wear_map, uv);
+	float fertility = texture(fertility_map, v_world.xz / world_size).r;
 
 	vec3 n = normalize(v_normal);
 	float slope = 1.0 - clamp(n.y, 0.0, 1.0);
@@ -140,7 +142,7 @@ void fragment() {
 
 	// Fertile lowland reads greener and richer; this is where farms belong.
 	albedo = mix(albedo, color_grass * 0.88 + vec3(0.01, 0.05, 0.0),
-			clamp(field.g * 1.1, 0.0, 1.0) * 0.55);
+			clamp(fertility * 1.1, 0.0, 1.0) * 0.55);
 
 	// Slow value variation. Nothing about the hue, only the light on it —
 	// which is what a landscape actually does, and what a single flat green
@@ -171,7 +173,7 @@ void fragment() {
 			v_height - grain * 1.6))
 			* smoothstep(sea_level - 1.0, sea_level + 0.6, v_height);
 	albedo = mix(albedo, color_marsh * (0.9 + grain * 0.25),
-			wet_band * clamp(field.g * 0.8 + 0.35, 0.0, 1.0) * 0.8);
+			wet_band * clamp(fertility * 0.8 + 0.35, 0.0, 1.0) * 0.8);
 
 	// Rock takes over on steep faces and high ground.
 	float rocky = smoothstep(0.30, 0.58, slope + grain * 0.12 - 0.04);

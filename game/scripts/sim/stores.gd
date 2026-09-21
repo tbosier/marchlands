@@ -19,6 +19,8 @@ var _totals := PackedFloat32Array()
 var _carried := PackedFloat32Array()
 var _larder := PackedFloat32Array()
 var trade: Node
+var scouting: Node
+var water: Node
 var _nav: NavGrid
 var _access_point: Callable
 
@@ -94,6 +96,10 @@ func refresh_totals(citizens: Array[Citizen],
 	if is_instance_valid(trade):
 		for res in Config.RES_COUNT:
 			_carried[res] += trade.transit(res)
+	if is_instance_valid(scouting):
+		for res in Config.RES_COUNT: _carried[res] += scouting.transit(res)
+	if is_instance_valid(water):
+		for res in Config.RES_COUNT: _carried[res] += water.transit(res)
 	for c in citizens:
 		if c.carrying_res >= 0 and c.carrying_amount > 0.0:
 			_carried[c.carrying_res] += c.carrying_amount

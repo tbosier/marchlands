@@ -35,6 +35,22 @@ func _run() -> void:
 		check(world.size_m == size_m and world.grid_size == roundi(size_m / 4.0), "instance dimensions %dm" % size_m)
 		check(world.heightmap.n == world.grid_size + 1 and world.wear.res == world.grid_size * 2,
 				"height and wear dimensions %dm" % size_m)
+		var fertility_texture := world.wear.fertility_texture()
+		var fertility_bytes := world.wear._fertility_image.get_data()
+		check(fertility_texture.get_width() == world.grid_size
+				and fertility_texture.get_height() == world.grid_size
+				and fertility_bytes.size() == world.grid_size * world.grid_size,
+				"static fertility uses one byte per navigation cell %dm" % size_m)
+		var fertility_matches := true
+		for z in range(0, world.grid_size, maxi(1, world.grid_size / 13)):
+			for x in range(0, world.grid_size, maxi(1, world.grid_size / 13)):
+				fertility_matches = fertility_matches and fertility_bytes[z * world.grid_size + x] == int(
+						world.heightmap.cell_fertility(x, z) * 255.0)
+		check(fertility_matches, "static fertility preserves authored terrain values %dm" % size_m)
+		var shared_fertility: bool = world.terrain._material.get_shader_parameter("fertility_map") == fertility_texture
+		for material: ShaderMaterial in world.terrain._detail_materials.values():
+			shared_fertility = shared_fertility and material.get_shader_parameter("fertility_map") == fertility_texture
+		check(shared_fertility, "coarse and detailed ground share one fertility texture %dm" % size_m)
 		check(legacy.world_size == 768.0 and legacy.height_at(600, 600) == explicit_legacy.height_at(600, 600),
 				"staged world cannot contaminate legacy world %dm" % size_m)
 		var other := World.new()
@@ -126,6 +142,9 @@ func _run() -> void:
 			check(world.terrain._detail_chunks.size() <= 25 and world.wear._tiles.size() <= 26,
 					"camera travel bounds high-detail terrain and wear tiles %dm" % size_m)
 		check(world.wear.wear_at(far + 10, far) > 0, "far traffic records wear %dm" % size_m)
+		check(world.wear.fertility_texture() == fertility_texture
+				and world.wear._fertility_image.get_data() == fertility_bytes,
+				"local road uploads and camera travel preserve static fertility %dm" % size_m)
 		print("BENCH size=%d generation_ms=%d route_ms=%d points=%d resources=%d chunks=%d memory_mb=%.1f" % [
 				size_m, generated, route_ms, route.size(), world.nodes.records.size(), world.terrain._chunks.size(),
 				float(OS.get_static_memory_usage()) / 1048576.0])

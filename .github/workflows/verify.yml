@@ -62,6 +62,15 @@ jobs:
             artifacts/society_ui/
             artifacts/connections_ui/
             artifacts/bridges/
+            artifacts/visual_ui/
+            artifacts/scouting_ui/
+            artifacts/water_ui/
+            artifacts/wells/
+            artifacts/fog_presentation/
+            artifacts/terrain_fertility/
+            artifacts/map_visual_review/
+            artifacts/building_visual_audit/
+            artifacts/spawn_layouts/
             artifacts/world_presentation/
             artifacts/*long_run*.json
           if-no-files-found: warn

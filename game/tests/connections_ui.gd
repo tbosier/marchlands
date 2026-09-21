@@ -76,6 +76,12 @@ func _create_world(game: SeededGame) -> void:
 
 func _trade_controls(game: SeededGame) -> void:
 	game.sim.campaign.personality = "peaceful"
+	var observer: Citizen = game.sim.citizens[0]
+	var home_position := observer.position
+	observer.position = game.sim.campaign.rival_position + Vector3(20, 0, 0)
+	game.sim.scouting.refresh_visibility()
+	observer.position = home_position
+	game.sim.scouting.refresh_visibility()
 	var market := _build(game, "market", game.world.centre() + Vector3(-45, 0, -20))
 	_check(market != null, "trade UI fixture has a real market")
 	if market == null: return
@@ -141,6 +147,8 @@ func _bridge_controls(game: SeededGame) -> void:
 	var q := _bank_quote(game)
 	_check(not q.is_empty(), "generated river exposes a valid two-bank placement")
 	if q.is_empty(): return
+	game.sim.citizens[0].position = (q.a + q.b) * 0.5
+	game.sim.scouting.refresh_visibility()
 	game.camera.yaw = 0
 	game.camera.look_at_position((q.a + q.b) * 0.5, 75)
 	await _settle_ui()

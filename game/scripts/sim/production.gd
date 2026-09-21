@@ -157,6 +157,11 @@ func _post_construction(b: Building) -> void:
 			b.incoming[res] += take
 		return
 
+	# Reserved deliveries are still at the store or on somebody's back.
+	# Posting labour now can occupy every free worker at the near-empty site
+	# while the last haul remains unclaimed forever.
+	if not b.materials_complete():
+		return
 	if jobs.count_for(JobBoard.Kind.BUILD, b.id, -1) < 2:
 		var job := jobs.post(JobBoard.Kind.BUILD, b.global_position, 68.0)
 		job.dest_id = b.id

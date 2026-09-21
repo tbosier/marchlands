@@ -24,7 +24,6 @@ var grid_size := Config.GRID
 var world_size := Config.WORLD_SIZE
 const TILE_TEXELS := 96
 var _tiles: Dictionary = {}
-var _hm: Heightmap
 
 const NEIGHBOURS_4: Array[Vector2i] = [
 	Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
@@ -54,6 +53,10 @@ const COST_PER_M2 := {
 
 var _image: Image
 var _texture: ImageTexture
+## Fertility is static and shared by coarse ground and every detailed tile.
+## One byte per navigation cell avoids a full-resolution world wear upload.
+var _fertility_image: Image
+var _fertility_texture: ImageTexture
 ## The texture's raw RGBA8 bytes, written directly. Image.set_pixel costs a
 ## Variant round-trip per texel, which is ruinous when a full-field decay
 ## touches 147k of them.
@@ -100,25 +103,28 @@ func setup(size_m: float = Config.WORLD_SIZE) -> void:
 	_image.fill(Color(0, 0, 0, 0))
 	_pixels = _image.get_data()
 	_texture = ImageTexture.create_from_image(_image)
+	_fertility_image = Image.create(grid_size, grid_size, false, Image.FORMAT_R8)
+	_fertility_image.fill(Color(0, 0, 0, 1))
+	_fertility_texture = ImageTexture.create_from_image(_fertility_image)
 
 
 func texture() -> ImageTexture:
 	return _texture
 
 
-## Bake static per-cell data the shader wants (fertility) into the green
-## channel once at startup.
+func fertility_texture() -> ImageTexture:
+	return _fertility_texture
+
+
+## Bake once at navigation resolution. Roads keep their independent local
+## textures, while every terrain detail level samples the same world map.
 func bake_fertility(hm: Heightmap) -> void:
-	_hm = hm
-	if grid_size > Config.GRID:
-		return
-	for y in res:
-		for x in res:
-			var cx := x / Config.WEAR_SCALE
-			var cz := y / Config.WEAR_SCALE
-			_pixels[(y * res + x) * 4 + 1] = int(
-					clampf(hm.cell_fertility(cx, cz), 0.0, 1.0) * 255.0)
-	_upload()
+	var pixels := PackedByteArray()
+	pixels.resize(grid_size * grid_size)
+	for index in pixels.size():
+		pixels[index] = int(clampf(hm.fertility[index], 0.0, 1.0) * 255.0)
+	_fertility_image.set_data(grid_size, grid_size, false, Image.FORMAT_R8, pixels)
+	_fertility_texture.update(_fertility_image)
 
 
 func _upload() -> void:
@@ -668,8 +674,6 @@ func tile_texture(tile: Vector2i) -> ImageTexture:
 			var natural := minf(Config.RoadLevel.DIRT, Config.road_level_continuous(wear[index]))
 			pixels[dest] = int(maxf(natural, locked[index]) * 51.0)
 			pixels[dest + 2] = int(locked[index] * 51.0)
-			if _hm:
-				pixels[dest + 1] = int(_hm.cell_fertility(wx / Config.WEAR_SCALE, wy / Config.WEAR_SCALE) * 255.0)
 	var image := Image.create_from_data(size, size, false, Image.FORMAT_RGBA8, pixels)
 	var tex := ImageTexture.create_from_image(image)
 	_tiles[tile] = {"texture": tex, "image": image, "pixels": pixels}

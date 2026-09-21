@@ -7,6 +7,8 @@ const PERSONALITIES := ["aggressive", "peaceful", "loner"]
 const RECRUIT_COST := {Config.Res.TOOLS: 5, Config.Res.FOOD: 10}
 const PACK_DAYS := 4.0
 const SUPPLY_REACH := 24.0
+const GUARD_SIGHT := 60.0
+const CONTACT_COOLDOWN := 60.0
 var sim: Simulation
 var world: World
 var registry: AssetRegistry
@@ -30,6 +32,11 @@ var _impacts: Array = []
 var _ruins: Array = []
 var _civilian_ids: Dictionary = {} # military id -> the person's permanent civilian id
 var _rng := RandomNumberGenerator.new()
+var _contact_cooldown := 0.0
+var _visible_contacts: Array[int] = []
+var _contact_pending := false
+var _contact_war := false
+var _guard_contacts: Dictionary = {}
 
 func setup(p_sim: Simulation, p_world: World, p_registry: AssetRegistry) -> void:
 	sim = p_sim
@@ -48,7 +55,9 @@ func _site(anchor: Vector3, type_id: String) -> Vector3:
 				var river_phase := float(posmod(world.world_seed, 997)) / 997.0 * TAU
 				if p.x < world.heightmap.river_centre(p.z, river_phase) + 36.0: continue
 			p.y = world.heightmap.height_at(p.x,p.z)
-			if not sim.can_place(type_id,p,0.0).ok: continue
+			# Generated towns represent previously cleared ground. Their builder
+			# clears resources below; player placement must obtain that clearing.
+			if not sim.can_place(type_id,p,0.0,-1,false).ok: continue
 			if type_id == "farm" and not _has_farmland(p): continue
 			var overlaps := false
 			for other in enemy_buildings.values():
@@ -87,7 +96,7 @@ func generate_rival() -> void:
 	keep.inventory[Config.Res.FOOD] = 100.0
 	# Initial regional surplus, seeded once; trade never replenishes it for free.
 	keep.inventory[Config.Res.IRON] = 32.0
-	for item in [["house",Vector3(-30,0,28)], ["house",Vector3(0,0,36)], ["farm",Vector3(35,0,30)], ["granary",Vector3(35,0,-8)]]:
+	for item in [["house",Vector3(-30,0,28)], ["house",Vector3(0,0,36)], ["farm",Vector3(35,0,30)], ["granary",Vector3(35,0,-8)], ["well",Vector3(-35,0,-12)]]:
 		var p := _site(at + item[1], item[0])
 		if p != Vector3.INF: _create_building(item[0], p)
 	var farm := _enemy_type("farm")
@@ -123,7 +132,13 @@ func _create_building(type_id: String, p: Vector3, id: int = -1, restoring: bool
 	add_child(b)
 	b.position = p
 	if not restoring:
-		b.position.y = world.heightmap.height_at(p.x,p.z)
+		# Rival foundations need the same level pad as player buildings. A
+		# centre-height sample alone buries one wall and floats the opposite
+		# wall on otherwise buildable slopes. Saves already replay this edit.
+		var half_w := b.footprint.x * 0.5
+		var half_d := b.footprint.y * 0.5
+		b.position.y = world.heightmap.flatten(p, half_w + 1.5, half_d + 1.5)
+		world.terrain.rebuild_region(p, half_w + 8.0, half_d + 8.0)
 	b.ground_y = b.position.y
 	b.under_construction = false
 	b.build_progress = 1.0
@@ -177,7 +192,7 @@ func can_recruit() -> bool:
 func _recruit_candidate(citizen_id: int = -1) -> Citizen:
 	var best: Citizen
 	for citizen in sim.citizens:
-		if citizen.immigrant or (citizen_id >= 0 and citizen.id != citizen_id): continue
+		if citizen.immigrant or citizen.service_health <= 0 or (citizen_id >= 0 and citizen.id != citizen_id): continue
 		if citizen is Soldier and citizen.health <= 0.0: continue
 		if best == null or (citizen.workplace_id < 0 and best.workplace_id >= 0) \
 				or ((citizen.workplace_id < 0) == (best.workplace_id < 0) and citizen.id < best.id):
@@ -217,6 +232,10 @@ func recruit(citizen_id: int = -1) -> String:
 	else:
 		unit = _spawn_unit(0, citizen.position, -1, citizen.asset_id, citizen.id)
 		unit.apply_state(identity, registry)
+		# An ordinary resident's travel injuries predate a detailed soldier
+		# body. Carry that deficit into systemic strain exactly once; veterans
+		# above already retain their authoritative body through every role.
+		unit.apply_damage(100.0 - citizen.service_health)
 		unit.position = citizen.position
 		citizen.queue_free()
 	unit.rations = PACK_DAYS
@@ -246,6 +265,70 @@ func demobilize(unit_id: int) -> String:
 	sim.return_from_service(unit, citizen_id)
 	return ""
 
+
+func medic_quote(unit_id: int) -> Dictionary:
+	var unit: Soldier = units.get(unit_id)
+	var reason := ""
+	var cost := {Config.Res.TOOLS: 4, Config.Res.FOOD: 4}
+	if unit == null or unit.faction != 0 or unit.health <= 0.0:
+		reason = "Select a living soldier."
+	elif unit.incapacitated():
+		reason = "This soldier needs care before serving as a medic."
+	elif unit.medical_supplies > 18:
+		reason = "The medical pack is full."
+	else:
+		var nearby := false
+		for b in sim.buildings:
+			if b.type_id == "barracks" and not b.under_construction \
+					and unit.position.distance_to(_door(b)) <= SUPPLY_REACH \
+					and world.nav.can_reach(unit.position, _door(b)):
+				nearby = true
+				break
+		if not nearby: reason = "Return within 24 m of a completed barracks."
+		elif not sim.stores.can_afford(cost): reason = "Two medical kits need 4 tools and 4 food."
+	return {"can_fit": reason == "", "reason": reason, "cost": cost}
+
+
+func equip_medic(unit_id: int) -> String:
+	var offer := medic_quote(unit_id)
+	if not offer.can_fit: return offer.reason
+	if not sim.stores.try_spend(offer.cost): return "Those supplies are already reserved."
+	var unit: Soldier = units[unit_id]
+	unit.configure_medic(2)
+	return ""
+
+
+func _tick_medic(unit: Soldier) -> bool:
+	if unit.medical_role != "medic" or unit.medical_supplies <= 0 or unit.incapacitated():
+		return false
+	var patient: Soldier
+	var best := -INF
+	var patients: Array = units.values()
+	if unit.faction == 0:
+		for citizen in sim.population_members():
+			if citizen is Soldier and not patients.has(citizen): patients.append(citizen)
+	for other in patients:
+		if other.faction != unit.faction or not unit.can_treat(other): continue
+		var distance := unit.position.distance_to(other.position)
+		if distance > SUPPLY_REACH or not world.nav.can_reach(unit.position, other.position): continue
+		# Unconscious patients take priority, then the nearest treatable wound.
+		var priority: float = (100.0 if other.incapacitated() else 0.0) - distance
+		if priority > best:
+			best = priority
+			patient = other
+	if patient == null: return false
+	unit.target_id = -1
+	unit.target_kind = ""
+	unit.task_label = "Tending " + patient.given_name
+	if unit.position.distance_to(patient.position) > 3.0:
+		unit.order_move(patient.position)
+	else:
+		unit.clear_goal()
+		if unit.cooldown <= 0.0:
+			unit.treat(patient)
+			unit.cooldown = 3.0
+	return true
+
 func set_personality(value: String) -> bool:
 	if value not in PERSONALITIES: return false
 	personality = value
@@ -256,11 +339,12 @@ func info() -> Dictionary:
 	for u in units.values():
 		if u.faction == 0: food += u.rations
 	var candidate := _recruit_candidate()
+	var report: Dictionary = sim.scouting.city_report() if sim.scouting != null else {}
 	return {"units":friendly_ids().size(),"rations":food,"can_recruit":can_recruit(),
 		"recruit_cost":_recruit_cost(candidate) if candidate != null else RECRUIT_COST.duplicate(),
 		"civilians":sim.citizens.size(),"population":sim.population_members().size(),
-		"rival_name":rival_name,"status":"The rival keep has fallen." if conquered else (
-		"At war. Protect your food relays." if at_war else "An independent town lies beyond your borders.")}
+		"rival_name":report.get("name", "No settlement reported"),
+		"status":"At war. Protect your food relays." if at_war else "Send scouts to learn about neighboring settlements."}
 
 func command(ids: Array[int], ground: Vector3, target: Dictionary = {}) -> void:
 	if defeated or not _position(ground, world.size_m):
@@ -302,9 +386,11 @@ func pick_target(origin: Vector3, direction: Vector3) -> Dictionary:
 	if hit.is_empty(): return {}
 	var node: Node = hit.collider
 	if node.has_meta("rival_building_id"):
+		if sim.scouting != null and not sim.scouting.visibility_at(hit.position): return {}
 		return {"kind":"building","id":int(node.get_meta("rival_building_id"))}
 	if node.has_meta("unit_id"):
 		var u: Soldier = units.get(int(node.get_meta("unit_id")))
+		if u != null and sim.scouting != null and not sim.scouting.visibility_at(u.position): return {}
 		if u != null and u.faction == 1: return {"kind":"unit","id":u.id}
 	return {}
 
@@ -342,6 +428,7 @@ func tick(delta: float) -> void:
 		_review = 2.0
 		_assign_guards()
 	for u in units.values().duplicate():
+		u.advance_condition(delta)
 		if u.health <= 0.0:
 			_remove_unit(u)
 			continue
@@ -356,8 +443,84 @@ func tick(delta: float) -> void:
 		if u.health <= 0:
 			_remove_unit(u)
 			continue
-		_tick_combat(u,delta)
+		if sim.water != null and sim.water.handles(u): continue
+		if u.incapacitated():
+			u.clear_goal()
+			u.task_label = "Incapacitated — needs a medic"
+		elif not _tick_guard_security(u) and not _tick_medic(u):
+			_tick_combat(u,delta)
 		u.tick(delta,world)
+	_tick_security(delta)
+
+
+func _tick_security(delta: float) -> void:
+	# Only current friendly sight can produce a contact or its alert position.
+	# Remember identities/cooldown, never track an unseen enemy's coordinates.
+	_contact_cooldown = maxf(0.0, _contact_cooldown - delta)
+	var seen: Array[int] = []
+	var nearest: Soldier
+	var distance := INF
+	if sim.scouting != null:
+		for other: Soldier in units.values():
+			if other.faction != 1 or other.health <= 0.0 \
+					or not sim.scouting.visibility_at(other.position): continue
+			seen.append(other.id)
+			if not _visible_contacts.has(other.id): _contact_pending = true
+			var from: Vector3 = sim.keep.position if sim.keep != null else world.centre()
+			var d := from.distance_squared_to(other.position)
+			if d < distance:
+				distance = d
+				nearest = other
+	var escalated := at_war and not _contact_war and not seen.is_empty()
+	if escalated: _contact_pending = true
+	if nearest != null and _contact_pending and (_contact_cooldown <= 0.0 or escalated):
+		var message := "Enemy soldiers spotted — last observed here." if at_war \
+				else "Armed neighbors sighted — currently at peace."
+		sim.alert.emit(message, nearest.position)
+		_contact_cooldown = CONTACT_COOLDOWN
+		_contact_pending = false
+	if seen.is_empty(): _contact_pending = false
+	_visible_contacts = seen
+	_contact_war = at_war
+
+
+func _tick_guard_security(unit: Soldier) -> bool:
+	if unit.faction != 1 or unit.health <= 0.0 or unit.incapacitated(): return false
+	var candidates: Array = []
+	if at_war and sim.scouting != null:
+		for scout: Scout in sim.scouting.scouts.values(): candidates.append(scout.person)
+	else:
+		var water: Node = sim.get("water")
+		if water != null and water.has_method("hostile_scouts"):
+			candidates = water.hostile_scouts()
+	var target: Citizen
+	var best := GUARD_SIGHT
+	for candidate: Citizen in candidates:
+		if not is_instance_valid(candidate) or candidate.service_health <= 0.0 \
+				or (candidate is Soldier and candidate.health <= 0.0): continue
+		var d := unit.position.distance_to(candidate.position)
+		if d < best and world.nav.can_reach(unit.position, candidate.position):
+			best = d
+			target = candidate
+	# A nearby armed opponent remains the more immediate threat.
+	var armed := _target(unit)
+	if armed is Soldier and unit.position.distance_to(armed.position) <= best:
+		target = null
+	if target == null:
+		if _guard_contacts.has(unit.id):
+			_guard_contacts.erase(unit.id)
+			if _target(unit) == null: unit.clear_goal()
+		return false
+	at_war = true
+	_guard_contacts[unit.id] = target.id
+	unit.target_id = -1
+	unit.target_kind = ""
+	unit.task_label = "Intercepting hostile scout"
+	if best > 2.6: unit.order_move(target.position)
+	else: unit.clear_goal()
+	# Scouting._danger owns contact damage and uses this soldier's ordinary
+	# strike cooldown, preventing an extra attack during the campaign tick.
+	return true
 
 func _refill(u: Soldier) -> void:
 	if u.rations >= PACK_DAYS - 0.01: return
@@ -401,11 +564,16 @@ func _tick_combat(u: Soldier, _delta: float) -> void:
 			u.strike(target.position)
 			u.cooldown = 1.8
 			if target is Soldier:
-				var locations: Array[String] = target.hit_locations()
-				var location := locations[_rng.randi_range(0, locations.size() - 1)]
-				var heavy := _rng.randf() < 0.10
-				target.receive_hit(location, "slash" if heavy or _rng.randf() < 0.7 else "stab", 80.0 if heavy else 12.0)
-				if heavy: u.cooldown = 3.0
+				var landed := _rng.randf() < u.hit_probability(target)
+				u.practice("melee", 0.12)
+				if landed:
+					var locations: Array[String] = target.hit_locations()
+					var location := locations[_rng.randi_range(0, locations.size() - 1)]
+					var heavy := _rng.randf() < 0.10
+					target.receive_hit(location, "slash" if heavy or _rng.randf() < 0.7 else "stab", 80.0 if heavy else 12.0, _rng.randf())
+					if heavy: u.cooldown = 3.0
+				else:
+					target.practice("dodge", 0.12)
 			else:
 				target.apply_damage(7.0)
 	if target is Building and distance <= 20.0 and u.fire_cooldown <= 0 and u.can_throw_firepot():
@@ -476,8 +644,12 @@ func _tick_town(delta: float) -> void:
 	if keep == null: return
 	keep.inventory[Config.Res.FOOD] = maxf(0,keep.inventory[Config.Res.FOOD]-town_population*delta/Config.DAY_LENGTH)
 	if farm != null:
-		farm.add(Config.Res.FOOD,delta/Config.DAY_LENGTH*6.0*mini(_workers.size(), farm.field_count()))
+		var available_workers := 0
 		for worker in _workers:
+			if sim.water == null or not sim.water.handles(worker): available_workers += 1
+		farm.add(Config.Res.FOOD,delta/Config.DAY_LENGTH*6.0*mini(available_workers, farm.field_count()))
+		for worker in _workers:
+			if sim.water != null and sim.water.handles(worker): continue
 			var leg: int = _worker_leg.get(worker.id,0)
 			var destination := _door(farm) if leg == 0 else _door(keep)
 			worker.set_goal(destination)
@@ -504,6 +676,7 @@ func _tick_town(delta: float) -> void:
 			var identity := SaveGame._capture_citizen(worker)
 			var recruit := _spawn_unit(1, worker.position, worker.id, worker.asset_id)
 			recruit.apply_state(identity, registry)
+			recruit.apply_damage(100.0-worker.service_health)
 			recruit.position = worker.position
 			recruit._wear_anchor = recruit.position
 			_workers.erase(worker)
@@ -561,6 +734,7 @@ func capture() -> Dictionary:
 			"name": u.given_name, "age": u.age, "asset_id": u.asset_id,
 			"carrying_res": u.carrying_res, "carrying_amount": u.carrying_amount,
 			"health": u.health, "rations": u.rations,
+			"hydration":u.hydration,"water_sickness":u.water_sickness,"water_bucket":u.water_bucket,"service_health":u.service_health,
 			"target_id": u.target_id if target != null else -1,
 			"target_kind": u.target_kind if target != null else "", "goal": u._goal,
 			"moving": u.has_goal(), "cooldown": u.cooldown, "fire_cooldown": u.fire_cooldown,
@@ -579,6 +753,7 @@ func capture() -> Dictionary:
 	for c in _workers:
 		workers.append({"id": c.id, "position": c.position, "carried": c.carrying_amount,
 			"name": c.given_name, "age": c.age,
+			"hydration":c.hydration,"water_sickness":c.water_sickness,"water_bucket":c.water_bucket,"service_health":c.service_health,
 			"leg": int(_worker_leg.get(c.id, 0)), "asset_id": c.asset_id,
 			"goal": c._goal, "moving": c.has_goal()})
 	var impacts: Array = []
@@ -590,7 +765,9 @@ func capture() -> Dictionary:
 		"rival_position": rival_position, "at_war": at_war, "defeated": defeated,
 		"conquered": conquered, "next_id": _next_id, "time": _time, "review": _review,
 		"recruit_at": _recruit_at, "rng_state": _rng.state, "buildings": buildings,
-		"units": army, "workers": workers, "ruins": _ruins.duplicate(true), "impacts": impacts}
+		"units": army, "workers": workers, "ruins": _ruins.duplicate(true), "impacts": impacts,
+		"security": {"cooldown": _contact_cooldown, "visible_ids": _visible_contacts.duplicate(),
+			"pending": _contact_pending, "was_at_war": _contact_war}}
 
 
 func _reset() -> void:
@@ -610,6 +787,11 @@ func _reset() -> void:
 	_worker_wait.clear()
 	_ruins.clear()
 	_impacts.clear()
+	_visible_contacts.clear()
+	_guard_contacts.clear()
+	_contact_cooldown = 0.0
+	_contact_pending = false
+	_contact_war = false
 	_next_id = 100000
 	_time = 0.0
 	_review = 0.0
@@ -642,6 +824,11 @@ func restore(data: Variant) -> String:
 	_time = data.time
 	_review = data.get("review", 0.0)
 	_recruit_at = data.recruit_at
+	var security: Dictionary = data.get("security", {})
+	_contact_cooldown = security.get("cooldown", 0.0)
+	_visible_contacts.assign(security.get("visible_ids", []))
+	_contact_pending = security.get("pending", false)
+	_contact_war = security.get("was_at_war", at_war)
 	for entry in data.buildings:
 		var b := _create_building(entry.type_id, entry.position, entry.id, true)
 		b.inventory = entry.inventory.duplicate()
@@ -663,6 +850,8 @@ func restore(data: Variant) -> String:
 			u.age = entry.get("age", u.age)
 			if entry.get("carrying_amount", 0.0) > 0.0:
 				u.pick_up(entry.carrying_res, entry.carrying_amount, registry)
+		for key in ["hydration","water_sickness","water_bucket","service_health"]:
+			u.set(key,entry.get(key,u.get(key)))
 		u.position = entry.position
 		u._wear_anchor = u.position
 		if entry.has("body"):
@@ -683,6 +872,8 @@ func restore(data: Variant) -> String:
 		c.setup(entry.id, registry, _rng, entry.get("asset_id", ""))
 		c.given_name = entry.get("name", c.given_name)
 		c.age = entry.get("age", c.age)
+		for key in ["hydration","water_sickness","water_bucket","service_health"]:
+			c.set(key,entry.get(key,c.get(key)))
 		c._body.collision_layer = 0
 		c.position = entry.position
 		c._wear_anchor = c.position
@@ -746,6 +937,19 @@ static func validate(data: Variant, friendly_buildings: Variant = null, world_si
 		return "invalid military identifier"
 	if not _number(data.time, 0, 1e12) or not _number(data.recruit_at, 0, 1e12):
 		return "invalid campaign time"
+	if data.has("security"):
+		var security: Variant = data.security
+		if not security is Dictionary or security.size() != 4 \
+				or not _number(security.get("cooldown"), 0.0, CONTACT_COOLDOWN) \
+				or not security.get("visible_ids") is Array \
+				or security.visible_ids.size() > 65536 \
+				or not security.get("pending") is bool or not security.get("was_at_war") is bool:
+			return "invalid contact warning state"
+		var seen_contacts := {}
+		for id in security.visible_ids:
+			if not id is int or id < 100000 or id >= data.next_id or seen_contacts.has(id):
+				return "invalid contact warning identity"
+			seen_contacts[id] = true
 	for key in ["buildings", "units", "workers", "ruins", "impacts"]:
 		if not data[key] is Array or data[key].size() > (65536 if key == "units" else 128):
 			return "invalid campaign collection"
@@ -762,7 +966,7 @@ static func validate(data: Variant, friendly_buildings: Variant = null, world_si
 		for key in ["id", "type_id", "position", "health", "fire", "inventory"]:
 			if not b.has(key):
 				return "incomplete rival building"
-		if not b.type_id is String or b.type_id not in ["keep", "house", "farm", "granary"] or not _position(b.position, world_size):
+		if not b.type_id is String or b.type_id not in ["keep", "house", "farm", "granary", "well"] or not _position(b.position, world_size):
 			return "invalid rival building type or position"
 		if not b.id is int or b.id < 100000 or b.id >= data.next_id or ids.has(b.id):
 			return "invalid rival building id"
@@ -814,6 +1018,8 @@ static func validate(data: Variant, friendly_buildings: Variant = null, world_si
 				or not _number(u.get("carrying_amount", 0.0), 0.0, 1e12) \
 				or ((u.get("carrying_res", -1) == -1) != (u.get("carrying_amount", 0.0) == 0.0)):
 			return "invalid soldier cargo"
+		var water_error := WaterSystem.validate_person(u)
+		if water_error != "": return water_error
 		friendly += int(u.faction == 0)
 		guards += int(u.faction == 1)
 		if not u.moving is bool or not u.target_id is int or not u.target_kind is String or u.target_kind not in ["", "unit", "building"]:
@@ -835,8 +1041,8 @@ static func validate(data: Variant, friendly_buildings: Variant = null, world_si
 				return "duplicate or employed serving citizen"
 			if u.civilian.position != u.position:
 				return "serving citizen position disagrees with unit"
-			for key in ["name", "age", "asset_id", "carrying_res", "carrying_amount"]:
-				if u.has(key) and u[key] != u.civilian[key]:
+			for key in ["name", "age", "asset_id", "carrying_res", "carrying_amount", "hydration", "water_sickness", "water_bucket", "service_health"]:
+				if u.has(key) and (not u.civilian.has(key) or u[key] != u.civilian[key]):
 					return "serving citizen identity disagrees with unit"
 			civilian_ids[u.civilian.id] = true
 	if guards > 6:
@@ -873,6 +1079,8 @@ static func validate(data: Variant, friendly_buildings: Variant = null, world_si
 			return "invalid rival worker identity"
 		if not _position(c.get("goal", Vector3.ZERO), world_size) or not c.get("moving", false) is bool:
 			return "invalid rival worker route"
+		var water_error := WaterSystem.validate_person(c)
+		if water_error != "": return water_error
 		ids[c.id] = true
 	for ruin in data.ruins:
 		if not ruin is Dictionary or not _position(ruin.get("position"), world_size) or not ruin.get("footprint") is Vector2:

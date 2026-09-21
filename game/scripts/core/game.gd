@@ -38,6 +38,9 @@ var selected_road := Vector3.ZERO
 var has_road_selection := false
 var research_open := false
 var army_open := false
+var scouting_open := false
+var city_report_open := false
+var selected_scout := -1
 var selected_resource := -1
 var selected_cow := -1
 var trade_open := false
@@ -115,6 +118,47 @@ func _ready() -> void:
 		_clear_selection()
 		army_open = true
 		_refresh_selection())
+	hud.scouting_open_requested.connect(func():
+		_clear_selection()
+		scouting_open = true
+		_refresh_selection())
+	hud.city_report_requested.connect(func():
+		_clear_selection()
+		city_report_open = true
+		_refresh_selection())
+	hud.scout_train_requested.connect(func(id):
+		var error: String = sim.scouting.train(id)
+		_on_alert(error if error != "" else "A resident has begun scout training.", sim.keep.position)
+		_clear_selection()
+		scouting_open = true
+		_refresh_selection())
+	hud.scout_select_requested.connect(func(id):
+		_clear_selection()
+		selected_scout = id
+		scouting_open = true
+		for row in sim.scouting.info().scouts:
+			if row.id == id: camera.focus_on(row.position, 60.0)
+		_refresh_selection())
+	hud.scout_recall_requested.connect(func(id):
+		var error: String = sim.scouting.recall(id)
+		if error != "": _on_alert(error, sim.keep.position)
+		_refresh_selection())
+	hud.scout_visit_requested.connect(func(id):
+		var error: String = sim.scouting.visit_city(id)
+		if error != "": _on_alert(error, sim.keep.position)
+		_refresh_selection())
+	hud.medic_requested.connect(func(id):
+		var error: String = sim.campaign.equip_medic(id)
+		_on_alert(error if error != "" else "Medic equipped. Nearby wounded will receive field care.", sim.keep.position)
+		_refresh_selection())
+	hud.firefighting_requested.connect(func(id):
+		var error: String = sim.water.request_firefighting(id)
+		_on_alert(error if error != "" else "A worker will collect well water and carry it to the fire.", sim.keep.position)
+		_refresh_selection())
+	hud.poison_well_requested.connect(func(id):
+		var error: String = sim.water.poison(id)
+		_on_alert(error if error != "" else "Scout assigned to sabotage. Guards can detect and interrupt the attempt.", sim.keep.position)
+		_refresh_selection())
 	hud.recruit_requested.connect(func():
 		var error: String = sim.campaign.recruit()
 		if error != "": _on_alert(error, sim.keep.position)
@@ -122,7 +166,9 @@ func _ready() -> void:
 	hud.muster_requested.connect(func():
 		selected_units.assign(sim.campaign.friendly_ids())
 		_on_alert("Force selected — right-click to march or attack", sim.keep.position))
-	hud.rival_focus_requested.connect(func(): camera.focus_on(sim.campaign.rival_position, 100.0))
+	hud.rival_focus_requested.connect(func():
+		var report: Dictionary = sim.scouting.city_report()
+		if not report.is_empty(): camera.focus_on(report.position, 100.0))
 	hud.armor_requested.connect(func(id, tier):
 		var error := MilitaryEquipment.fit(sim, id, tier)
 		_on_alert(error if error != "" else "Armor fitted at the barracks.", sim.keep.position)
@@ -433,6 +479,19 @@ func _setup_scenario() -> void:
 
 	var stock := _settle(centre + Vector3(16, 0, -6))
 	sim.place_building("stockpile", stock, PI * 0.5, true)
+	# Established households start with one physical water source. Subsequent
+	# districts and expeditions need the player to build their own wells.
+	var well_position := Vector3.INF
+	for ring in 12:
+		for index in 12:
+			var angle := TAU * index / 12.0
+			var candidate := centre + Vector3(-20, 0, -14) + Vector3(cos(angle), 0, sin(angle)) * ring * 3.0
+			candidate.y = world.heightmap.height_at(candidate.x, candidate.z)
+			if sim.can_place("well", candidate).ok:
+				well_position = candidate
+				break
+		if well_position.is_finite(): break
+	if well_position.is_finite(): sim.place_building("well", well_position, 0.0, true)
 
 	# The settlement's one cart, parked at the stockpile's loading bay.
 	var cart := Cart.new()
@@ -510,8 +569,28 @@ func _process(delta: float) -> void:
 	Perf.flush_frame()
 
 
+func _refresh_city_marker() -> void:
+	if sim.scouting == null: return
+	var report: Dictionary = sim.scouting.city_report()
+	var screen := Vector2.ZERO
+	var on_screen := false
+	if not report.is_empty():
+		var at: Vector3 = report.position + Vector3(0, 12, 0)
+		var view := camera.camera()
+		screen = view.unproject_position(at)
+		on_screen = not view.is_position_behind(at) and Rect2(Vector2(120, 85), get_viewport().get_visible_rect().size - Vector2(240, 180)).has_point(screen)
+	hud.update_city_marker(report, sim.day, screen, on_screen)
+
+
 func _refresh_selection() -> void:
+	_refresh_city_marker.call_deferred()
 	if mode == Mode.BRIDGE:
+		return
+	if city_report_open:
+		hud.show_city_report(sim.scouting.city_report(), sim.day)
+		return
+	if scouting_open:
+		hud.show_scouts(sim.scouting.info(), selected_scout)
 		return
 	if trade_open or selected_caravan >= 0:
 		if selected_caravan >= 0 and not sim.trade.caravans.has(selected_caravan): selected_caravan = -1
@@ -540,21 +619,25 @@ func _refresh_selection() -> void:
 		return
 	if selected_cow >= 0 and sim.husbandry != null:
 		var info: Dictionary = sim.husbandry.get_info(selected_cow)
-		if not info.is_empty():
+		if not info.is_empty() and sim.scouting.visibility_at(info.position):
 			hud.show_cow(info)
 			return
 		selected_cow = -1
 		hud.clear_selection()
 	if not selected_units.is_empty() and sim.campaign != null:
 		var unit: Node = sim.campaign.units.get(selected_units[0])
-		if is_instance_valid(unit):
+		if is_instance_valid(unit) and (unit.faction == 0 or sim.scouting.visibility_at(unit.position)):
 			hud.show_soldier(unit)
 			return
+		selected_units.clear()
+		hud.clear_selection()
 	if selected_resource >= 0:
 		var rec := world.nodes.get_node_rec(selected_resource)
-		if rec != null:
+		if rec != null and sim.scouting.visibility_at(rec.position):
 			hud.show_resource(_resource_info(rec))
 			return
+		selected_resource = -1
+		hud.clear_selection()
 	if selected_building != null and is_instance_valid(selected_building):
 		hud.show_building(selected_building)
 	elif selected_citizen != null and is_instance_valid(selected_citizen):
@@ -590,7 +673,7 @@ func _unhandled_input(event: InputEvent) -> void:
 					_exit_clear_tool()
 				elif mode == Mode.PLACE:
 					_cancel_placement()
-				elif selected_building or selected_citizen or has_road_selection or research_open or army_open or trade_open or selected_caravan >= 0 or selected_bridge >= 0 or selected_resource >= 0 or selected_cow >= 0 or not selected_units.is_empty():
+				elif selected_building or selected_citizen or has_road_selection or research_open or army_open or scouting_open or city_report_open or trade_open or selected_caravan >= 0 or selected_bridge >= 0 or selected_resource >= 0 or selected_cow >= 0 or not selected_units.is_empty():
 					_clear_selection()
 				else:
 					hud.clear_alerts()
@@ -642,6 +725,13 @@ func _unhandled_input(event: InputEvent) -> void:
 				_cancel_placement()
 			elif mode == Mode.CLEAR:
 				_exit_clear_tool()
+			elif selected_scout >= 0:
+				var ray := camera.screen_ray(mb.position)
+				var hit := world.terrain.raycast(ray.origin, ray.direction)
+				if hit.hit:
+					var error: String = sim.scouting.command(selected_scout, hit.position)
+					if error != "": _on_alert(error, hit.position)
+					_refresh_selection()
 			elif not selected_units.is_empty():
 				_order_units(mb.position)
 			else:
@@ -729,7 +819,7 @@ func _exit_clear_tool() -> void:
 func _order_clear_at(screen_pos: Vector2) -> void:
 	var ray := camera.screen_ray(screen_pos)
 	var hit := world.terrain.raycast(ray["origin"], ray["direction"])
-	if not hit["hit"]:
+	if not hit["hit"] or not sim.scouting.visibility_at(hit.position):
 		return
 	var p: Vector3 = hit["position"]
 	# A generous radius: clicking a single trunk at play zoom is unreasonable,
@@ -812,6 +902,8 @@ func _update_ghost() -> void:
 	_ghost.rotation.y = place_yaw
 
 	var check := sim.can_place(place_type, place_position, place_yaw)
+	if not sim.scouting.explored_at(place_position):
+		check = {"ok": false, "reason": "Explore this ground before building."}
 	var def := BuildingDefs.get_def(place_type)
 	var cost := def.cost
 	var affordable := sim.can_afford(cost)
@@ -829,6 +921,9 @@ func _update_ghost() -> void:
 ## slope, cost, access, and how far workers would have to walk.
 func _show_placement_tooltip(check: Dictionary, affordable: bool,
 							 cost: Dictionary, mouse: Vector2) -> void:
+	if not sim.scouting.explored_at(place_position):
+		hud.show_cursor_tooltip(["Explore this ground before building."], mouse)
+		return
 	var def := BuildingDefs.get_def(place_type)
 	var fp: Vector2 = check.get("footprint", Vector2(4, 4))
 	var lines: Array[String] = []
@@ -894,7 +989,7 @@ func _nearest_citizen(p: Vector3) -> Citizen:
 
 
 func _try_place() -> void:
-	if not place_valid:
+	if not place_valid or not sim.scouting.explored_at(place_position):
 		return
 	# Input can deliver two clicks before the ghost gets another frame.
 	# Recheck the live map after the first click has claimed its footprint.
@@ -939,11 +1034,14 @@ func _prune_selection() -> void:
 		selected_citizen = null
 	if selected_units.is_empty() and selected_building == null \
 			and selected_citizen == null and not has_road_selection \
-			and not research_open and not army_open and not trade_open and selected_caravan < 0 and selected_bridge < 0 and mode != Mode.BRIDGE and selected_resource < 0 and selected_cow < 0:
+			and not research_open and not army_open and not scouting_open and not city_report_open and not trade_open and selected_caravan < 0 and selected_bridge < 0 and mode != Mode.BRIDGE and selected_resource < 0 and selected_cow < 0:
 		hud.clear_selection()
 
 
 func _clear_selection() -> void:
+	scouting_open = false
+	city_report_open = false
+	selected_scout = -1
 	trade_open = false
 	selected_caravan = -1
 	selected_bridge = -1
@@ -975,6 +1073,15 @@ func _pick_at(screen_pos: Vector2) -> void:
 
 	if not result.is_empty():
 		var collider: Node = result["collider"]
+		if collider.has_meta("scout_id"):
+			_clear_selection()
+			selected_scout = int(collider.get_meta("scout_id"))
+			scouting_open = true
+			_refresh_selection()
+			return
+		if not sim.scouting.visibility_at(result.position):
+			_clear_selection()
+			return
 		if collider.has_meta("caravan_id"):
 			_clear_selection()
 			selected_caravan = int(collider.get_meta("caravan_id"))
@@ -998,7 +1105,7 @@ func _pick_at(screen_pos: Vector2) -> void:
 			return
 		if collider.has_meta("rival_building_id"):
 			_clear_selection()
-			army_open = true
+			city_report_open = true
 			_refresh_selection()
 			return
 		if collider.has_meta("building_id"):
@@ -1019,12 +1126,12 @@ func _pick_at(screen_pos: Vector2) -> void:
 	# Nothing solid: the player clicked the ground, which selects the route
 	# there — this is how worn paths become something you can act on.
 	var hit := world.terrain.raycast(ray["origin"], ray["direction"])
-	if not hit["hit"]:
+	if not hit["hit"] or not sim.scouting.explored_at(hit.position):
 		_clear_selection()
 		return
 	_clear_selection()
 	var resource := world.nodes.pick_ray(ray.origin, ray.direction, ray.origin.distance_to(hit.position) + 1.0)
-	if resource != null:
+	if resource != null and sim.scouting.visibility_at(resource.position):
 		selected_resource = resource.id
 		hud.show_resource(_resource_info(resource))
 		return
@@ -1147,7 +1254,7 @@ func _refresh_resource_hover() -> void:
 	var hit := world.terrain.raycast(ray.origin, ray.direction)
 	var distance: float = ray.origin.distance_to(hit.position) + 1.0 if hit.hit else 4000.0
 	var rec := world.nodes.pick_ray(ray.origin, ray.direction, distance)
-	if rec == null:
+	if rec == null or not sim.scouting.visibility_at(rec.position):
 		hud.hide_cursor_tooltip()
 		return
 	var info := _resource_info(rec)
@@ -1176,19 +1283,28 @@ func _setup_connections() -> void:
 	sim.trade = TradeRoutes.new()
 	sim.add_child(sim.trade)
 	sim.trade.setup(sim, world, registry)
+	sim.scouting = Scouting.new()
+	sim.add_child(sim.scouting)
+	sim.scouting.setup(sim, world, registry)
+	sim.water = WaterSystem.new()
+	sim.add_child(sim.water)
+	sim.water.setup(sim, world, registry)
+	var fog := preload("res://scripts/world/fog_of_war.gd").new()
+	world.add_child(fog)
+	fog.setup(sim.scouting, world, sim.campaign)
 
 
 func _focus_wild_cattle() -> void:
 	if sim.husbandry == null: return
 	for id in sim.husbandry.cows:
 		var info: Dictionary = sim.husbandry.get_info(id)
-		if info.get("wild", false):
+		if info.get("wild", false) and sim.scouting.visibility_at(info.position):
 			_clear_selection()
 			selected_cow = id
 			camera.focus_on(info.position, 45.0)
 			_refresh_selection()
 			return
-	_on_alert("No wild cattle remain. Protect your breeding herd.", sim.keep.position)
+	_on_alert("No wild cattle are in sight. Send a scout to look for herds.", sim.keep.position)
 
 
 func _order_units(screen_pos: Vector2) -> void:
@@ -1209,15 +1325,15 @@ func _focus_selection() -> void:
 		if not bridge_info.is_empty(): camera.focus_on((bridge_info.a + bridge_info.b) * 0.5, 55.0)
 	elif not selected_units.is_empty() and sim.campaign != null:
 		var unit: Node = sim.campaign.units.get(selected_units[0])
-		if is_instance_valid(unit):
+		if is_instance_valid(unit) and (unit.faction == 0 or sim.scouting.visibility_at(unit.position)):
 			camera.focus_on(unit.global_position, 28.0)
 	elif selected_cow >= 0 and sim.husbandry != null:
 		var cow_info: Dictionary = sim.husbandry.get_info(selected_cow)
-		if not cow_info.is_empty():
+		if not cow_info.is_empty() and sim.scouting.visibility_at(cow_info.position):
 			camera.focus_on(cow_info.position, 35.0)
 	elif selected_resource >= 0:
 		var resource := world.nodes.get_node_rec(selected_resource)
-		if resource != null:
+		if resource != null and sim.scouting.visibility_at(resource.position):
 			camera.focus_on(resource.position, 35.0)
 	elif selected_building:
 		camera.focus_on(selected_building.global_position, 55.0)
@@ -1407,7 +1523,7 @@ func _bridge_hit(screen_position: Vector2) -> Dictionary:
 
 func _bridge_click(screen_position: Vector2) -> void:
 	var hit := _bridge_hit(screen_position)
-	if not hit.hit: return
+	if not hit.hit or not sim.scouting.explored_at(hit.position): return
 	if not _bridge_start.is_finite():
 		var cell := world.world_to_cell(hit.position)
 		if world.nav.is_solid(cell.x, cell.y):
@@ -1434,7 +1550,12 @@ func _update_bridge_preview() -> void:
 	var mouse := get_viewport().get_mouse_position()
 	if hud.blocks_mouse(mouse): return
 	var hit := _bridge_hit(mouse)
-	if not hit.hit: return
+	if not hit.hit or not sim.scouting.explored_at(hit.position):
+		if is_instance_valid(_bridge_preview): _bridge_preview.queue_free()
+		_bridge_preview = null
+		_bridge_hover = Vector3.INF
+		hud.show_bridge_preview({"ok": false, "reason": "Explore both banks before building a bridge."}, true)
+		return
 	var at: Vector3 = hit.position
 	# Geometry and path comparison only need refreshing after the pointer
 	# crosses a navigation cell; do not run a route search every render frame.

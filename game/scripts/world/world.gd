@@ -9,6 +9,8 @@ var wear := WearField.new()
 var nav := NavGrid.new()
 var terrain: Terrain
 var nodes: ResourceNodes
+## Attached only when a simulation supplies a scouting manager.
+var fog: Node3D
 
 var buildings_root: Node3D
 var citizens_root: Node3D
@@ -147,8 +149,8 @@ func _build_lighting() -> void:
 	# rather than crushing it into a band just above the horizon, which is what
 	# made the old sky look like a strip of paper behind the hills.
 	sky_mat.sky_curve = 0.18
-	sky_mat.ground_bottom_color = Color(0.20, 0.22, 0.22)
-	sky_mat.ground_horizon_color = Color(0.50, 0.53, 0.50)
+	sky_mat.ground_bottom_color = sky_mat.sky_horizon_color
+	sky_mat.ground_horizon_color = sky_mat.sky_horizon_color
 	sky_mat.ground_curve = 0.06
 	sky_mat.sun_angle_max = 8.0
 	sky_mat.sun_curve = 0.08
@@ -365,8 +367,10 @@ func set_time_of_day(fraction: float, year_fraction: float = -1.0) -> void:
 				Color(0.68, 0.76, 0.82), day_amount)
 		sky_mat.sky_horizon_color = horizon.lerp(Color(0.92, 0.66, 0.44),
 				golden * smoothstep(0.26, 0.42, day_amount))
-		sky_mat.ground_horizon_color = Color(0.16, 0.18, 0.22).lerp(
-				Color(0.50, 0.53, 0.50), day_amount)
+		# The lower sky is visible beyond the far water clip at shallow angles.
+		# Its horizon must meet the upper hemisphere without a grey stripe.
+		sky_mat.ground_horizon_color = sky_mat.sky_horizon_color
+		sky_mat.ground_bottom_color = sky_mat.sky_horizon_color
 
 	# Fog carries the same warmth, so the distance sits under the same sky the
 	# settlement does instead of behind a grey card.

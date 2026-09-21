@@ -9,6 +9,7 @@ extends RefCounted
 ## placement footprint follows automatically.
 
 const ROOT := "res://assets/generated"
+const NativeWell = preload("res://scripts/sim/well_visual.gd")
 const FOLDERS := {
 	"building": "buildings",
 	"prop": "props",
@@ -39,6 +40,7 @@ func load_all() -> void:
 				push_warning("AssetRegistry: bad manifest %s" % path)
 				continue
 			manifests[data["asset_id"]] = data
+	manifests["well"] = NativeWell.METADATA.duplicate(true)
 
 
 func has(asset_id: String) -> bool:
@@ -88,6 +90,9 @@ func _scene_path(asset_id: String) -> String:
 
 func scene(asset_id: String) -> PackedScene:
 	if _scenes.has(asset_id):
+		return _scenes[asset_id]
+	if asset_id == "well":
+		_scenes[asset_id] = NativeWell.packed_scene()
 		return _scenes[asset_id]
 	var path := _scene_path(asset_id)
 	if not ResourceLoader.exists(path):

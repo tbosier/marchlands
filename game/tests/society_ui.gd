@@ -90,6 +90,9 @@ func _run() -> void:
 			break
 	_check(cow != null and not ranch.workers.is_empty(), "a staffed ranch can receive a real wild cow")
 	if cow != null:
+		# A resident physically observes the herd before it can be inspected.
+		sim.citizens[0].position = cow.position + Vector3(4, 0, 0)
+		sim.scouting.refresh_visibility()
 		game.camera.look_at_position(cow.position, 22.0)
 		await physics_frame
 		await _settle_ui()
@@ -147,7 +150,7 @@ func _run() -> void:
 	await _click_at(game.camera.camera().unproject_position(unit.position + Vector3(0, 0.9, 0)))
 	_check(game.selected_units == [unit.id] and game.hud._selection_title.text == unit.given_name,
 			"viewport soldier pick opens that resident's equipment panel")
-	_check(game.hud._selection_actions.get_child_count() == 5,
+	_check(game.hud._selection_actions.get_child_count() == 6,
 			"friendly soldier panel offers all four armor choices and discharge")
 	for tier in ["leather", "mail", "plate"]:
 		before = sim.keep.inventory.duplicate()

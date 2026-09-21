@@ -32,7 +32,7 @@ func _market(origin_id: int = -1) -> Building:
 
 func _candidate(citizen_id: int = -1) -> Citizen:
 	for c in sim.citizens:
-		if c.immigrant or (citizen_id >= 0 and c.id != citizen_id): continue
+		if c.immigrant or c.service_health <= 0 or (citizen_id >= 0 and c.id != citizen_id): continue
 		if c is Soldier and (c.health <= 0 or c.workability() <= 0 or c.mobility_scale() <= 0): continue
 		return c
 	return null
@@ -64,6 +64,9 @@ func quotes(origin_id: int = -1, merchant: Citizen = null) -> Array[Dictionary]:
 	q.origin_id = origin.id
 	q.reason = "No neighboring trading town."
 	if sim.campaign == null: return [q]
+	if sim.scouting != null and sim.scouting.city_report().is_empty():
+		q.reason = "Discover a neighboring town with a scout before trading."
+		return [q]
 	var target: Building = sim.campaign.trade_store()
 	if target == null: return [q]
 	q.target_id = target.id
@@ -222,6 +225,9 @@ func tick(delta: float) -> void:
 			if reason != "" or route.expires_in <= 0.0:
 				route.repeat = false
 				_return(route, reason if reason != "" else "Offer expired; returning with the goods")
+		if sim.water != null and sim.water.handles(c):
+			route.cart.follow(world.heightmap,delta,world)
+			continue
 		match route.state:
 			"loading": _load(route, delta)
 			"outward":
@@ -277,7 +283,9 @@ func _feed(route: Caravan, delta: float) -> void:
 		need -= eaten
 		if c.carrying_amount <= 0.00001: c.drop()
 	c.hunger = clampf(c.hunger + need - (delta / Config.DAY_LENGTH - need), 0.0, 1.0)
-	if c.hunger >= 1.0: route.health = maxf(0.0, route.health - delta * 0.15)
+	if c.hunger >= 1.0:
+		if c is Soldier: c.apply_damage(delta * 0.15)
+		else: route.health = maxf(0.0, route.health - delta * 0.15)
 	c.next_meal = Config.next_meal_after(sim.day)
 
 

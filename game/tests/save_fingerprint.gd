@@ -126,7 +126,8 @@ func _run() -> void:
 		_game.world.heightmap.flatten(plots[0] + Vector3(3, 0, 0), 4, 4)
 	_game.clock.set_rate(4.0)
 	_game.clock.toggle_pause()
-	_check(_game.save_game("regression_fingerprint") == "", "fixture saves to disk")
+	var first_save_error: String = _game.save_game("regression_fingerprint")
+	_check(first_save_error == "", "fixture saves to disk: " + first_save_error)
 	var before: Dictionary = _harness._fingerprint()
 	_check(_harness._state_drift("", before, _harness._fingerprint()).is_empty(),
 			"unchanged live state compares equal")

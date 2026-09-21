@@ -20,9 +20,10 @@
 
 # Marchlands
 
-A 3D kingdom builder whose roads are not drawn by the player. People walk
-across the landscape, their routes wear into the ground, and the settlement's
-transport network emerges from where its inhabitants actually go.
+A medieval settlement simulation and RTS built around real residents, physical
+supplies, and imperfect information. People walk across the landscape, their
+routes wear into the ground, and the transport network emerges from their
+journeys. Every soldier, merchant, and scout leaves a civilian job behind.
 
 This repository builds on **"The First Road"** (`design/GAME_DESIGN.md` §34)
 with markets, researched infrastructure, and a first supplied-army scenario
@@ -35,6 +36,8 @@ river crossings built by workers, and recovery of goods from lost carts.
 
 See the [current integration review and remaining priorities](design/STATUS_2026-09-21.md)
 for what is implemented, what was deferred, and what should come next.
+The [design north star](design/NORTH_STAR.md) records the intended identity and
+the larger ideas that remain future work.
 
 ![The settlement at day 16](design/screenshots/first_road.png)
 
@@ -68,7 +71,7 @@ back to `tools/vendor/` so a checkout can carry its own toolchain.
 | mouse wheel | zoom (and tilt — closer is more oblique) |
 | middle-drag / `Q` `E` | rotate |
 | left click | select a building, citizen, soldier, cow, resource deposit, or route |
-| right click | command selected soldiers to move or attack; otherwise cancel selection |
+| right click | order selected scouts to explore, or soldiers to move/attack; otherwise cancel selection |
 | `Space` | pause / resume at the rate you were at |
 | `1`–`6` | speed: 1× · 2× · 4× · 16× · 32× · 64× |
 | `[` `]` | step the speed down / up |
@@ -86,11 +89,32 @@ geography; the default opening also keeps the original small landscape.
 For a fresh generated landscape at launch, use
 `tools/build.sh run -- --world-size=small` (also `medium`, `large`, or `xl`).
 
-Build a **Market**, then open **Trade** to assign a resident and cart. The first
+Build a **Scout lodge**, train a resident through **Scouts**, select that person,
+and right-click to explore. Unknown ground is obscured; remembered terrain is
+dimmed. Discovered towns leave dated reports. **Visit known castle** sends a
+scout to seek the ruler's account; ordinary observations are estimates. Merchants
+can bring observations from established routes, but cannot explore on command.
+
+After discovering the neighboring town, build a **Market** and open **Trade**
+to assign a resident and cart. The first
 offer exchanges 24 timber for 8 iron, with separate travel provisions. The
 merchant leaves local production until they return. **Bridge** lets you choose
 two river banks, inspect the cost and detour saved, and commission a timber
 crossing without research. Workers must deliver materials and finish the deck.
+
+Select a soldier to inspect wounds, blood loss, shock, armor, and learned skills.
+At a barracks, **Medic** equips that person with two paid medical kits. Medics
+walk to nearby wounded and bandage or splint them; each treatment consumes a kit.
+Injuries persist through discharge and later service. There are no floating
+health bars. See [scouting and wounds](design/SCOUTING_AND_WOUNDS_2026-09-21.md)
+for the implemented limits.
+
+The opening settlement has a **Well**. Build more where people work and travel:
+citizens physically visit them to drink, and fire responders carry buckets from
+wells to burning buildings. Select a burning building to request a responder.
+Visible enemy units generate contact alerts. Scouts can sabotage a visible enemy
+well, but must collect supplies and spend time there; town guards can spot the
+approach and interrupt it. Older saves without a well need one built.
 
 ### Developer mode
 

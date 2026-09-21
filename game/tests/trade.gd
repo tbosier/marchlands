@@ -9,6 +9,12 @@ func _prepare() -> SeededGame:
 		manager.setup(game.sim, game.world, game.registry)
 		game.sim.trade = manager
 	game.sim.campaign.personality = "peaceful"
+	var observer: Citizen = game.sim.citizens[0]
+	var home_position := observer.global_position
+	observer.global_position = game.sim.campaign.rival_position
+	game.sim.scouting.refresh_visibility()
+	observer.global_position = home_position
+	game.sim.scouting.refresh_visibility()
 	for job in game.sim.jobs.all_jobs():
 		game.sim._release_reservations(job)
 		game.sim.jobs.cancel(job)

@@ -60,6 +60,12 @@ func _run() -> void:
 	if error != "":
 		game.free(); quit(1); return
 	game.sim.campaign.personality = "peaceful"
+	var observer: Citizen = game.sim.citizens[0]
+	var home_position := observer.global_position
+	observer.global_position = game.sim.campaign.rival_position
+	game.sim.scouting.refresh_visibility()
+	observer.global_position = home_position
+	game.sim.scouting.refresh_visibility()
 	var market := _build(game, "market", game.world.centre() + Vector3(-45, 0, -20))
 	game.sim.keep.inventory[Config.Res.TIMBER] = 240.0
 	game.sim.keep.inventory[Config.Res.TOOLS] = 80.0

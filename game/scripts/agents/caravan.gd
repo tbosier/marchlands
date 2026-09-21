@@ -23,7 +23,10 @@ var promised := false
 var source_reserved := false
 var food_reserved := false
 var expires_in := 0.0
-var health := 100.0
+var health: float:
+	get: return merchant.service_health if merchant != null else 100.0
+	set(value):
+		if merchant != null: merchant.service_health = value
 var completed_trips := 0
 
 

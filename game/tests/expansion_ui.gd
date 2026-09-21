@@ -172,6 +172,7 @@ func _run() -> void:
 		var guard: Soldier = game.sim.campaign.units[game.selected_units[i]]
 		guard.position = game.sim.campaign._door(enemy_house) + Vector3((i - 1) * 3, 0, 7)
 		guard.position.y = game.world.heightmap.height_at(guard.position.x, guard.position.z)
+	game.sim.scouting.refresh_visibility()
 	game.camera.look_at_position(enemy_house.position, 38.0)
 	await physics_frame
 	await _settle_ui()

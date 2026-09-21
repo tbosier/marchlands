@@ -155,14 +155,22 @@ def plan(headless: bool, skip_long_run: bool) -> list[Stage]:
         ("military_equipment", r"^Military equipment regression failures: 0$"),
         ("conscription", r"^Conscription regression failures: 0$"),
         ("soldier_injuries", r"^Soldier injury regression failures: 0$"),
+        ("detailed_wounds", r"^Detailed wound regression failures: 0$"),
+        ("field_medicine", r"^Field medicine regression failures: 0$"),
+        ("frontier_security", r"^Frontier security regression failures: 0$"),
+        ("scouting", r"^Scouting regression failures: 0$"),
+        ("water", r"^Water regression failures: 0$"),
         ("husbandry", r"^Husbandry regression failures: 0$"),
         ("world_sizes", r"^World size failures: 0$"),
+        ("spawn_layouts", r"^Spawn layout regression failures: 0$"),
+        ("building_placement", r"^Building placement regression failures: 0$"),
         ("bridges", r"^Bridge regression failures: 0$"),
         ("trade", r"^Trade regression failures: 0$"),
         ("connections", r"^Connections regression failures: 0$"),
     ]:
         stages.append(Stage(name, headless_godot + ["--script", f"res://tests/{name}.gd"],
-                            (marker,), expected_decoders=name == "save_validation"))
+                            (marker,), timeout=300 if name == "spawn_layouts" else 180,
+                            expected_decoders=name == "save_validation"))
     for name in SCENARIOS:
         stages.append(Stage(name, headless_godot + ["--fixed-fps", "60", "--",
                             f"--harness=tools/scenes/{name}.json"],
@@ -191,6 +199,22 @@ def plan(headless: bool, skip_long_run: bool) -> list[Stage]:
                             "--rendering-driver", "opengl3", "--audio-driver", "Dummy",
                             "--resolution", "1280x720", "--script", "res://tests/connections_ui.gd"],
                             (r"^Connections UI regression failures: 0$",), timeout=300))
+        stages.append(Stage("visual_ui", display + godot + ["--display-server", "x11",
+                            "--rendering-driver", "opengl3", "--audio-driver", "Dummy",
+                            "--resolution", "1280x720", "--script", "res://tests/visual_ui.gd"],
+                            (r"^Visual UI regression failures: 0$",), timeout=300))
+        stages.append(Stage("terrain_fertility", display + godot + ["--display-server", "x11",
+                            "--rendering-driver", "opengl3", "--audio-driver", "Dummy",
+                            "--resolution", "320x240", "--script", "res://tests/terrain_fertility.gd"],
+                            (r"^Terrain fertility failures: 0$",), timeout=180))
+        for name, marker in [("fog_presentation", r"^Fog presentation failures: 0$"),
+                             ("scouting_ui", r"^Scouting UI regression failures: 0$"),
+                             ("water_ui", r"^Water UI regression failures: 0$"),
+                             ("well_visual", r"^Well visual regression failures: 0$")]:
+            stages.append(Stage(name, display + godot + ["--display-server", "x11",
+                                "--rendering-driver", "opengl3", "--audio-driver", "Dummy",
+                                "--resolution", "1280x720", "--script", f"res://tests/{name}.gd"],
+                                (marker,), timeout=300))
         for name, resolution in [("input_check", "1600x900"), ("ui_check", "793x900")]:
             stages.append(Stage(name, display + godot + ["--display-server", "x11",
                                 "--rendering-driver", "opengl3", "--audio-driver", "Dummy",

@@ -1,5 +1,8 @@
 # Base game direction — September 21, 2026
 
+The expanded [north star](NORTH_STAR.md) records the subsequent direction on
+scouting, imperfect information, persistent wounds, and physical consequences.
+
 **Status: direction document; first trade slice implemented September 21.**
 See [implementation and limits](TRADE_2026-09-21.md) for what is playable.
 This document also describes future work, including scouting, escorts and

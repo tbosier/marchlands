@@ -329,7 +329,7 @@ func _valid_round_trips(game: Node, base: Dictionary) -> void:
 	game.clock.toggle_pause()
 	_check(game.clock.scale() == 4.0, "real legacy paused save resumes at its old 4x rate")
 	var legacy := base.duplicate(true)
-	for key in ["resume_speed_index", "speed_layout", "day_marker", "research", "campaign"]:
+	for key in ["resume_speed_index", "speed_layout", "day_marker", "research", "campaign", "scouting", "water"]:
 		legacy.erase(key)
 	legacy.nodes.erase("marked")
 	for b in legacy.buildings:
@@ -337,7 +337,8 @@ func _valid_round_trips(game: Node, base: Dictionary) -> void:
 				"market_stock_target", "health", "fire"]:
 			b.erase(key)
 	for c in legacy.citizens:
-		for key in ["immigrant", "immigrant_target", "hunger", "next_meal", "meals_taken", "morale"]:
+		for key in ["immigrant", "immigrant_target", "hunger", "next_meal", "meals_taken", "morale",
+				"hydration", "water_bucket", "water_sickness", "service_health"]:
 			c.erase(key)
 	_check(SaveGame.validate(legacy, game.registry) == "", "legacy optional fields validate")
 	_check(_write_fixture(legacy) and game.load_game(_slot) == "", "legacy optional fields load")

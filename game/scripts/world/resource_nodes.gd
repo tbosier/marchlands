@@ -344,6 +344,44 @@ func get_node_rec(id: int) -> NodeRec:
 	return records[id]
 
 
+## Placement tests trunks and the visible extent of deposits. A nearby tree
+## crown can overhang a yard; its trunk cannot grow through the building.
+func building_obstruction(footprint: Rect2) -> NodeRec:
+	for rec in _building_site_nodes(footprint):
+		if not rec.depleted:
+			return rec
+	return null
+
+
+## Logging leaves regrowth timers. Once that cleared ground becomes a site,
+## keep its harvested trees from returning through the completed structure.
+func prevent_building_regrowth(footprint: Rect2) -> void:
+	for rec in _building_site_nodes(footprint):
+		if rec.kind == Kind.TREE and rec.depleted:
+			rec.regrow_at = -1.0
+
+
+func _building_site_nodes(footprint: Rect2) -> Array[NodeRec]:
+	var found: Array[NodeRec] = []
+	if _pick_tiles.is_empty() and not records.is_empty(): _index_cells()
+	for tile in _pick_tiles.values():
+		var bounds: AABB = tile.bounds
+		if not footprint.intersects(Rect2(bounds.position.x, bounds.position.z,
+				bounds.size.x, bounds.size.z)):
+			continue
+		for id in tile.ids:
+			var rec: NodeRec = records[id]
+			if rec.kind == Kind.TREE:
+				if footprint.has_point(Vector2(rec.position.x, rec.position.z)):
+					found.append(rec)
+			else:
+				var deposit: AABB = _pick_world_bounds.get(rec.id, AABB(rec.position, Vector3.ONE))
+				if footprint.intersects(Rect2(deposit.position.x, deposit.position.z,
+						deposit.size.x, deposit.size.z)):
+					found.append(rec)
+	return found
+
+
 ## Pick the nearest live resource through its transformed visual bounds.
 ## Callers can cap max_distance at a terrain/building hit to respect occlusion.
 func pick_ray(origin: Vector3, direction: Vector3,

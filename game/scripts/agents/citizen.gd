@@ -22,6 +22,11 @@ var profession: String = "settler"
 var home_id: int = -1
 var workplace_id: int = -1
 var age: int = 24
+## Damage sustained while serving outside the civilian workforce.
+var service_health := 100.0
+var hydration := 1.0
+var water_bucket := 0.0
+var water_sickness := 0.0
 
 var carrying_res: int = -1
 var carrying_amount: float = 0.0
@@ -162,6 +167,10 @@ func apply_state(entry: Dictionary, registry: AssetRegistry = null) -> void:
 	home_id = int(entry.get("home_id", -1))
 	workplace_id = int(entry.get("workplace_id", -1))
 	hunger = float(entry.get("hunger", 0.0))
+	service_health = float(entry.get("service_health", 100.0))
+	hydration = float(entry.get("hydration", 1.0))
+	water_bucket = float(entry.get("water_bucket", 0.0))
+	water_sickness = float(entry.get("water_sickness", 0.0))
 	# A save written before meals existed has no schedule in it; leaving
 	# next_meal at zero would have every restored citizen owed a meal at once.
 	next_meal = float(entry.get("next_meal", next_meal))
@@ -263,8 +272,9 @@ func distance_to_goal() -> float:
 
 func walking_speed() -> float:
 	var carry_penalty := 1.0 - 0.14 * clampf(
-			carrying_amount / float(Config.CARRY_CAPACITY), 0.0, 1.0)
-	return Config.WALK_SPEED * speed_scale * speed_modifier * carry_penalty
+			(carrying_amount + water_bucket) / float(Config.CARRY_CAPACITY), 0.0, 1.0)
+	return Config.WALK_SPEED * speed_scale * speed_modifier * carry_penalty \
+			* (0.6 if hydration <= 0.1 else 1.0) * (1.0 - water_sickness * 0.2)
 
 
 ## Advance the citizen by `delta` in-game seconds. Returns the distance moved,

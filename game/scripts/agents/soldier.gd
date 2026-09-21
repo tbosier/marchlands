@@ -19,6 +19,12 @@ var health: float:
 var armor_tier: String:
 	get:
 		return _body_state.armor
+var medical_role: String:
+	get:
+		return _body_state.role
+var medical_supplies: int:
+	get:
+		return _body_state.medical_supplies
 var rations: float = 4.0
 var target_id: int = -1
 var target_kind: String = ""
@@ -209,7 +215,7 @@ func restore_body(data: Variant) -> String:
 	var problem := validate_body(data)
 	if problem != "":
 		return problem
-	_body_state = data.duplicate(true)
+	_body_state = Body.migrate(data)
 	if health > 0.0:
 		_dead_visualized = false
 		visible = not indoors
@@ -229,8 +235,8 @@ func equip_armor(tier: String) -> bool:
 	return true
 
 
-func receive_hit(location: String, kind: String, force: float) -> Dictionary:
-	var result := Body.hit(_body_state, location, kind, force)
+func receive_hit(location: String, kind: String, force: float, anatomy_roll: float = 0.5) -> Dictionary:
+	var result := Body.hit(_body_state, location, kind, force, anatomy_roll)
 	if result.ok:
 		_refresh_condition(true)
 	return result
@@ -238,14 +244,14 @@ func receive_hit(location: String, kind: String, force: float) -> Dictionary:
 
 func hit_locations() -> Array[String]:
 	var locations: Array[String] = []
-	for location in Body.LOCATIONS:
-		if not _body_state.parts[location].severed:
+	for location in Body.REGIONS:
+		if Body.available(_body_state, location):
 			locations.append(location)
 	return locations
 
 
 func can_strike() -> bool:
-	return not _civilian_mode and health > 0.0 and not Body.disabled(_body_state.parts.arm_r)
+	return not _civilian_mode and health > 0.0 and Body.usable(_body_state, "arm_r")
 
 
 func can_throw_firepot() -> bool:
@@ -253,17 +259,17 @@ func can_throw_firepot() -> bool:
 
 
 func can_use_shield() -> bool:
-	return not _civilian_mode and health > 0.0 and not Body.disabled(_body_state.parts.arm_l)
+	return not _civilian_mode and health > 0.0 and Body.usable(_body_state, "arm_l")
 
 
 func mobility_scale() -> float:
-	if health <= 0.0:
+	if health <= 0.0 or incapacitated():
 		return 0.0
 	var usable := 0
 	var burden := 0.0
 	for location in ["leg_l", "leg_r"]:
 		var part: Dictionary = _body_state.parts[location]
-		usable += int(not Body.disabled(part))
+		usable += int(Body.usable(_body_state, location))
 		burden += Body.trauma(part)
 	if usable == 0:
 		return 0.0
@@ -277,11 +283,81 @@ func walking_speed() -> float:
 
 
 func workability() -> float:
-	if health <= 0.0:
+	if health <= 0.0 or incapacitated():
 		return 0.0
-	var usable := int(not Body.disabled(_body_state.parts.arm_l)) \
-			+ int(not Body.disabled(_body_state.parts.arm_r))
+	var usable := int(Body.usable(_body_state, "arm_l")) + int(Body.usable(_body_state, "arm_r"))
 	return [0.0, 0.45, 1.0][usable]
+
+
+func incapacitated() -> bool:
+	return Body.incapacitated(_body_state)
+
+
+## The owner ticks this exactly once for every person: army, civilian,
+## merchant or scout. Movement calls must not double-count bleeding.
+func advance_condition(delta: float) -> void:
+	Body.advance(_body_state, delta)
+	_refresh_condition(true)
+
+
+func skill_level(skill: String) -> float:
+	return float(_body_state.skills.get(skill, 0.0))
+
+
+func practice(skill: String, amount: float = 0.05) -> void:
+	if skill not in Body.SKILLS or not is_finite(amount) or amount <= 0.0 or health <= 0.0:
+		return
+	_body_state.skills[skill] = minf(100.0, skill_level(skill) + amount)
+
+
+func hit_probability(target: Soldier) -> float:
+	if not can_strike() or target == null or target.health <= 0.0: return 0.0
+	if target.incapacitated(): return 0.98
+	var chance := 0.68 + (skill_level("melee") - target.skill_level("dodge")) * 0.004
+	if target.can_use_shield(): chance -= 0.10
+	chance -= float(_body_state.shock) * 0.002
+	chance -= (100.0 - float(_body_state.blood)) * 0.001
+	if target.mobility_scale() < 0.5: chance += 0.15
+	return clampf(chance, 0.10, 0.97)
+
+
+func skill_summary() -> String:
+	return "Melee %d · Dodge %d · Medicine %d · Scouting %d" % [
+		roundi(skill_level("melee")), roundi(skill_level("dodge")),
+		roundi(skill_level("medicine")), roundi(skill_level("scouting"))]
+
+
+func configure_medic(kits: int) -> bool:
+	if kits < 0 or kits > Body.MAX_MEDICAL_SUPPLIES - medical_supplies or health <= 0.0 or incapacitated():
+		return false
+	_body_state.role = "medic"
+	_body_state.medical_supplies += kits
+	profession = "field medic"
+	return true
+
+
+func treatment_need() -> Dictionary:
+	return Body.treatment_need(_body_state)
+
+
+func can_treat(target: Soldier) -> bool:
+	return medical_role == "medic" and medical_supplies > 0 and health > 0.0 and not incapacitated() \
+			and workability() > 0.0 and target != null and target.faction == faction \
+			and target.health > 0.0 and not target.treatment_need().is_empty()
+
+
+func treat(target: Soldier) -> Dictionary:
+	if not can_treat(target): return {"ok": false, "reason": "No usable kit or treatable wound"}
+	if global_position.distance_to(target.global_position) > 3.0:
+		return {"ok": false, "reason": "Move within three metres to treat this soldier"}
+	var need := target.treatment_need()
+	var result: Dictionary = Body.treat(target._body_state, need.wound_id, need.treatment, skill_level("medicine"))
+	if result.ok:
+		_body_state.medical_supplies -= 1
+		practice("medicine", 0.5)
+		task_label = "Treating " + target.given_name
+		target._refresh_condition(false)
+	return result
 
 
 func work_tick(delta: float) -> bool:
@@ -303,18 +379,39 @@ func set_civilian_mode(value: bool) -> void:
 
 func injury_summary() -> String:
 	var lines: Array[String] = []
-	var names := {"head": "Head", "torso": "Torso", "arm_l": "Shield arm",
-		"arm_r": "Sword arm", "leg_l": "Left leg", "leg_r": "Right leg"}
-	for location in Body.LOCATIONS:
-		var part: Dictionary = _body_state.parts[location]
+	lines.append("Blood %.0f%% · Shock %.0f%%" % [_body_state.blood, _body_state.shock])
+	if _body_state.parts.arm_r.severed: lines.append("Sword arm: missing")
+	if _body_state.parts.arm_l.severed: lines.append("Shield arm: missing")
+	var injured := false
+	for location in Body.REGIONS:
+		var part: Dictionary = _body_state.regions[location]
 		if Body.trauma(part) < 0.01:
 			continue
+		injured = true
 		var condition := "missing" if part.severed else ("disabled" if Body.disabled(part)
 				else ("punctured" if float(part.puncture) > 0.0 else ("cut" if float(part.cut) > 0.0 else "bruised")))
-		lines.append("%s: %s" % [names[location], condition])
+		lines.append("%s: %s" % [_region_label(location), condition])
+	for wound in _body_state.wounds:
+		if wound.artery != "": lines.append(wound.artery.capitalize() + " artery injured" + (" (bandaged)" if wound.bandaged else ""))
+		if wound.fracture: lines.append(_region_label(wound.region) + (": splinted fracture" if wound.splinted else ": fracture"))
+		elif wound.bandaged: lines.append(_region_label(wound.region) + ": bandaged")
+	for organ in Body.ORGANS:
+		if _body_state.organs[organ] > 0.0: lines.append(_region_label(organ) + " injured")
+	if Body.bleeding_rate(_body_state) > 0.001: lines.append("Bleeding" + (" heavily" if Body.bleeding_rate(_body_state) > 0.20 else ""))
+	if _body_state.blood < 70.0: lines.append("Severe blood loss" if _body_state.blood <= 50.0 else "Blood loss")
+	if incapacitated(): lines.append("Incapacitated — alive, needs aid")
+	elif _body_state.shock >= 25.0: lines.append("In shock")
 	if float(_body_state.strain) >= 25.0:
 		lines.append("Exhausted")
-	return "Uninjured" if lines.is_empty() else "; ".join(lines)
+	if health <= 0.0: lines.append("Dead")
+	elif not injured: lines.append("Uninjured")
+	return "; ".join(lines)
+
+
+static func _region_label(region: String) -> String:
+	var side := "Left " if region.ends_with("_l") else ("Right " if region.ends_with("_r") else "")
+	var label := region.trim_suffix("_l").trim_suffix("_r").replace("_", " ")
+	return (side + label).capitalize()
 
 
 func update_animation(delta: float, speed: float) -> void:
@@ -323,10 +420,14 @@ func update_animation(delta: float, speed: float) -> void:
 		if not _parts.has(location):
 			continue
 		var part: Node3D = _parts[location]
-		if Body.disabled(_body_state.parts[location]):
+		if not Body.usable(_body_state, location):
 			part.rotation = Vector3(0.06, 0, 0.12 if location.ends_with("_l") else -0.12)
 	if mobility_scale() < 0.5 and _parts.has("torso"):
 		_parts.torso.rotation.z = 0.12 if Body.disabled(_body_state.parts.leg_l) else -0.12
+	if incapacitated() and _unit_visual != null:
+		_unit_visual.rotation.z = PI * 0.42
+	elif _unit_visual != null:
+		_unit_visual.rotation.z = 0.0
 
 
 func _rebuild_armor() -> void:
@@ -402,24 +503,29 @@ func _refresh_condition(play_effects: bool) -> void:
 
 
 func _refresh_injury_marks() -> void:
-	var signature := str(_body_state.parts)
+	var treatments := {}
+	for wound in _body_state.wounds:
+		if wound.bandaged or wound.splinted:
+			treatments[wound.region] = true
+	var signature := str(_body_state.regions) + str(treatments)
 	if signature == _injury_signature:
 		return
 	_injury_signature = signature
 	for visual in _injury_visuals:
 		visual.free()
 	_injury_visuals.clear()
-	for location in Body.LOCATIONS:
-		var injury: Dictionary = _body_state.parts[location]
-		if Body.trauma(injury) < 8.0 or not _parts.has(location):
+	for location in Body.REGIONS:
+		var injury: Dictionary = _body_state.regions[location]
+		var group := Body.group_of(location)
+		if Body.trauma(injury) < 8.0 or not _parts.has(group):
 			continue
 		var mark := Node3D.new()
 		mark.name = "injury_" + location
 		_injury_visuals.append(mark)
-		var part: Node3D = _parts[location]
-		if injury.severed:
+		var part: Node3D = _parts[group]
+		if injury.severed and _body_state.parts[group].severed:
 			_unit_visual.add_child(mark)
-			mark.position = _rest[location]
+			mark.position = _rest[group]
 			var cap := SphereMesh.new()
 			cap.radius = 0.06
 			cap.height = 0.10
@@ -429,14 +535,26 @@ func _refresh_injury_marks() -> void:
 		else:
 			part.add_child(mark)
 			var at := Vector3(0, -0.32, -0.076)
-			if location == "torso":
-				at = Vector3(0.06, 0.34, -0.17)
+			if group == "torso":
+				at = Vector3(0.06, 0.43 if location == "chest" else 0.22, -0.17)
 			elif location == "head":
 				at = Vector3(0, 0.23, -0.125)
+			elif location == "neck":
+				at = Vector3(0, 0.03, -0.12)
+			elif location.begins_with("hand"):
+				at.y = -0.59
+			elif location.begins_with("foot"):
+				at.y = -0.72
+			elif location.begins_with("lower"):
+				at.y = -0.48
+			else:
+				at.y = -0.18
+			var color := Color(0.79, 0.75, 0.62) if treatments.has(location) else (
+					Color(0.49, 0.08, 0.06) if injury.cut > 0.0 or injury.puncture > 0.0 else Color(0.36, 0.22, 0.28))
 			for strip in 2:
 				var bandage := BoxMesh.new()
 				bandage.size = Vector3(0.115, 0.024, 0.013)
-				var mesh := _equipment_mesh(mark, bandage, at, Color(0.79, 0.75, 0.62))
+				var mesh := _equipment_mesh(mark, bandage, at, color)
 				mesh.rotation.z = 0.6 if strip == 0 else -0.6
 
 

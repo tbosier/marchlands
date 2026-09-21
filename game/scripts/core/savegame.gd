@@ -200,6 +200,8 @@ static func capture(game: Node) -> Dictionary:
 		"campaign": sim.campaign.capture() if sim.campaign != null else {},
 		"husbandry": sim.husbandry.capture() if sim.husbandry != null else {},
 		"trade": sim.trade.capture() if sim.trade != null else {},
+		"scouting": sim.scouting.capture() if sim.scouting != null else {},
+		"water": sim.water.capture() if sim.water != null else {},
 		"bridges": sim.bridges.capture() if sim.bridges != null else {},
 		"next_building_id": sim.next_building_id(),
 		"next_citizen_id": sim.next_citizen_id(),
@@ -252,6 +254,8 @@ static func _capture_citizen(c: Citizen) -> Dictionary:
 		"asset_id": c.asset_id,
 		"profession": c.profession,
 		"age": c.age,
+		"service_health": c.service_health,
+		"hydration": c.hydration, "water_bucket": c.water_bucket, "water_sickness": c.water_sickness,
 		"home_id": c.home_id,
 		"workplace_id": c.workplace_id,
 		"position": c.position,
@@ -402,6 +406,22 @@ static func restore(game: Node, data: Dictionary) -> String:
 	sim.trade.setup(sim, world, game.registry)
 	var trade_error: String = sim.trade.restore(data.get("trade", {}))
 	if trade_error != "": return trade_error
+	sim.scouting = Scouting.new()
+	sim.add_child(sim.scouting)
+	sim.scouting.setup(sim, world, game.registry)
+	var scouting_error: String = sim.scouting.restore(data.get("scouting", {}))
+	if scouting_error != "": return scouting_error
+	sim.water = WaterSystem.new()
+	sim.add_child(sim.water)
+	sim.water.setup(sim, world, game.registry)
+	var water_error: String = sim.water.restore(data.get("water", {}))
+	if water_error != "": return water_error
+	sim.scouting.refresh_visibility()
+	if data.get("water", {}).is_empty() and sim.water.info().wells.is_empty():
+		sim.alert.emit("Build a well before your residents run out of drinking water.",world.centre())
+	var fog := preload("res://scripts/world/fog_of_war.gd").new()
+	world.add_child(fog)
+	fog.setup(sim.scouting, world, sim.campaign)
 	return ""
 
 

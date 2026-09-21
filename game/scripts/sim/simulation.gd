@@ -40,6 +40,8 @@ var trade: Node
 var campaign: Node
 var husbandry: Node
 var bridges: Node
+var scouting: Node
+var water: Node
 
 var buildings: Array[Building] = []
 var citizens: Array[Citizen] = []
@@ -121,6 +123,8 @@ func tick(delta: float) -> void:
 		return
 	Perf.begin("sim.total")
 
+	if water != null: water.tick(delta)
+	_advance_civilian_conditions(delta)
 	var prev_day := day
 	day += delta / Config.DAY_LENGTH
 	var learned := research.advance(delta / Config.DAY_LENGTH)
@@ -180,6 +184,8 @@ func tick(delta: float) -> void:
 		campaign.tick(delta)
 	if trade != null:
 		trade.tick(delta)
+	if scouting != null:
+		scouting.tick(delta)
 
 	Perf.end("sim.total")
 
@@ -361,6 +367,7 @@ func _tick_citizen(c: Citizen, delta: float) -> void:
 		return
 
 	c.update_hunger(day, delta / Config.DAY_LENGTH)
+	if water != null and water.handles(c): return
 	# Discharged veterans keep their issued food. It remains personal stock,
 	# and is eaten once before asking the household for another ration.
 	if c is Soldier and c.rations >= Config.MEAL_FOOD and c.is_hungry(day):
@@ -1416,6 +1423,9 @@ func place_building(type_id: String, position: Vector3, yaw: float,
 	var plan := b.plan_footprint()
 	var half_w: float = plan.x * 0.5
 	var half_d: float = plan.y * 0.5
+	if not restoring:
+		world.nodes.prevent_building_regrowth(Rect2(position.x - half_w,
+				position.z - half_d, plan.x, plan.y))
 	# Later terrain edits can change the height beneath an existing building.
 	# Restoring its original footing must not move it to that newer height.
 	var ground := position.y if restoring else (
@@ -1547,6 +1557,8 @@ func upgrade(b: Building) -> Dictionary:
 	# The larger building needs the larger pad, and the pad is part of the
 	# terrain's permanent history exactly as the first one was.
 	var plan := b.plan_footprint()
+	world.nodes.prevent_building_regrowth(Rect2(b.position.x - plan.x * 0.5,
+			b.position.z - plan.y * 0.5, plan.x, plan.y))
 	b.ground_y = world.heightmap.flatten(b.global_position,
 			plan.x * 0.5 + 1.5, plan.y * 0.5 + 1.5)
 	b.position.y = b.ground_y
@@ -1681,7 +1693,7 @@ func _invalidate_entrances(b: Building) -> void:
 ## measured against its neighbours without colliding with itself — which is
 ## what an upgrade needs, since it grows on ground it already stands on.
 func can_place(type_id: String, position: Vector3,
-			   yaw: float = 0.0, ignore_id: int = -1) -> Dictionary:
+			   yaw: float = 0.0, ignore_id: int = -1, check_resources: bool = true) -> Dictionary:
 	var def := BuildingDefs.get_def(type_id)
 	if def == null:
 		return {"ok": false, "reason": "unknown building"}
@@ -1739,7 +1751,13 @@ func can_place(type_id: String, position: Vector3,
 					enemy.global_position.z - enemy_size.y * 0.5, enemy_size.x, enemy_size.y)
 			if here.intersects(enemy_ground):
 				return {"ok": false, "reason": "overlaps rival %s" % enemy.display_name(),
-					"footprint": fp}
+						"footprint": fp}
+	if check_resources:
+		var obstruction := world.nodes.building_obstruction(here)
+		if obstruction != null:
+			var reason := "clear the trees from this site first" if obstruction.kind == ResourceNodes.Kind.TREE \
+					else "work out the %s deposit at this site first" % ("stone" if obstruction.kind == ResourceNodes.Kind.STONE else "iron")
+			return {"ok": false, "reason": reason, "footprint": fp}
 
 	# Resource buildings need something to work on.
 	if def.is_gatherer():
@@ -1788,7 +1806,25 @@ func population_members() -> Array[Citizen]:
 	if trade != null:
 		for route in trade.caravans.values():
 			members.append(route.merchant)
+	if scouting != null:
+		for scout in scouting.scouts.values(): members.append(scout.person)
+	if water != null:
+		for job in water.carriers.values(): members.append(job.person)
 	return members
+
+
+## Active armies advance in Campaign; civilian, merchant and scout veterans
+## continue the same physical condition exactly once while assigned elsewhere.
+func _advance_civilian_conditions(delta: float) -> void:
+	for c in population_members():
+		if campaign != null and campaign.units.values().has(c): continue
+		if c is Soldier: c.advance_condition(delta)
+		if (c.service_health <= 0 or (c is Soldier and c.health <= 0)) and citizens_by_id.get(c.id) == c:
+			var home: Building = buildings_by_id.get(c.home_id)
+			detach_for_service(c)
+			if home != null: home.residents.erase(c.id)
+			alert.emit("%s died." % c.given_name,c.global_position)
+			c.queue_free()
 
 
 ## Transfer one existing person out of civilian work. Their home remains

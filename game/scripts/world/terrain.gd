@@ -22,6 +22,7 @@ var chunk_cells := CHUNK_CELLS
 var chunks := CHUNKS
 var _detail_chunks: Dictionary = {}
 var _detail_materials: Dictionary = {}
+var _shore_chunks: Dictionary = {}
 var _detail_update := 0.0
 var _last_focus := Vector2i(-9999, -9999)
 var _material: ShaderMaterial
@@ -41,6 +42,7 @@ func build(hm: Heightmap, wear: WearField) -> void:
 	_material = ShaderMaterial.new()
 	_material.shader = load("res://shaders/terrain.gdshader")
 	_material.set_shader_parameter("wear_map", wear.texture())
+	_material.set_shader_parameter("fertility_map", wear.fertility_texture())
 	_material.set_shader_parameter("world_size", _hm.world_size)
 	_material.set_shader_parameter("sea_level", Config.SEA_LEVEL)
 	# The shader consumes these as linear values, so the authored sRGB
@@ -141,6 +143,11 @@ func _build_backdrop_mesh() -> ArrayMesh:
 
 
 func _build_chunk_mesh(ci: int, cj: int, stride: int = 1) -> ArrayMesh:
+	# A 16 m sample grid can bridge over an 18 m river, creating visible dams
+	# and disconnected tributaries as the camera moves. Keep bank geometry at
+	# simulation resolution; broad inland terrain can still use coarse meshes.
+	if stride > 1 and _contains_shore(ci, cj):
+		stride = 1
 	var verts := PackedVector3Array()
 	var normals := PackedVector3Array()
 	var uvs := PackedVector2Array()
@@ -209,6 +216,23 @@ func _build_chunk_mesh(ci: int, cj: int, stride: int = 1) -> ArrayMesh:
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	return mesh
+
+
+func _contains_shore(ci: int, cj: int) -> bool:
+	var key := Vector2i(ci, cj)
+	if _shore_chunks.has(key): return _shore_chunks[key]
+	var wet := false
+	var dry := false
+	for z in range(cj * chunk_cells, (cj + 1) * chunk_cells + 1):
+		for x in range(ci * chunk_cells, (ci + 1) * chunk_cells + 1):
+			var height := _hm.corner(x, z)
+			wet = wet or height < Config.SEA_LEVEL
+			dry = dry or height >= Config.SEA_LEVEL
+			if wet and dry:
+				_shore_chunks[key] = true
+				return true
+	_shore_chunks[key] = false
+	return false
 
 
 ## Grade the ground with the calendar. Called by World as the year turns; the
@@ -282,6 +306,7 @@ func rebuild_region(centre: Vector3, half_w: float, half_d: float) -> void:
 	var j1 := clampi(int((centre.z + half_d) / span), 0, chunks - 1)
 	for cj in range(j0, j1 + 1):
 		for ci in range(i0, i1 + 1):
+			_shore_chunks.erase(Vector2i(ci, cj))
 			_chunks[cj * chunks + ci].mesh = _build_chunk_mesh(ci, cj,
 					1 if _hm.grid_size == Config.GRID or _detail_chunks.has(Vector2i(ci, cj)) else 4)
 	if i0 == 0 or j0 == 0 or i1 == chunks - 1 or j1 == chunks - 1:

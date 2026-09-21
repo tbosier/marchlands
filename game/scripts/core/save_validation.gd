@@ -47,6 +47,10 @@ static func validate(data: Variant, registry: AssetRegistry = null,
 	if error != "": return "bridges: " + error
 	error = TradeRoutes.validate(data.get("trade", {}), world_size)
 	if error != "": return "trade: " + error
+	error = Scouting.validate(data.get("scouting", {}), world_size)
+	if error != "": return "scouting: " + error
+	error = WaterSystem.validate(data.get("water", {}), world_size)
+	if error != "": return "water: " + error
 	if data.seed < -MAX_SEED or data.seed > MAX_SEED:
 		return "save seed exceeds the supported range"
 	error = _fields(data, {"saved_at": TYPE_STRING, "day_marker": TYPE_FLOAT,
@@ -161,6 +165,69 @@ static func validate(data: Variant, registry: AssetRegistry = null,
 			promised_imports[route.target_id] = float(promised_imports.get(route.target_id, 0)) + route.import_amount
 			if promised_imports[route.target_id] > rival_buildings[route.target_id].inventory[Config.Res.IRON] + 0.001:
 				return "caravans promise more iron than the neighboring town owns"
+	error = Scouting.validate(data.get("scouting", {}), world_size, buildings)
+	if error != "": return "scouting: " + error
+	for entry in data.get("scouting", {}).get("scouts", []):
+		var civilian: Dictionary = entry.citizen
+		error = _citizen(civilian, registry, world_size)
+		if error != "": return "scout: " + error
+		if citizens.has(civilian.id): return "scout identity is already assigned to another role"
+		citizens[civilian.id] = civilian
+	if data.get("scouting", {}).get("report", {}).get("last_seen_day", 0.0) > data.day:
+		return "city report is dated in the future"
+	# Scout packs and caravan cargo reserve from the same physical counters.
+	var service_reservations := {}
+	var commitments: Array = []
+	for entry in data.get("scouting", {}).get("scouts", []):
+		commitments.append_array([[entry.food_reserved,entry.food_source,Config.Res.FOOD,Scouting.FOOD_PACK],
+			[entry.tools_reserved,entry.tool_source,Config.Res.TOOLS,Scouting.TOOL_COST]])
+	for route in data.get("trade", {}).get("caravans", []):
+		commitments.append_array([[route.food_reserved,route.food_source_id,Config.Res.FOOD,route.pack_amount],
+			[route.source_reserved,route.source_id,TradeRoutes.EXPORT,route.export_amount]])
+	for item in commitments:
+		if not item[0] or not buildings.has(item[1]): continue
+		var key := "%d:%d" % [item[1],item[2]]
+		service_reservations[key] = float(service_reservations.get(key,0.0))+item[3]
+		if service_reservations[key] > buildings[item[1]].inventory[item[2]] + 0.001:
+			return "service reservations exceed physical stock"
+	for entry in data.get("water", {}).get("carriers", []):
+		var civilian: Dictionary = entry.citizen
+		error = _citizen(civilian, registry, world_size)
+		if error != "": return "water carrier: " + error
+		if citizens.has(civilian.id): return "water carrier identity is already assigned to another role"
+		citizens[civilian.id] = civilian
+	var scouts_by_id := {}
+	for scout in data.get("scouting", {}).get("scouts", []): scouts_by_id[scout.id] = scout
+	for job in data.get("water", {}).get("poison_jobs", []):
+		if not scouts_by_id.has(job.scout_id): return "sabotage mission has no scout"
+		if scouts_by_id[job.scout_id].state not in ["ready","exploring","visiting"]: return "sabotage mission requires a trained scout"
+		var scout: Dictionary = scouts_by_id[job.scout_id]
+		if scout.food + scout.tools + scout.citizen.carrying_amount + scout.citizen.get("veteran_rations",0.0) + job.kit > Config.CARRY_CAPACITY + 0.001:
+			return "sabotage kit overloads the scout"
+		if rival_buildings.has(job.target_id) and rival_buildings[job.target_id].type_id != "well": return "sabotage target is not a well"
+		if job.reserved and buildings.has(job.source_id):
+			var key := "%d:%d" % [job.source_id,Config.Res.TOOLS]
+			service_reservations[key] = float(service_reservations.get(key,0.0))+1.0
+			if service_reservations[key] > buildings[job.source_id].inventory[Config.Res.TOOLS] + 0.001:
+				return "sabotage reservations exceed physical stock"
+	var enemy_people := {}
+	for unit in data.get("campaign",{}).get("units",[]):
+		if unit.faction == 1: enemy_people[unit.id] = true
+	for worker in data.get("campaign",{}).get("workers",[]): enemy_people[worker.id] = true
+	for drinker in data.get("water",{}).get("drinkers",[]):
+		if not (citizens.has(drinker.person_id) if drinker.faction == 0 else enemy_people.has(drinker.person_id)):
+			return "drinking order has no living person"
+	var water_buildings := buildings.duplicate()
+	water_buildings.merge(rival_buildings)
+	var saved_wells := {}
+	for well in data.get("water", {}).get("wells", []):
+		if not water_buildings.has(well.id) or water_buildings[well.id].type_id != "well" or water_buildings[well.id].get("under_construction", false):
+			return "water reserve has no completed well"
+		saved_wells[well.id] = true
+	if not data.get("water",{}).is_empty():
+		for building in water_buildings.values():
+			if building.type_id == "well" and not building.get("under_construction",false) and not saved_wells.has(building.id):
+				return "completed well is missing its finite water reserve"
 	for id in buildings:
 		if data.next_building_id <= id:
 			return "next_building_id must exceed every saved building id"
@@ -297,7 +364,8 @@ static func _citizen(c: Variant, registry: AssetRegistry, world_size: float = Co
 		"profession": TYPE_STRING, "age": TYPE_INT, "home_id": TYPE_INT,
 		"workplace_id": TYPE_INT, "carrying_res": TYPE_INT, "carrying_amount": TYPE_FLOAT,
 		"immigrant": TYPE_BOOL, "immigrant_target": TYPE_VECTOR3, "hunger": TYPE_FLOAT,
-		"next_meal": TYPE_FLOAT, "meals_taken": TYPE_INT, "morale": TYPE_FLOAT},
+		"next_meal": TYPE_FLOAT, "meals_taken": TYPE_INT, "morale": TYPE_FLOAT, "service_health": TYPE_FLOAT,
+		"hydration": TYPE_FLOAT, "water_bucket": TYPE_FLOAT, "water_sickness": TYPE_FLOAT},
 		"citizen", true)
 	if error != "":
 		return error
@@ -315,9 +383,13 @@ static func _citizen(c: Variant, registry: AssetRegistry, world_size: float = Co
 			or c.get("meals_taken", 0) < 0 or c.get("meals_taken", 0) > MAX_ENTITY_ID \
 			or c.get("next_meal", 0.0) < 0:
 		return "citizen age and meal values must be nonnegative"
-	for key in ["hunger", "morale"]:
+	for key in ["hunger", "morale", "hydration", "water_sickness"]:
 		if c.get(key, 0.0) < 0 or c.get(key, 0.0) > 1:
 			return "%s must be between zero and one" % key
+	if c.get("service_health", 100.0) < 0 or c.get("service_health", 100.0) > 100:
+		return "invalid service health"
+	if c.get("water_bucket", 0.0) < 0 or c.get("water_bucket", 0.0) > 4.0:
+		return "invalid carried water"
 	var res: int = c.get("carrying_res", -1)
 	var amount: float = c.get("carrying_amount", 0.0)
 	if not _index(res, Config.RES_COUNT, -1) or amount < 0 \

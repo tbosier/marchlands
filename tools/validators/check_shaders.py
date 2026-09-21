@@ -89,7 +89,7 @@ GODOT_ERROR_RE = re.compile(r"^\s*(?:SHADER |USER |SCRIPT )?ERROR:|^\s*CRASH:")
 UNIFORM_RE = re.compile(
     r"\b(global\s+|instance\s+)?uniform\s+"
     r"(?:lowp\s+|mediump\s+|highp\s+)?"
-    r"\w+\s+(\w+)\s*(?:\[[^\]]*\])?\s*(?::[^;=]*)?(=)?")
+    r"\w+\s+(\w+)\s*(?:\[[^\]]*\])?\s*(?::([^;=]*))?(=)?")
 
 # Both quote styles, because GDScript accepts either and a checker that knew
 # only one would quietly stop checking a file somebody had reformatted.
@@ -202,14 +202,18 @@ def strip_gdscript_comments(src: str) -> str:
 def declared_uniforms(src: str) -> dict[str, bool]:
     """Every material uniform the source declares, and whether it has a default.
 
-    `global uniform` and `instance uniform` are skipped: Godot does not return
-    those from get_shader_uniform_list(), so counting them here would report
-    them as lost in compilation on a shader that had compiled perfectly well.
+    Global/instance uniforms and engine-provided render-target samplers are
+    skipped: Godot does not return those from get_shader_uniform_list(), so
+    counting them would report a valid shader as losing uniforms.
     """
     found: dict[str, bool] = {}
-    for scope, name, default in UNIFORM_RE.findall(strip_shader_comments(src)):
+    for scope, name, hints, default in UNIFORM_RE.findall(strip_shader_comments(src)):
         if not scope:
-            found[name] = bool(default)
+            # These render-target samplers are supplied by Godot itself.
+            engine_texture = bool(re.search(
+                r"\b(?:hint_depth_texture|hint_screen_texture|hint_normal_roughness_texture)\b", hints))
+            if not engine_texture:
+                found[name] = bool(default)
     return found
 
 

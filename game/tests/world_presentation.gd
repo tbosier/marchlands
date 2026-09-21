@@ -1,6 +1,6 @@
 extends SceneTree
 
-## Headless: boundary continuity, camera clearance, ore materials and picking.
+## Headless: boundaries, narrow rivers, horizon, camera, ore and picking.
 ## Add -- --world-presentation-shots on a real renderer for review screenshots.
 
 var _failures := 0
@@ -16,15 +16,91 @@ func _check(ok: bool, label: String) -> void:
 		_failures += 1
 
 
-func _flat_heightmap() -> Heightmap:
+func _flat_heightmap(size_m: float = Config.WORLD_SIZE) -> Heightmap:
 	var hm := Heightmap.new()
-	hm.heights.resize(Heightmap.N * Heightmap.N)
+	hm.world_size = size_m
+	hm.grid_size = roundi(size_m / Config.CELL)
+	hm.n = hm.grid_size + 1
+	hm.heights.resize(hm.n * hm.n)
 	hm.heights.fill(9.0)
-	hm.surface.resize(Config.GRID * Config.GRID)
+	hm.surface.resize(hm.grid_size * hm.grid_size)
 	hm.surface.fill(Heightmap.Surface.GRASS)
-	hm.fertility.resize(Config.GRID * Config.GRID)
+	hm.fertility.resize(hm.grid_size * hm.grid_size)
 	hm.fertility.fill(0.5)
 	return hm
+
+
+## Intersect the triangles sent to the renderer, independently of the
+## heightfield picker. A correct navigation height does not prove that coarse
+## visible triangles leave water exposed above the bed.
+func _visible_height(mesh: ArrayMesh, x: float, z: float) -> float:
+	var arrays := mesh.surface_get_arrays(0)
+	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var triangles: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
+	var highest := -INF
+	for i in range(0, triangles.size(), 3):
+		var hit: Variant = Geometry3D.ray_intersects_triangle(Vector3(x, 100, z), Vector3.DOWN,
+				vertices[triangles[i]], vertices[triangles[i + 1]], vertices[triangles[i + 2]])
+		if hit is Vector3:
+			highest = maxf(highest, hit.y)
+	return highest
+
+
+func _narrow_rivers() -> void:
+	for width_m in [4, 8]:
+		var hm := _flat_heightmap(1536.0)
+		# The entire 4/8 m bed lies between the distant mesh's x=192 and
+		# x=208 samples. Sampling only those banks falsely draws a dry dam.
+		for z in hm.n:
+			for x in range(49, 50 + width_m / 4):
+				hm.heights[z * hm.n + x] = 0.4
+		var terrain := Terrain.new()
+		terrain._hm = hm
+		terrain.chunk_cells = 48
+		var first := terrain._build_chunk_mesh(1, 1, 4)
+		var second := terrain._build_chunk_mesh(1, 2, 4)
+		var exposed_water := true
+		for x in [197.25, 198.75, 195.0 + width_m]:
+			for z in [197.25, 247.5, 383.75, 384.25, 435.5]:
+				var mesh := first if z < 384.0 else second
+				var height := _visible_height(mesh, x, z)
+				exposed_water = exposed_water and is_finite(height) and height < Config.SEA_LEVEL
+		_check(exposed_water, "%d m river stays visibly submerged through distant terrain and its chunk boundary" % width_m)
+		var bank_height := _visible_height(first, 212.25, 247.5)
+		_check(absf(bank_height - 9.0) < 0.001,
+				"preserving the %d m river leaves its dry bank at the original height" % width_m)
+		# The inland tile still gets cheaper geometry, while its actual
+		# visible surface remains land instead of being lowered to hide seams.
+		var inland := terrain._build_chunk_mesh(2, 1, 4)
+		var detailed := terrain._build_chunk_mesh(2, 1, 1)
+		var coarse_indices: PackedInt32Array = inland.surface_get_arrays(0)[Mesh.ARRAY_INDEX]
+		var fine_indices: PackedInt32Array = detailed.surface_get_arrays(0)[Mesh.ARRAY_INDEX]
+		_check(coarse_indices.size() < fine_indices.size() / 4
+				and absf(_visible_height(inland, 421.25, 251.5) - 9.0) < 0.001,
+				"dry inland terrain retains a coarse mesh and its unchanged visible elevation")
+		terrain.free()
+
+
+func _horizon_continuity() -> void:
+	var world := World.new()
+	root.add_child(world)
+	world._build_lighting()
+	var sky: ProceduralSkyMaterial = world.environment.environment.sky.sky_material
+	_check(sky.sky_horizon_color.is_equal_approx(sky.ground_horizon_color)
+			and sky.sky_horizon_color.is_equal_approx(sky.ground_bottom_color),
+			"initial sky has no gray lower-hemisphere strip beyond the water far clip")
+	var colors: Array[Color] = []
+	for season in [0.0, 0.375, 0.75]:
+		var continuous := true
+		for time in [0.0, 0.22, 0.38, 0.5, 0.72, 0.9]:
+			world.set_time_of_day(time, season)
+			continuous = continuous and sky.sky_horizon_color.is_equal_approx(sky.ground_horizon_color) \
+					and sky.sky_horizon_color.is_equal_approx(sky.ground_bottom_color)
+			colors.append(sky.sky_horizon_color)
+		_check(continuous, "sky remains continuous through night, dawn, noon and dusk in season %.3f" % season)
+	_check(not colors[0].is_equal_approx(colors[3]),
+			"continuous horizon still changes its palette between night and noon")
+	world.free()
 
 
 func _boundary() -> void:
@@ -179,6 +255,8 @@ func _shots(registry: AssetRegistry) -> void:
 
 func _run() -> void:
 	_boundary()
+	_narrow_rivers()
+	_horizon_continuity()
 	_camera_clearance()
 	var registry := AssetRegistry.new()
 	registry.load_all()

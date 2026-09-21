@@ -11,7 +11,7 @@ extends RefCounted
 ## Deliberately small (design doc 33: do not start with hundreds of buildings).
 
 enum Role { SEAT, HOUSING, STORAGE, GATHER_WOOD, GATHER_STONE,
-		GATHER_IRON, WORKSHOP, FARM, GRANARY, MARKET, SUPPLY, BARRACKS, RANCH }
+		GATHER_IRON, WORKSHOP, FARM, GRANARY, MARKET, SUPPLY, BARRACKS, RANCH, SCOUT_LODGE, WELL }
 
 ## Roles whose buildings exist to hold goods for the settlement at large.
 const STORAGE_ROLES := [Role.STORAGE, Role.GRANARY, Role.SEAT]
@@ -96,6 +96,8 @@ class Def:
 	## Build-bar icon, rendered from this building's own asset by
 	## tools/blender/render_icons.py. Null if it has not been rendered.
 	func icon() -> Texture2D:
+		if type_id == "well":
+			return load("res://ui/well.svg")
 		var path := "res://assets/icons/%s.png" % asset
 		if not ResourceLoader.exists(path):
 			return null
@@ -169,6 +171,15 @@ static func _build() -> void:
 		"houses": 4,
 	})
 	_add({
+		"type_id": "well",
+		"asset": "well",
+		"display_name": "Well",
+		"role": Role.WELL,
+		"description": "A replenishing water source for drinking and firefighting. Keep its water clean.",
+		"cost": {Config.Res.TIMBER: 12, Config.Res.STONE: 20},
+		"build_time": 24.0,
+	})
+	_add({
 		"type_id": "stockpile",
 		"asset": "stockpile",
 		"display_name": "Stockpile",
@@ -234,6 +245,12 @@ static func _build() -> void:
 				+ "from a market, supply hut or another reachable store.",
 		"cost": {Config.Res.TIMBER: 40, Config.Res.STONE: 20},
 		"build_time": 32.0,
+	})
+	_add({
+		"type_id": "scout_lodge", "asset": "logging_camp",
+		"display_name": "Scout Lodge", "role": Role.SCOUT_LODGE,
+		"description": "Train existing residents in fieldcraft. Each scout collects eight food and two tools before half a day of training, then explores on foot.",
+		"cost": {Config.Res.TIMBER: 24, Config.Res.STONE: 8}, "build_time": 24.0,
 	})
 	_add({
 		"type_id": "logging_camp",

@@ -337,7 +337,42 @@ func _rival_manpower() -> void:
 	await process_frame
 
 
+func _service_injuries() -> void:
+	var game := _new_game(42)
+	var sim := game.sim
+	var barracks := _build(game, "barracks", game.world.centre() + Vector3(-45,0,-10))
+	if barracks == null:
+		game.free()
+		return
+	_fund(sim)
+	var resident: Citizen = sim.citizens[0]
+	var identity := resident.id
+	resident.service_health = 63.0
+	_check(sim.campaign.recruit(identity) == "", "a resident injured during travel can enlist")
+	var unit := _soldier_for(sim.campaign, identity)
+	_check(unit.health == 63.0 and unit.capture_body().strain == 37.0,
+		"recruitment transfers existing service injury into the soldier body instead of healing it")
+	unit.receive_hit("lower_arm_r", "slash", 10.0)
+	var body := unit.capture_body()
+	_check(sim.campaign.demobilize(unit.id) == "" and sim.citizens_by_id[identity].capture_body() == body,
+		"discharge preserves both inherited travel damage and later combat injury")
+	var snapshot := SaveGame.capture(game)
+	var error := game.restore_from(snapshot)
+	sim = game.sim
+	_check(error == "" and sim.citizens_by_id[identity].capture_body() == body,
+		"mixed travel and combat injuries survive a civilian save/load: " + error)
+	_check(sim.campaign.recruit(identity) == "" and _soldier_for(sim.campaign,identity).capture_body() == body,
+		"reenlistment neither erases nor applies the inherited service injury a second time")
+	var dead: Citizen = sim.citizens[0]
+	dead.service_health = 0.0
+	var wallet := sim.keep.inventory.duplicate()
+	_check(sim.campaign.recruit(dead.id) != "" and sim.keep.inventory == wallet,
+		"a dead resident cannot be revived through recruitment or charged for training")
+	game.free()
+	await process_frame
+
 func _run() -> void:
+	await _service_injuries()
 	await _population_transfer()
 	await _release_claims()
 	await _veterans_and_losses()

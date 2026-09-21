@@ -24,6 +24,15 @@ signal road_scope_requested(scope: String)
 signal research_open_requested()
 signal research_requested(tech_id: String)
 signal army_open_requested()
+signal scouting_open_requested()
+signal scout_train_requested(lodge_id: int)
+signal scout_select_requested(scout_id: int)
+signal scout_recall_requested(scout_id: int)
+signal scout_visit_requested(scout_id: int)
+signal city_report_requested()
+signal medic_requested(unit_id: int)
+signal firefighting_requested(building_id: int)
+signal poison_well_requested(scout_id: int)
 signal recruit_requested()
 signal muster_requested()
 signal rival_focus_requested()
@@ -88,6 +97,7 @@ const BAR_CLOSED_H := 46.0
 var _res_labels: Array[Label] = []
 var _res_name_labels: Array[Label] = []
 var _clock_label: Label
+var _city_marker: Button
 var _pop_label: Label
 var _speed_buttons: Array[Button] = []
 var _build_buttons: Dictionary = {}
@@ -114,6 +124,7 @@ var _top_row: HBoxContainer
 var _build_toggle: Button
 var _build_tray: HBoxContainer
 var _build_scroll: ScrollContainer
+var _build_spacer: Control
 var _clear_button: Button
 var _build_bar: PanelContainer
 var _controls_row: HBoxContainer
@@ -191,6 +202,7 @@ func setup(sim: Simulation, clock: Clock) -> void:
 
 
 func _fit_to_viewport() -> void:
+	if _city_marker != null: _city_marker.hide()
 	var rect := get_viewport_rect().size
 	position = Vector2.ZERO
 	size = rect
@@ -247,9 +259,6 @@ func _relayout(rect: Vector2) -> void:
 				for b in _speed_buttons:
 					b.custom_minimum_size.x = 34.0
 
-	# Below this there is no room for both a name and a price on a build
-	# card; the price stays reachable on the tooltip.
-	var tight := width < 1180.0
 	_hint_room = width >= 1180.0
 	_apply_hint_visibility()
 	for type_id in _build_buttons:
@@ -257,14 +266,10 @@ func _relayout(rect: Vector2) -> void:
 		var def := BuildingDefs.get_def(type_id)
 		b.tooltip_text = "%s\n%s\n\n%s" % [def.display_name,
 				def.cost_text(), def.description]
-		# The cards share out whatever width is left after the Build toggle and
-		# the Clear tool, down to a floor of 64 px each. Be honest about the
-		# limit: eight cards at that floor plus the two fixed controls need
-		# about 710 px, so below roughly 760 px the right-hand end of the tray
-		# is off the screen and there is nothing here that recovers it. A
-		# horizontal ScrollContainer is the fix and is not attempted blind.
-		var per: float = (width - 440.0) / float(maxi(1, _build_buttons.size()))
-		var button_w: float = clampf(per, 64.0, 152.0 if not tight else 116.0)
+		# The tray scrolls horizontally, so preserve complete names and prices
+		# instead of squeezing every building into the visible row.
+		var per: float = (width - 128.0) / float(maxi(1, _build_buttons.size()))
+		var button_w: float = clampf(per, 152.0, 176.0)
 		b.custom_minimum_size = Vector2(button_w, TRAY_CARD_H)
 
 		var parts: Dictionary = _build_cards[type_id]
@@ -273,13 +278,10 @@ func _relayout(rect: Vector2) -> void:
 		var icon_rect: TextureRect = parts["icon"]
 		name_label.text = def.display_name
 		cost_label.text = def.cost_text()
-		name_label.add_theme_font_size_override("font_size",
-				F_MICRO if button_w < 98.0 else F_SMALL)
-		# The card sheds its parts in order of how little they cost to lose:
-		# the price first, then the icon, and the name never.
-		cost_label.visible = not tight and button_w >= 106.0
-		var icon_size := 32.0 if button_w >= 124.0 else 26.0
-		icon_rect.visible = button_w >= 82.0 and icon_rect.texture != null
+		name_label.add_theme_font_size_override("font_size", F_SMALL)
+		cost_label.visible = true
+		var icon_size := 32.0
+		icon_rect.visible = icon_rect.texture != null
 		icon_rect.custom_minimum_size = Vector2(icon_size, icon_size)
 
 		# Fit the price to the column rather than letting it clip. At the
@@ -653,6 +655,7 @@ func _build_bottom_bar() -> void:
 	row.add_child(_build_toggle)
 
 	for entry in [["Research", research_open_requested], ["Army", army_open_requested],
+			["Scouts", scouting_open_requested],
 			["Wild cattle", cattle_focus_requested], ["Trade", trade_open_requested],
 			["Bridge", bridge_tool_requested]]:
 		var action := Button.new()
@@ -703,10 +706,10 @@ func _build_bottom_bar() -> void:
 	_clear_button.pressed.connect(func(): clear_ground_requested.emit())
 	_build_tray.add_child(_clear_button)
 
-	var spacer := Control.new()
-	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_child(spacer)
+	_build_spacer = Control.new()
+	_build_spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_build_spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(_build_spacer)
 
 	_hint_label = _make_label("", F_MICRO, INK_FAINT)
 	_hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
@@ -806,6 +809,7 @@ func _on_build_tray_toggled(pressed: bool) -> void:
 		action.visible = not pressed
 	_build_tray.visible = pressed
 	_build_scroll.visible = pressed
+	_build_spacer.visible = not pressed
 	_build_toggle.text = "▼  Build" if pressed else "▲  Build"
 	if _build_bar:
 		_build_bar.offset_top = -BAR_OPEN_H if pressed else -BAR_CLOSED_H
@@ -1052,24 +1056,34 @@ func _refresh_readouts() -> void:
 	var homeless := _sim.stat_homeless
 	var soldiers: int = _sim.campaign.friendly_ids().size() if _sim.campaign != null else 0
 	var merchants: int = _sim.trade.caravans.size() if _sim.trade != null else 0
+	var scouts: int = _sim.scouting.scouts.size() if _sim.scouting != null else 0
+	var responders: int = _sim.water.carriers.size() if _sim.water != null else 0
 	var civilians := _sim.citizens.size()
 	if _compact:
 		_pop_label.text = "C%d S%d" % [civilians, soldiers] if soldiers > 0 else "Pop %d" % civilians
 		if merchants > 0:
 			_pop_label.text = "C%d S%d M%d" % [civilians, soldiers, merchants] if soldiers > 0 else "C%d M%d" % [civilians, merchants]
+		if scouts > 0: _pop_label.text = "C%d S%d M%d Sc%d" % [civilians, soldiers, merchants, scouts]
+		if responders > 0: _pop_label.text = "%d people · %d with buckets" % [civilians + soldiers + merchants + scouts + responders, responders]
 	else:
 		_pop_label.text = "%d people · %d civilians · %d soldiers" % [civilians + soldiers, civilians, soldiers] \
 				if soldiers > 0 else "Population %d  (%d homeless, %d idle)" % [civilians, homeless, _sim.stat_idle]
 		if merchants > 0:
 			_pop_label.text = "%d people · %d civilians · %d soldiers · %d merchants" % [civilians + soldiers + merchants, civilians, soldiers, merchants]
+		if scouts > 0:
+			_pop_label.text = "%d people · %d civilians · %d soldiers · %d merchants · %d scouts" % [civilians + soldiers + merchants + scouts, civilians, soldiers, merchants, scouts]
+		if responders > 0:
+			_pop_label.text = "%d people · %d at work · %d carrying water" % [civilians + soldiers + merchants + scouts + responders, civilians, responders]
 	_pop_label.add_theme_color_override("font_color",
 			WARN if homeless > 0 else INK)
 
 	# Idle people are a symptom; the tooltip carries the diagnosis.
 	var reason := _sim.idle_diagnosis()
-	_pop_label.tooltip_text = "%d people: %d civilians and %d soldiers; %d merchants. Soldiers and merchants do not produce locally.\n" % [civilians + soldiers + merchants, civilians, soldiers, merchants] + (reason if reason != ""
+	_pop_label.tooltip_text = "%d people: %d civilians and %d soldiers; %d merchants; %d scouts. People away on service do not produce locally.\n" % [civilians + soldiers + merchants + scouts, civilians, soldiers, merchants, scouts] + (reason if reason != ""
 			else "%d of %d at work" % [_sim.stat_population - _sim.stat_idle,
 					_sim.stat_population])
+	if responders > 0:
+		_pop_label.tooltip_text = "%d people: %d civilians, %d soldiers, %d merchants, %d scouts, %d bucket carriers. Responders leave production to carry water." % [civilians + soldiers + merchants + scouts + responders, civilians, soldiers, merchants, scouts, responders]
 	if reason != "":
 		_pop_label.add_theme_color_override("font_color", WARN)
 		_idle_reason = reason
@@ -1161,10 +1175,30 @@ func show_building(b: Building) -> void:
 		lines.append("  Construction: %d%%" % int(b.build_progress * 100.0))
 	else:
 		_add_upgrade_action(b, rebuild)
+		if b.type_id == "scout_lodge" and rebuild:
+			var train := _action_button("Train a citizen scout")
+			train.pressed.connect(func():
+				var live := _live_building(building_ref)
+				if live != null: scout_train_requested.emit(live.id))
+			_selection_actions.add_child(train)
 		if b.fire > 0.0:
 			lines.append("\n[color=#e0a85c]Burning — the fire is spreading through the building[/color]")
 		elif b.health < b.max_health() * 0.7:
 			lines.append("\n[color=#e0a85c]Scorched and damaged[/color]")
+		if b.type_id == "well" and _sim.water != null:
+			var water: Dictionary = _sim.water.well_info(b.id)
+			lines.append("\n[b]Water[/b] %.1f / %.0f\nPeople walk here to drink. Firefighters collect buckets here and carry them to fires." % [water.get("water", 0.0), water.get("capacity", 80.0)])
+			if float(water.get("poison", 0.0)) > 0.0:
+				lines.append("[color=#e0a85c]Contaminated water — drinking is dangerous.[/color]")
+		if rebuild:
+			var fight_fire := _action_button("Send a worker with water")
+			fight_fire.name = "fight_fire"
+			fight_fire.pressed.connect(func():
+				var live := _live_building(building_ref)
+				if live != null: firefighting_requested.emit(live.id))
+			_selection_actions.add_child(fight_fire)
+		var fire_button: Button = _selection_actions.get_node_or_null("fight_fire")
+		if fire_button != null: fire_button.visible = b.fire > 0.0
 		if b.type_id in ["supply_hut", "fort"]:
 			lines.append("\n[b]Military food relay[/b]\nStock target %d · supply link up to 160 m\nSoldiers refill within 24 m. Assignments are automatic when workers are available." % b.food_stock_target())
 		if b.type_id == "ranch" and _sim.husbandry != null:
@@ -1183,12 +1217,13 @@ func show_building(b: Building) -> void:
 			for target in [40, 80, 120]:
 				if rebuild:
 					var policy := _action_button("Keep %d food" % target)
+					policy.name = "market_target_%d" % target
 					policy.pressed.connect(func():
 						var live := _live_building(building_ref)
 						if live != null:
 							market_target_requested.emit(live, target))
 					_selection_actions.add_child(policy)
-				var policy_button: Button = _selection_actions.get_child([40,80,120].find(target))
+				var policy_button: Button = _selection_actions.get_node("market_target_%d" % target)
 				policy_button.text = ("✓ " if b.market_stock_target == target else "") + "Keep %d food" % target
 
 		if b.def.houses > 0:
@@ -1306,10 +1341,12 @@ func show_citizen(c: Citizen) -> void:
 		"[b]Home[/b] %s" % home,
 		"[b]Works at[/b] %s" % work,
 		"[b]Condition[/b] %s" % hunger_word,
+		"[b]Hydration[/b] %d%% · bucket %.1f water" % [roundi(c.hydration * 100.0), c.water_bucket],
 		"[b]Next meal[/b] %s  [color=#a9a49b](%d taken)[/color]"
 				% [meal_word, c.meals_taken],
 		"[b]Morale[/b] %d%%" % int(c.morale * 100.0),
 	]
+	if c.water_sickness > 0.0: lines.append("[color=#e0a85c]Ill after drinking contaminated water[/color]")
 	if c is Soldier:
 		lines.append("[b]Injuries[/b] %s" % c.injury_summary())
 		lines.append("[b]Work capacity[/b] %d%%" % roundi(c.workability() * 100.0))
@@ -1398,8 +1435,8 @@ func show_army(info: Dictionary) -> void:
 		var muster := _action_button("Muster all swordsmen")
 		muster.pressed.connect(func(): muster_requested.emit())
 		_selection_actions.add_child(muster)
-		var rival := _action_button("Find the rival town")
-		rival.pressed.connect(func(): rival_focus_requested.emit())
+		var rival := _action_button("Known settlements")
+		rival.pressed.connect(func(): city_report_requested.emit())
 		_selection_actions.add_child(rival)
 	_selection_actions.get_child(0).disabled = not info.can_recruit
 
@@ -1411,6 +1448,9 @@ func show_soldier(unit: Node) -> void:
 	_selection_body.text = "[b]Orders[/b] %s\n[b]Food[/b] %.1f days\n[b]Armor[/b] %s\n\n%s\n\n%s" % [unit.task_label, unit.rations,
 		String(unit.armor_tier).capitalize(), unit.injury_summary(),
 		"Armor is fitted at a barracks. Protection depends on the struck body part and attack. Injuries persist after discharge." if unit.faction == 0 else "This guard defends the rival settlement."]
+	_selection_body.text += "\n\n[b]Skills[/b]\n" + unit.skill_summary()
+	_selection_body.text += "\n[b]Hydration[/b] %d%%" % roundi(unit.hydration * 100.0)
+	_selection_body.text += "\n[b]Duty[/b] %s · Medical kits: %d" % [unit.medical_role.capitalize(), unit.medical_supplies]
 	if unit.faction != 0: return
 	var unit_id: int = unit.id
 	for i in MilitaryEquipment.TIERS.size():
@@ -1430,6 +1470,110 @@ func show_soldier(unit: Node) -> void:
 		var discharge := _action_button("Return to civilian life")
 		discharge.pressed.connect(func(): demobilize_requested.emit(unit_id))
 		_selection_actions.add_child(discharge)
+		var medic := _action_button("Medic · 2 kits for 4 tools, 4 food")
+		medic.name = "medic"
+		medic.pressed.connect(func(): medic_requested.emit(unit_id))
+		_selection_actions.add_child(medic)
+	var medic_button: Button = _selection_actions.get_node_or_null("medic")
+	var medic_offer: Dictionary = _sim.campaign.medic_quote(unit_id)
+	medic_button.disabled = not medic_offer.can_fit
+	medic_button.tooltip_text = medic_offer.reason if medic_offer.reason != "" else "Tends nearby wounded automatically. Each treatment uses one kit; lost limbs stay lost."
+
+
+func show_scouts(info: Dictionary, selected_id: int = -1) -> void:
+	_selection_panel.visible = true
+	_selection_title.text = "Scouts and reports"
+	var rows: Array = info.get("scouts", [])
+	var keys: Array = []
+	for row in rows: keys.append([row.id, row.training, row.can_explore])
+	var rebuild := _actions_changed("scouts:%s:%d:%d" % [str(keys), selected_id, info.get("lodge_id", -1)])
+	var lines: Array[String] = ["Scouts are your citizens. Training takes time away from work.",
+		"Training needs 2 tools, 8 packed food and half a day at a completed lodge.",
+		"Select a trained scout, then right-click the map to explore. Visit a known castle to ask its ruler for details.",
+		"Merchants report what they see on established trade routes; they cannot explore."]
+	if not info.get("can_train", false): lines.append("\n" + str(info.get("reason", "Build a scout lodge to train residents.")))
+	for row in rows:
+		if selected_id >= 0 and row.id != selected_id: continue
+		lines.append("\n[b]%s[/b]\n%s" % [row.name, row.status])
+		var scout: Scout = _sim.scouting.scouts.get(row.id)
+		if scout != null: lines.append("Hydration %d%% · food %.1f days" % [roundi(scout.person.hydration * 100.0), scout.food])
+	_selection_body.text = "\n".join(lines)
+	if rebuild:
+		var train := _action_button("Train a citizen scout")
+		train.name = "train_scout"
+		var lodge_id: int = info.get("lodge_id", -1)
+		train.pressed.connect(func(): scout_train_requested.emit(lodge_id))
+		_selection_actions.add_child(train)
+		var reports := _action_button("Known settlement reports")
+		reports.pressed.connect(func(): city_report_requested.emit())
+		_selection_actions.add_child(reports)
+		for row in rows:
+			var scout_id: int = row.id
+			if selected_id >= 0 and scout_id != selected_id: continue
+			var select := _action_button("Select · " + str(row.name))
+			select.pressed.connect(func(): scout_select_requested.emit(scout_id))
+			_selection_actions.add_child(select)
+			if row.can_explore:
+				var visit := _action_button("Visit known castle · " + str(row.name))
+				visit.pressed.connect(func(): scout_visit_requested.emit(scout_id))
+				_selection_actions.add_child(visit)
+				var poison := _action_button("Poison enemy well · " + str(row.name))
+				poison.name = "poison_%d" % scout_id
+				poison.pressed.connect(func(): poison_well_requested.emit(scout_id))
+				_selection_actions.add_child(poison)
+			var recall := _action_button("Return to civilian work · " + str(row.name))
+			recall.pressed.connect(func(): scout_recall_requested.emit(scout_id))
+			_selection_actions.add_child(recall)
+	_selection_actions.get_node("train_scout").disabled = not info.get("can_train", false)
+	if _sim.water != null:
+		for row in rows:
+			var button: Button = _selection_actions.get_node_or_null("poison_%d" % int(row.id))
+			if button == null: continue
+			var offer: Dictionary = _sim.water.poison_quote(row.id)
+			button.disabled = not offer.get("can_poison", false)
+			button.tooltip_text = offer.get("reason", "") if not offer.get("can_poison", false) else "Collect paid supplies, travel to the enemy well and contaminate its water."
+
+
+func show_city_report(report: Dictionary, day: float) -> void:
+	_selection_panel.visible = true
+	_selection_title.text = str(report.get("name", "Known settlements"))
+	var rebuild := _actions_changed("city_report:%s" % str(report.is_empty()))
+	if report.is_empty():
+		_selection_body.text = "No settlements have been reported. Train a citizen at a scout lodge and send them beyond your borders."
+	else:
+		_selection_body.text = "[b]Last visited[/b] %.1f days ago\n[b]Last known population[/b] %s\n[b]Observed military[/b] %s\n[b]Source[/b] %s\n\nThis is a dated report. It does not update while nobody is there. A scout must reach the castle and speak to the ruler for confirmed details." % [maxf(0.0, day - float(report.last_seen_day)), report.population_text, report.military_text, report.source]
+		var history: Dictionary = report.get("ruler_history", {})
+		if not history.is_empty():
+			_selection_body.text += "\n\n[b]Earlier ruler report[/b] %.1f days ago\n%s\n%s" % [maxf(0.0, day - float(history.last_seen_day)), history.population_text, history.military_text]
+		if rebuild:
+			var locate := _action_button("Locate reported town")
+			locate.pressed.connect(func(): rival_focus_requested.emit())
+			_selection_actions.add_child(locate)
+	if rebuild:
+		var scouts := _action_button("Manage scouts")
+		scouts.pressed.connect(func(): scouting_open_requested.emit())
+		_selection_actions.add_child(scouts)
+
+
+func update_city_marker(report: Dictionary, day: float, screen: Vector2, on_screen: bool) -> void:
+	if _city_marker == null:
+		_city_marker = Button.new()
+		_city_marker.name = "known_city_marker"
+		_city_marker.add_theme_font_size_override("font_size", F_SMALL)
+		_style_button(_city_marker)
+		_city_marker.pressed.connect(func(): city_report_requested.emit())
+		add_child(_city_marker)
+		move_child(_city_marker, 0)
+	_city_marker.visible = on_screen and not report.is_empty()
+	if not _city_marker.visible: return
+	_city_marker.text = "%s · last visited %.0f days ago" % [report.name, maxf(0.0, day - float(report.last_seen_day))]
+	_city_marker.tooltip_text = "Last known population: %s\nObserved military: %s\n%s" % [report.population_text, report.military_text, report.source]
+	_city_marker.size = _city_marker.get_minimum_size()
+	_city_marker.position = screen - Vector2(_city_marker.size.x * 0.5, _city_marker.size.y)
+	_city_marker.position.x = clampf(_city_marker.position.x, 8.0, maxf(8.0, size.x - _city_marker.size.x - 8.0))
+	_city_marker.position.y = clampf(_city_marker.position.y, TOP_BAR_H + 8.0, maxf(TOP_BAR_H + 8.0, size.y - BAR_OPEN_H - _city_marker.size.y))
+	if _selection_panel.visible and _selection_panel.get_global_rect().intersects(_city_marker.get_global_rect()):
+		_city_marker.hide()
 
 
 func show_cow(info: Dictionary) -> void:
@@ -1606,7 +1750,8 @@ func _show_world_dialog() -> void:
 
 func show_trade(info: Dictionary, selected_id: int = -1) -> void:
 	_selection_panel.visible = true
-	_selection_title.text = "Trade with Ashcombe"
+	var report: Dictionary = _sim.scouting.city_report() if _sim.scouting != null else {}
+	_selection_title.text = "Trade" if report.is_empty() else "Trade with " + str(report.name)
 	var quote: Dictionary = info.get("quote", {})
 	var rows: Array = info.get("caravans", [])
 	var keys: Array = []
@@ -1614,9 +1759,10 @@ func show_trade(info: Dictionary, selected_id: int = -1) -> void:
 	for wreck in info.get("lost_carts", []): keys.append("wreck:%d:%s" % [wreck.id, str(wreck.recovery_requested)])
 	var rebuild := _actions_changed("trade:%s:%d:%d" % [str(keys), selected_id, int(quote.get("origin_id", -1))])
 	var lines: Array[String] = ["Assign a citizen and cart to carry real goods between markets.",
-		"", "[b]Merchants away[/b] %d" % info.get("merchants", 0),
-		"[b]Offer[/b] %d timber for %d iron" % [quote.get("export_amount", 24), quote.get("import_amount", 8)],
-		"[b]Travel food[/b] %d · keep two days of food at home" % quote.get("provisions", 0)]
+		"", "[b]Merchants away[/b] %d" % info.get("merchants", 0)]
+	if int(quote.get("target_id", -1)) >= 0:
+		lines.append("[b]Offer[/b] %d timber for %d iron" % [quote.get("export_amount", 24), quote.get("import_amount", 8)])
+		lines.append("[b]Travel food[/b] %d · keep two days of food at home" % quote.get("provisions", 0))
 	if quote.get("travel_seconds", 0.0) > 0:
 		lines.append("[b]Estimated round trip[/b] %.1f days before loading and stops" % (float(quote.travel_seconds) / Config.DAY_LENGTH))
 	if not quote.get("ok", false): lines.append("[color=#e0a85c]%s[/color]" % quote.get("reason", "Unavailable"))
