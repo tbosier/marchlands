@@ -190,6 +190,15 @@ func _drink(c: Citizen, key: String, delta: float) -> void:
 		drinkers.erase(key)
 		c.clear_goal()
 		c.task_label = "Finished drinking"
+		# The water movement already consumed this tick. Give a loaded civilian
+		# their real delivery destination now, without walking them twice or
+		# leaving an observable idle tick with an unaccounted-for handload.
+		if sim.citizens_by_id.get(c.id) == c and c.job == null and c.carrying_amount > 0.01 and c.workability() > 0:
+			var store := sim.stores.find_store(c.carrying_res,c.global_position,-1)
+			if store != null:
+				c.set_goal(sim.entrance_of(store,"att_cart_bay"))
+				c.state = Citizen.State.TRAVELLING
+				c.task_label = "returning %s" % Res.display(c.carrying_res)
 
 func request_firefighting(building_id: int) -> String:
 	var target: Building = sim.buildings_by_id.get(building_id)

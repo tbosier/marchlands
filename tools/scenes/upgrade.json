@@ -121,6 +121,14 @@
   },
   {
     "op": "build",
+    "type": "stockpile",
+    "near": "iron",
+    "radius": 300,
+    "instant": true,
+    "note": "Part of the instant industry fixture: give the remote mine a local ore yard. The settlement yards fill with timber and stone over this long run, leaving earned iron on carriers instead of available for the paid forge upgrade. No materials are granted; miners and haulers must fill this yard."
+  },
+  {
+    "op": "build",
     "type": "blacksmith",
     "offset": [
       -46,

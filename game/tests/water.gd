@@ -43,6 +43,28 @@ func _hydration_and_claims() -> void:
 		if c.hydration >= 0.95: break
 	_check(c.hydration >= 0.95 and water.wells[well_id].water < WaterSystem.CAPACITY and c.global_position.distance_to(sim.entrance_of(sim.buildings_by_id[well_id],"att_entrance")) <= Config.ARRIVE_RADIUS+0.2,
 		"the resident drinks a finite amount only on reaching the well")
+	var loaded_at_well := c.global_position
+	var cargo_before := c.carrying_amount
+	var timber_before := cargo_before
+	for b in sim.buildings: timber_before += b.inventory[Config.Res.TIMBER]
+	_check(c.job == null and c.has_goal() and c.task_label == "returning Timber" and cargo_before == 4.0,
+		"finishing a drink immediately restores the actual loaded resource's delivery route")
+	c.next_meal = sim.day + 2.0
+	sim._tick_citizen(c,0.25)
+	_check(c.global_position == loaded_at_well and c.carrying_amount == cargo_before,
+		"priming the delivery route does not move the worker twice or teleport the cargo")
+	for i in 2000:
+		_water_step(game)
+		sim._tick_citizen(c,0.25)
+		if c.carrying_amount <= 0.01: break
+	var timber_after := c.carrying_amount if c.carrying_res == Config.Res.TIMBER else 0.0
+	var incoming := 0.0
+	for b in sim.buildings:
+		timber_after += b.inventory[Config.Res.TIMBER]
+		incoming += b.incoming[Config.Res.TIMBER]
+	_check(c.carrying_amount == 0 and c.global_position != loaded_at_well and is_equal_approx(timber_before,timber_after)
+		and incoming == 0 and c.job == null,
+		"after drinking, the worker physically deposits every carried unit once with no stale destination claims")
 	var tree: ResourceNodes.NodeRec
 	for rec in game.world.nodes.records:
 		if rec.kind == ResourceNodes.Kind.TREE and not rec.depleted:

@@ -165,13 +165,19 @@
   },
   {
     "op": "assert",
-    "check": "last_build_progress",
-    "value": 0.01,
-    "note": "the newly ordered house must make progress; finishing it before this check is also success"
+    "check": "work_in_progress",
+    "value": 1,
+    "note": "the restored workforce must resume work; the house needs actual deliveries before builders can start"
   },
   {
     "op": "simulate",
     "days": 1.5
+  },
+  {
+    "op": "assert",
+    "check": "last_build_progress",
+    "value": 0.01,
+    "note": "allow physical deliveries and drinking trips before checking house construction; the final completion deadline is unchanged"
   },
   {
     "op": "assert",
