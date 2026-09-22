@@ -37,6 +37,8 @@ signal purge_well_requested(well_id: int)
 signal purge_cancel_requested(well_id: int)
 signal recruit_requested()
 signal muster_requested()
+signal company_form_requested()
+signal company_disband_requested(company_id: int)
 signal rival_focus_requested()
 signal armor_requested(unit_id: int, tier: String)
 signal demobilize_requested(unit_id: int)
@@ -1491,16 +1493,25 @@ func show_army(info: Dictionary) -> void:
 	_selection_actions.get_child(0).disabled = not info.can_recruit
 
 
-func show_soldier(unit: Node) -> void:
+## `company` is the one this soldier marches with, empty when he marches loose.
+## It is named here, and offers its own disband button, because a company can
+## shrink to one man — split one off, or lose the rest to casualties — and the
+## block panel that normally carries that button needs two soldiers to appear.
+## Without this he would be permanently enlisted in a company he cannot see.
+func show_soldier(unit: Node, company: Dictionary = {}) -> void:
 	_selection_panel.visible = true
 	_selection_title.text = unit.given_name if unit.faction == 0 else "Rival guard"
-	var rebuild := _actions_changed("unit:%d" % unit.id)
+	var company_id: int = company.get("id", -1)
+	var rebuild := _actions_changed("unit:%d:%d" % [unit.id, company_id])
 	_selection_body.text = "[b]Orders[/b] %s\n[b]Food[/b] %.1f days\n[b]Armor[/b] %s\n\n%s\n\n%s" % [unit.task_label, unit.rations,
 		String(unit.armor_tier).capitalize(), unit.injury_summary(),
 		"Armor is fitted at a barracks. Protection depends on the struck body part and attack. Injuries persist after discharge." if unit.faction == 0 else "This guard defends the rival settlement."]
 	_selection_body.text += "\n\n[b]Skills[/b]\n" + unit.skill_summary()
 	_selection_body.text += "\n[b]Hydration[/b] %d%%" % roundi(unit.hydration * 100.0)
 	_selection_body.text += "\n[b]Duty[/b] %s · Medical kits: %d" % [unit.medical_role.capitalize(), unit.medical_supplies]
+	if company_id >= 0:
+		_selection_body.text += "\n[b]Company[/b] %s · %d soldier%s, %d files wide" \
+				% [company.name, company.size, "" if company.size == 1 else "s", company.width]
 	if unit.faction != 0: return
 	var unit_id: int = unit.id
 	for i in MilitaryEquipment.TIERS.size():
@@ -1524,10 +1535,66 @@ func show_soldier(unit: Node) -> void:
 		medic.name = "medic"
 		medic.pressed.connect(func(): medic_requested.emit(unit_id))
 		_selection_actions.add_child(medic)
+		if company_id >= 0:
+			var disband := _action_button("Disband %s" % company.name)
+			disband.tooltip_text = "He stops marching as part of a block; nothing else about him changes."
+			disband.pressed.connect(func(): company_disband_requested.emit(company_id))
+			_selection_actions.add_child(disband)
 	var medic_button: Button = _selection_actions.get_node_or_null("medic")
 	var medic_offer: Dictionary = _sim.campaign.medic_quote(unit_id)
 	medic_button.disabled = not medic_offer.can_fit
 	medic_button.tooltip_text = medic_offer.reason if medic_offer.reason != "" else "Tends nearby wounded automatically. Each treatment uses one kit; lost limbs stay lost."
+
+
+## Name the one company verb after whatever the current selection expresses.
+## Forming, splitting and merging are the same order from three different
+## starting points, and a button that says which one it is about to perform
+## teaches that faster than three buttons two of which are always greyed out.
+func _company_action_text(report: Dictionary) -> String:
+	var rows: Array = report.get("companies", [])
+	if report.get("whole", -1) >= 0:
+		return "Already one company"
+	if report.get("split_from", -1) >= 0:
+		return "Split these %d soldiers off from %s" % [report.get("total", 0), rows[0].name]
+	if report.get("mergeable", false):
+		return "Merge these %d companies into one" % rows.size()
+	return "Form a company from these %d soldiers" % report.get("total", 0)
+
+
+## The panel for a block of soldiers. One soldier keeps his own panel — armor,
+## wounds, discharge are decisions about a man. Two or more is a block, and
+## this panel is about the block: which companies the selection covers, how
+## much of each, and the single verb that reshapes it.
+func show_company(report: Dictionary) -> void:
+	_selection_panel.visible = true
+	var rows: Array = report.get("companies", [])
+	var total: int = report.get("total", 0)
+	var loose: int = report.get("loose", 0)
+	var whole: int = report.get("whole", -1)
+	_selection_title.text = rows[0].name if rows.size() == 1 and loose == 0 \
+			else "%d soldiers" % total
+	var action := _company_action_text(report)
+	var rebuild := _actions_changed("company:%s:%d" % [action, whole])
+	var lines: Array[String] = []
+	for row in rows:
+		lines.append("[b]%s[/b] — %d of %d soldiers, %d files wide"
+				% [row.name, row.selected, row.size, row.width])
+	if loose > 0:
+		lines.append("[b]%d soldier%s in no company[/b]" % [loose, "" if loose == 1 else "s"])
+	lines.append("\nRight-click to march or attack. Each company arrives in its own block, in its own shape.")
+	lines.append("Click one soldier to take his whole company. Alt-click for that soldier alone, Shift-click to add another company. [b]G[/b], or the button below, makes the selection one company — that is how a company is formed, split and merged.")
+	_selection_body.text = "\n".join(lines)
+	if rebuild:
+		var form := _action_button(action)
+		form.tooltip_text = "The selected soldiers become one company, leaving whatever company they were in."
+		form.pressed.connect(func(): company_form_requested.emit())
+		_selection_actions.add_child(form)
+		var disband := _action_button("Disband this company")
+		disband.tooltip_text = "The soldiers stay; they simply stop marching as a block."
+		disband.pressed.connect(func(): company_disband_requested.emit(whole))
+		_selection_actions.add_child(disband)
+	_selection_actions.get_child(0).disabled = whole >= 0
+	_selection_actions.get_child(1).disabled = whole < 0
 
 
 func show_scouts(info: Dictionary, selected_id: int = -1) -> void:

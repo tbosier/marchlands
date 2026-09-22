@@ -11,6 +11,18 @@ const GUARD_SIGHT := 60.0
 const CONTACT_COOLDOWN := 60.0
 const FIRE_SPREAD_INTERVAL := 0.5
 const FIRE_CELL := 24.0
+## Every company the game creates is four files wide: `form_company` is only
+## ever called with the default, and `set_company_width` has no caller outside
+## the tests, so frontage is modelled and saved but not yet something the
+## player can set. The ceilings are there so a hand-edited save cannot ask for
+## a kilometre-wide line or a million rosters to walk.
+const COMPANY_WIDTH := 4
+const MAX_COMPANY_WIDTH := 12
+const MAX_COMPANIES := 512
+## Parade geometry: two metres between files and between ranks, four between
+## the blocks of neighbouring companies so they read as separate bodies.
+const FILE_SPACING := 2.0
+const COMPANY_GAP := 4.0
 var sim: Simulation
 var world: World
 var registry: AssetRegistry
@@ -40,6 +52,28 @@ var _contact_pending := false
 var _contact_war := false
 var _guard_contacts: Dictionary = {}
 var _patients: Dictionary = {} # faction -> candidates every medic of it shares this tick
+## A company is a persistent block of soldiers — the thing the player selects,
+## marches, splits and merges. It owns nothing: `units` still holds every
+## soldier, a company only references them, and a soldier is in at most one.
+##
+## companies: company id -> {"id", "name", "width", "members": Array of unit id}
+## _unit_company: unit id -> company id, the reverse index.
+##
+## Both are plain dictionaries, so "which company is this soldier in" is one
+## hash lookup — the reverse index exists precisely so nothing has to walk the
+## roster to answer it. Storage is one entry per company plus one int per
+## enlisted soldier: O(companies + soldiers).
+##
+## No tick() work scans either table: the one that reads them per frame is
+## `_leave_company`, on the death path in `_unregister_unit`, and it costs one
+## hash lookup plus an erase from that one company's roster. What walks
+## linearly is `command` and `selection_report`, and both
+## walk only the id list they are handed — one order, one selection — doing an
+## O(1) index lookup per id; plus one company's own roster when its block is
+## laid out. Nothing scans the army to answer a question about one soldier.
+var companies: Dictionary = {}
+var _unit_company: Dictionary = {}
+var _next_company_ordinal := 1
 
 func setup(p_sim: Simulation, p_world: World, p_registry: AssetRegistry) -> void:
 	sim = p_sim
@@ -382,6 +416,216 @@ func info() -> Dictionary:
 		"rival_name":report.get("name", "No settlement reported"),
 		"status":"At war. Protect your food relays." if at_war else "Send scouts to learn about neighboring settlements."}
 
+# ---------------------------------------------------------------------------
+# Companies
+# ---------------------------------------------------------------------------
+
+func company_of(unit_id: int) -> int:
+	return _unit_company.get(unit_id, -1)
+
+
+func company_members(company_id: int) -> Array[int]:
+	var members: Array[int] = []
+	if companies.has(company_id): members.assign(companies[company_id].members)
+	return members
+
+
+## One company described for the interface, empty when there is no such
+## company. `company_report(company_of(id))` is how the panel asks about a
+## soldier, and it answers empty for a soldier who marches loose — which is a
+## legal thing to be, select and order.
+func company_report(company_id: int) -> Dictionary:
+	if not companies.has(company_id): return {}
+	var company: Dictionary = companies[company_id]
+	return {"id": company.id, "name": company.name, "width": company.width,
+		"size": company.members.size()}
+
+
+func _company_name() -> String:
+	var ordinal := _next_company_ordinal
+	_next_company_ordinal += 1
+	var suffix := "th"
+	if ordinal % 100 < 11 or ordinal % 100 > 13:
+		match ordinal % 10:
+			1: suffix = "st"
+			2: suffix = "nd"
+			3: suffix = "rd"
+	return "%d%s Company" % [ordinal, suffix]
+
+
+## Drop one soldier from whatever company holds him. A company is its soldiers:
+## the last one to leave — killed, discharged, or taken into another company —
+## takes the company with him, rather than leaving an empty name behind for the
+## interface to offer and for `capture` to write out.
+func _leave_company(unit_id: int) -> void:
+	var company_id: int = _unit_company.get(unit_id, -1)
+	if company_id < 0: return
+	_unit_company.erase(unit_id)
+	if not companies.has(company_id): return
+	var company: Dictionary = companies[company_id]
+	company.members.erase(unit_id)
+	if company.members.is_empty(): companies.erase(company_id)
+
+
+## The one mutator: these soldiers, and only these, become one company.
+##
+## Forming, splitting and merging are the same act seen from three angles — a
+## loose selection becomes a company, part of a company becomes a new one, and
+## two companies become one — so the player learns a single verb and
+## `split_company`/`merge_companies` below are thin, checked wrappers over it.
+## Returns the new company id, or -1 when the selection holds no living
+## soldier of ours, or when forming would leave more than MAX_COMPANIES.
+func form_company(ids: Array, width: int = 0, company_name: String = "") -> int:
+	var members: Array = []
+	var seen := {}
+	for id in ids:
+		if not id is int or seen.has(id): continue
+		var u: Soldier = units.get(id)
+		if u == null or u.faction != 0 or u.health <= 0.0: continue
+		seen[id] = true
+		members.append(id)
+	if members.is_empty(): return -1
+	# The ceiling counts the companies that will still exist afterwards. A merge
+	# at the cap empties the companies it draws from, so testing the raw size
+	# here would refuse the one operation that gets the player back under it.
+	var drawn := {}
+	for id in members:
+		var previous: int = _unit_company.get(id, -1)
+		if previous >= 0: drawn[previous] = int(drawn.get(previous, 0)) + 1
+	var vacated := 0
+	for previous in drawn:
+		if drawn[previous] >= companies[previous].members.size(): vacated += 1
+	if companies.size() - vacated >= MAX_COMPANIES: return -1
+	if width <= 0:
+		# Shape is inherited, not re-derived, so a detachment split off a
+		# six-wide line marches six wide. Nothing in the game makes a six-wide
+		# line yet — see COMPANY_WIDTH — so today this only carries the default
+		# through a split; it is why width lives on the company rather than
+		# being invented afresh by each order.
+		width = COMPANY_WIDTH
+		for id in members:
+			var previous: int = _unit_company.get(id, -1)
+			if companies.has(previous):
+				width = companies[previous].width
+				break
+	# Ascending id rather than the order the selection happened to be
+	# assembled in, so a soldier holds the same file in the block from one
+	# order to the next and the roster a save writes does not depend on clicks.
+	members.sort()
+	for id in members: _leave_company(id)
+	var company_id := _allocate()
+	companies[company_id] = {"id": company_id, "width": clampi(width, 1, MAX_COMPANY_WIDTH),
+		"name": company_name.substr(0, 60) if company_name != "" else _company_name(),
+		"members": members}
+	for id in members: _unit_company[id] = company_id
+	return company_id
+
+
+## Peel part of a company off into a new one. Which part is the player's
+## current selection, not a count: soldiers are not interchangeable here — they
+## carry their own armor and their own injuries — so "these four" is a
+## meaningful order in a way that "the first half of the roster" is not.
+## Taking the whole company is refused; that is a rename, not a split.
+func split_company(company_id: int, ids: Array) -> int:
+	if not companies.has(company_id): return -1
+	var leaving: Array = []
+	var seen := {}
+	for id in ids:
+		if not id is int or seen.has(id) or _unit_company.get(id, -1) != company_id: continue
+		seen[id] = true
+		leaving.append(id)
+	if leaving.is_empty() or leaving.size() >= companies[company_id].members.size(): return -1
+	return form_company(leaving, companies[company_id].width)
+
+
+## Merge came free: the union of the rosters forms one company and the emptied
+## originals disband themselves in `_leave_company`.
+func merge_companies(ids: Array) -> int:
+	var members: Array = []
+	var seen := {}
+	var width := 0
+	var order: Array = []
+	for company_id in ids:
+		if company_id is int: order.append(company_id)
+	# Frontage comes from the lowest-numbered company, not from whichever one
+	# the caller happened to name first.
+	order.sort()
+	for company_id in order:
+		if seen.has(company_id) or not companies.has(company_id): continue
+		seen[company_id] = true
+		if width <= 0: width = companies[company_id].width
+		members.append_array(companies[company_id].members)
+	if seen.size() < 2: return -1
+	return form_company(members, width)
+
+
+func disband_company(company_id: int) -> bool:
+	if not companies.has(company_id): return false
+	for id in companies[company_id].members: _unit_company.erase(id)
+	companies.erase(company_id)
+	return true
+
+
+func set_company_width(company_id: int, width: int) -> bool:
+	if not companies.has(company_id) or width < 1 or width > MAX_COMPANY_WIDTH: return false
+	companies[company_id].width = width
+	return true
+
+
+## What a selection of soldiers amounts to, so the interface can name one
+## button honestly instead of guessing. `split_from` is the company the
+## selection is a strict part of; `whole` is the company it covers exactly.
+func selection_report(ids: Array) -> Dictionary:
+	var counts := {}
+	var loose := 0
+	var total := 0
+	var seen := {}
+	for id in ids:
+		if not id is int or seen.has(id): continue
+		var u: Soldier = units.get(id)
+		if u == null or u.faction != 0 or u.health <= 0.0: continue
+		seen[id] = true
+		total += 1
+		var company_id: int = _unit_company.get(id, -1)
+		if company_id < 0: loose += 1
+		else: counts[company_id] = int(counts.get(company_id, 0)) + 1
+	var rows: Array = []
+	var keys: Array = counts.keys()
+	keys.sort()
+	for company_id in keys:
+		var row := company_report(company_id)
+		row.selected = counts[company_id]
+		rows.append(row)
+	var whole := -1
+	var split_from := -1
+	if rows.size() == 1 and loose == 0:
+		if rows[0].selected >= rows[0].size: whole = rows[0].id
+		else: split_from = rows[0].id
+	# A merge takes whole rosters. Offering it for a selection that holds only
+	# part of a company would sweep men the player never selected into the new
+	# one — so it is only a merge when every company named is wholly selected;
+	# otherwise the selection itself forms the company, as the button says.
+	var mergeable := loose == 0 and rows.size() >= 2
+	for row in rows:
+		if row.selected < row.size: mergeable = false
+	return {"total": total, "loose": loose, "companies": rows,
+		"whole": whole, "split_from": split_from, "mergeable": mergeable}
+
+
+## How many files of ground `size` men take when they march `width` files wide
+## and fold after `ranks` ranks. A fold keeps each panel `width` files wide and
+## sets the panels flush beside one another, so a company too deep for the map
+## still reads as one solid block rather than as several companies.
+##
+## The measurement that chooses which way the parade grows and the layout that
+## places it must agree about this, so they ask the same function: when they
+## disagreed, the parade committed to ground it then overran.
+static func _files(size: int, width: int, ranks: int) -> int:
+	var per_panel := width * ranks
+	var panels := (size - 1) / per_panel + 1
+	return (panels - 1) * width + mini(width, size - (panels - 1) * per_panel)
+
+
 func command(ids: Array[int], ground: Vector3, target: Dictionary = {}) -> void:
 	if defeated or not _position(ground, world.size_m):
 		return
@@ -396,24 +640,133 @@ func command(ids: Array[int], ground: Vector3, target: Dictionary = {}) -> void:
 			return
 	else:
 		target_kind = ""
-	var offset := 0
+	# Sorted into the companies the commanded soldiers belong to, so each one
+	# arrives in its own shape, side by side, instead of every order inventing
+	# one anonymous four-wide grid. `command` has one production caller — the
+	# right-click order in game.gd — and a selection may hold loose men too;
+	# those land in the -1 group, which sorts first and so takes the head of
+	# the parade, in the four-wide grid a bare id list has always formed.
+	var groups := {}
 	var commanded := {}
 	for id in ids:
 		var u: Soldier = units.get(id)
 		if u == null or u.faction != 0 or u.health <= 0.0 or commanded.has(id): continue
 		commanded[id] = true
-		u.target_id = target_id
-		u.target_kind = target_kind
-		if u.target_id >= 0:
-			at_war = true
-			u.task_label = "attacking " + rival_name
-		else:
-			u.task_label = "marching"
-		var destination := ground + Vector3((offset % 4)*2,0,(offset / 4)*2)
-		destination.x = clampf(destination.x, 0.5, world.size_m - 0.5)
-		destination.z = clampf(destination.z, 0.5, world.size_m - 0.5)
-		u.order_move(destination)
-		offset += 1
+		var key: int = _unit_company.get(id, -1)
+		if not groups.has(key): groups[key] = []
+		groups[key].append(id)
+	var keys: Array = groups.keys()
+	keys.sort()
+	# The front rank lands on `ground` exactly, at every scale — to within the
+	# half-metre border the clamp below keeps everyone inside, which only bites
+	# for a click in the outermost half metre of the map. An earlier draft
+	# pulled the origin back by the whole parade's span so the tail would stay
+	# on the map, which marched 2,000 loose men to the northern edge whatever
+	# the player clicked: an order that arrives somewhere else is a worse fault
+	# than one that arrives crowded, so the origin is fixed and the shape gives.
+	#
+	# It gives three ways. The parade grows away from the nearer map edge, so a
+	# click in a corner forms inland. A company's column folds into further
+	# files once it is deeper than the ground behind the click — 2,000 men four
+	# wide want a kilometre of depth on a 768 m map. And the row of companies
+	# wraps into a second band once it is wider — 512 four-wide companies want
+	# five kilometres of frontage. Without those, everything past the map's edge
+	# collapsed onto the clamped half-metre below, stacked on one spot.
+	var east := maxf(0.0, world.size_m - 0.5 - ground.x)
+	var west := maxf(0.0, ground.x - 0.5)
+	var south := maxf(0.0, world.size_m - 0.5 - ground.z)
+	var north := maxf(0.0, ground.z - 0.5)
+	# Frontage is measured after the fold, through the same `_files` the layout
+	# uses. Measuring it before was worse than useless: a 2,000-man column four
+	# wide folds to twelve files, and reading the unfolded four let an order
+	# ten metres from the east edge decide nine metres of room was enough. 848
+	# of those 2,000 were then clamped onto the border, on top of each other.
+	#
+	# The depth it folds at here is the roomier side, which is the shallowest
+	# the layout can settle on: `sz` falls back to that side whenever the near
+	# one is too shallow, and when it does not fall back, the block is shallow
+	# enough that it never folds at all, so the two agree.
+	var deep := maxi(1, int(maxf(south, north) / FILE_SPACING) + 1)
+	var want_x := 0.0
+	var want_z := 0.0
+	for key in keys:
+		var size: int = groups[key].size()
+		var w: int = companies[key].width if companies.has(key) else COMPANY_WIDTH
+		want_x += float(_files(size, w, deep) - 1) * FILE_SPACING + COMPANY_GAP
+		want_z = maxf(want_z, float(mini(deep, (size - 1) / w + 1) - 1) * FILE_SPACING)
+	want_x = maxf(0.0, want_x - COMPANY_GAP)
+	# East and south unless the parade will not fit that way and the far side
+	# is roomier, so an ordinary order keeps the layout it has always had and
+	# only one that genuinely runs off the map turns around.
+	var sx := 1.0 if want_x <= east or east >= west else -1.0
+	var room_x: float = east if sx > 0.0 else west
+	# Wrapping buys frontage with depth, so the depth that decides which way
+	# the parade grows is the deepest block times the bands it will take, not
+	# one block's. Reading one block's sent 500 four-man companies south from a
+	# corner: seven bands' worth of them, laid on top of one another.
+	#
+	# The bands are counted by replaying the wrap below rather than by dividing
+	# frontage by room, because a band cannot split a company: dividing said
+	# seven where the layout then took eight, and the eighth ran off the map.
+	var bands := 1
+	var run := 0.0
+	for key in keys:
+		var cols := _files(groups[key].size(),
+				companies[key].width if companies.has(key) else COMPANY_WIDTH, deep)
+		if run > 0.0 and run + float(cols - 1) * FILE_SPACING > room_x:
+			run = 0.0
+			bands += 1
+		run += float(cols - 1) * FILE_SPACING + COMPANY_GAP
+	var sz := 1.0 if float(bands) * want_z + float(bands - 1) * COMPANY_GAP <= south \
+			or south >= north else -1.0
+	var room_z: float = south if sz > 0.0 else north
+	# Shallow enough that every band fits in the room there is.
+	var ranks := maxi(1, int((room_z - float(bands - 1) * COMPANY_GAP)
+			/ float(bands) / FILE_SPACING) + 1)
+	var lane := 0.0
+	var band := 0.0
+	var band_depth := 0.0
+	for key in keys:
+		var block: Array = groups[key]
+		var width := COMPANY_WIDTH
+		if companies.has(key):
+			width = companies[key].width
+			# Walk the company's own roster, not the order the ids arrived in,
+			# so the same men laid out twice take the same files however the
+			# selection was assembled. Order a company in part and the men who
+			# came close up, as they would.
+			block = []
+			for id in companies[key].members:
+				if commanded.has(id): block.append(id)
+		var per_panel := width * ranks
+		var cols := _files(block.size(), width, ranks)
+		if lane > 0.0 and lane + float(cols - 1) * FILE_SPACING > room_x:
+			lane = 0.0
+			band += band_depth + COMPANY_GAP
+			band_depth = 0.0
+		var offset := 0
+		for id in block:
+			var u: Soldier = units[id]
+			u.target_id = target_id
+			u.target_kind = target_kind
+			if u.target_id >= 0:
+				at_war = true
+				u.task_label = "attacking " + rival_name
+			else:
+				u.task_label = "marching"
+			var seat := offset % per_panel
+			var destination := ground + Vector3(
+					sx * (lane + float((offset / per_panel) * width + seat % width) * FILE_SPACING), 0,
+					sz * (band + float(seat / width) * FILE_SPACING))
+			# The last net, for a parade bigger than the map itself: a man told
+			# to march off the edge would never arrive.
+			destination.x = clampf(destination.x, 0.5, world.size_m - 0.5)
+			destination.z = clampf(destination.z, 0.5, world.size_m - 0.5)
+			u.order_move(destination)
+			offset += 1
+		band_depth = maxf(band_depth,
+				float(mini(ranks, (block.size() - 1) / width + 1) - 1) * FILE_SPACING)
+		lane += float(cols - 1) * FILE_SPACING + COMPANY_GAP
 
 func pick_target(origin: Vector3, direction: Vector3) -> Dictionary:
 	var q := PhysicsRayQueryParameters3D.create(origin,origin+direction*4000.0,8)
@@ -724,6 +1077,9 @@ func _release_home(unit: Soldier) -> void:
 func _unregister_unit(unit: Soldier) -> void:
 	units.erase(unit.id)
 	_civilian_ids.erase(unit.id)
+	# The one choke point every death, discharge and conquest already passes
+	# through, so a company can never hold an id that `units` no longer does.
+	_leave_company(unit.id)
 	unit.target_id = -1
 	unit.target_kind = ""
 	for other in units.values():
@@ -898,11 +1254,21 @@ func capture() -> Dictionary:
 		var buildings_by_id: Dictionary = enemy_buildings if event.faction == 0 else sim.buildings_by_id
 		if buildings_by_id.has(event.id):
 			impacts.append(event.duplicate())
+	# Sorted by id rather than by dictionary order: forming and disbanding
+	# reorder the table, and a save must not depend on that history.
+	var roster: Array = []
+	var company_ids: Array = companies.keys()
+	company_ids.sort()
+	for company_id in company_ids:
+		var company: Dictionary = companies[company_id]
+		roster.append({"id": company.id, "name": company.name,
+			"width": company.width, "members": company.members.duplicate()})
 	return {"personality": personality, "rival_name": rival_name, "town_population": town_population,
 		"rival_position": rival_position, "at_war": at_war, "defeated": defeated,
 		"conquered": conquered, "next_id": _next_id, "time": _time, "review": _review,
 		"recruit_at": _recruit_at, "rng_state": _rng.state, "buildings": buildings,
 		"units": army, "workers": workers, "ruins": _ruins.duplicate(true), "impacts": impacts,
+		"companies": roster, "next_company_ordinal": _next_company_ordinal,
 		"security": {"cooldown": _contact_cooldown, "visible_ids": _visible_contacts.duplicate(),
 			"pending": _contact_pending, "was_at_war": _contact_war}}
 
@@ -926,6 +1292,9 @@ func _reset() -> void:
 	_impacts.clear()
 	_visible_contacts.clear()
 	_guard_contacts.clear()
+	companies.clear()
+	_unit_company.clear()
+	_next_company_ordinal = 1
 	# _reset frees its children outright, so no cached candidate may outlive it.
 	_patients.clear()
 	_contact_cooldown = 0.0
@@ -1005,6 +1374,17 @@ func restore(data: Variant) -> String:
 		u._goal = entry.goal
 		if entry.moving:
 			u.order_move(entry.goal)
+	# Optional, like every field added after save version 1: a save written
+	# before companies existed simply has none, and the numbering restarts.
+	_next_company_ordinal = data.get("next_company_ordinal", 1)
+	for entry in data.get("companies", []):
+		var members: Array = []
+		for id in entry.members:
+			if units.has(id): members.append(id)
+		if members.is_empty(): continue
+		companies[entry.id] = {"id": entry.id, "name": entry.name,
+			"width": entry.width, "members": members}
+		for id in members: _unit_company[id] = entry.id
 	for entry in data.workers:
 		var c := Citizen.new()
 		add_child(c)
@@ -1197,6 +1577,36 @@ static func validate(data: Variant, friendly_buildings: Variant = null, world_si
 				return "invalid friendly building target"
 			if u.faction == 1 and friendly_buildings != null and not friendly_buildings.has(u.target_id):
 				return "soldier targets a missing friendly building"
+	# Companies are optional and checked here, after `armies` is complete, so a
+	# roster can be held to real living soldiers of ours. Every read goes
+	# through `get`, so a save written before companies existed passes
+	# untouched. Nothing below may throw: this is untrusted data.
+	if not data.get("next_company_ordinal", 1) is int \
+			or not _number(data.get("next_company_ordinal", 1), 1, 1e9):
+		return "invalid company numbering"
+	var roster: Variant = data.get("companies", [])
+	if not roster is Array or roster.size() > MAX_COMPANIES:
+		return "invalid company roster"
+	var enlisted := {}
+	for company in roster:
+		if not company is Dictionary:
+			return "invalid company"
+		for key in ["id", "name", "width", "members"]:
+			if not company.has(key):
+				return "incomplete company"
+		if not company.id is int or company.id < 100000 or company.id >= data.next_id or ids.has(company.id):
+			return "invalid company id"
+		ids[company.id] = true
+		if not company.name is String or company.name.is_empty() or company.name.length() > 60:
+			return "invalid company name"
+		if not company.width is int or company.width < 1 or company.width > MAX_COMPANY_WIDTH:
+			return "invalid company formation"
+		if not company.members is Array or company.members.is_empty() or company.members.size() > 65536:
+			return "invalid company strength"
+		for id in company.members:
+			if not id is int or not armies.has(id) or armies[id].faction != 0 or enlisted.has(id):
+				return "company roster holds a missing, hostile or twice-enlisted soldier"
+			enlisted[id] = true
 	if data.workers.size() > 3:
 		return "too many rival workers"
 	if data.workers.size() > data.get("town_population", 8):

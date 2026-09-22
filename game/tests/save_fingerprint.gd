@@ -232,6 +232,45 @@ func _run() -> void:
 		campaign.rival_name = "Changed settlement"
 		_detects(before, "campaign.rival_name", "detects changed rival settlement identity")
 		campaign.rival_name = town
+		# A company is the one piece of campaign state with no physical body to
+		# betray its loss: a dropped roster leaves every soldier standing where
+		# he was, so a save that quietly stopped writing rosters would reload
+		# looking perfectly correct. The fingerprint reads `companies` from the
+		# live table for exactly that reason, and this proves it does -- the
+		# baseline is taken after the company exists so that forming it is not
+		# itself the drift being detected.
+		# The fixture musters no militia of its own -- its only soldiers are the
+		# rival's guards -- so the check spawns two of ours, exactly as
+		# `campaign.gd` does. They are left in place afterwards: every check
+		# below looks for a named path in the drift, so the extra soldiers and
+		# the advanced id counter cannot mask one.
+		var friendly: Array = []
+		for candidate in campaign.units.values():
+			if candidate.faction == 0 and candidate.health > 0.0:
+				friendly.append(candidate.id)
+		if friendly.size() < 2:
+			var muster_at: Vector3 = sim.keep.position + Vector3(6, 0, 6)
+			for i in 2:
+				var recruit = campaign._spawn_unit(0, muster_at + Vector3(float(i) * 2.0, 0, 0))
+				if recruit != null: friendly.append(recruit.id)
+		_check(friendly.size() >= 2,
+				"the fingerprint fixture can field two soldiers for the company check")
+		if friendly.size() >= 2:
+			var company_id: int = campaign.form_company(friendly, 2, "Fingerprint Company")
+			_check(company_id > 0, "a company can be formed for the fingerprint check")
+			if company_id > 0:
+				var formed: Dictionary = _harness._fingerprint()
+				var roster: Array = campaign.companies[company_id].members.duplicate()
+				campaign.companies[company_id].members.remove_at(roster.size() - 1)
+				_detects(formed, "campaign.companies.%d.members" % company_id,
+						"detects a company losing a soldier from its roster")
+				campaign.companies[company_id].members.assign(roster)
+				var width: int = campaign.companies[company_id].width
+				campaign.companies[company_id].width = width + 1
+				_detects(formed, "campaign.companies.%d.width" % company_id,
+						"detects a changed company frontage")
+				campaign.companies[company_id].width = width
+				campaign.disband_company(company_id)
 	if not plots.is_empty():
 		var original_plot := plots[0]
 		plots[0] += Vector3(0.125, 0, 0)

@@ -316,9 +316,474 @@ func _foundation_save() -> void:
 	await process_frame
 
 
+## Companies: the block between "one soldier" and "the whole army". Every check
+## here was mutation-tested — the guarded behaviour was broken, the check was
+## confirmed to fail, and the break reverted.
+func _companies() -> void:
+	var game := _new_game(42)
+	var sim := game.sim
+	var campaign: FrontierCampaign = sim.campaign
+	campaign.set_personality("peaceful")
+	var at := sim.entrance_of(sim.keep, "att_entrance")
+	var squad: Array[int] = []
+	for i in 6:
+		var recruit := campaign._spawn_unit(0, at + Vector3(float(i) * 2.0, 0, 0))
+		recruit.position.y = game.world.heightmap.height_at(recruit.position.x, recruit.position.z)
+		recruit._wear_anchor = recruit.position
+		squad.append(recruit.id)
+	var guard_id: int = campaign.units.values().filter(func(u): return u.faction == 1)[0].id
+
+	var muster_ground := game.world.centre() + Vector3(0, 0, 70)
+	muster_ground.y = game.world.heightmap.height_at(muster_ground.x, muster_ground.z)
+	campaign.command(squad, muster_ground)
+	_check(campaign.units[squad[0]]._goal.is_equal_approx(muster_ground)
+			and campaign.units[squad[3]]._goal.is_equal_approx(muster_ground + Vector3(6, 0, 0))
+			and campaign.units[squad[4]]._goal.is_equal_approx(muster_ground + Vector3(0, 0, 2)),
+			"a bare id list with no companies still forms the four-wide grid it always did")
+
+	var first := campaign.form_company([squad[0], squad[1], squad[2], squad[3]])
+	_check(first > 0 and campaign.company_members(first) == [squad[0], squad[1], squad[2], squad[3]]
+			and campaign.company_of(squad[0]) == first and campaign.company_of(squad[4]) == -1,
+			"forming a company enlists exactly the named soldiers and leaves the rest loose")
+	_check(campaign.form_company([]) == -1 and campaign.form_company([999999, -3]) == -1
+			and campaign.form_company([guard_id]) == -1 and campaign.companies.size() == 1,
+			"a company cannot be formed from nothing, from unknown ids or from rival guards")
+	_check(campaign.set_company_width(first, 2) and not campaign.set_company_width(first, 0)
+			and not campaign.set_company_width(first, FrontierCampaign.MAX_COMPANY_WIDTH + 1)
+			and campaign.companies[first].width == 2,
+			"a company's frontage is the company's own, and out-of-range shapes are refused")
+	# `set_company_width` refuses out-of-range shapes; `form_company` takes one
+	# straight from a caller and has to clamp it instead, or the company it
+	# builds is a save that `validate` will refuse to load back.
+	var overwide := campaign.form_company([squad[4], squad[5]], 999)
+	_check(overwide > 0 and campaign.companies[overwide].width == FrontierCampaign.MAX_COMPANY_WIDTH
+			and FrontierCampaign.validate(campaign.capture()) == "",
+			"a frontage past the ceiling is clamped as the company forms rather than saved and rejected on load")
+	campaign.disband_company(overwide)
+
+	# A company reaches one man by a split or by casualties, and the block
+	# panel that carries the disband button needs two soldiers to appear. His
+	# own panel has to name the company and offer the way out, or he is
+	# enlisted for good in a company with no name on screen.
+	var lone := campaign.form_company([squad[5]], 3)
+	game._select_unit(squad[5], false, false)
+	var disband_button: Button = null
+	for child in game.hud._selection_actions.get_children():
+		if child is Button and child.text.begins_with("Disband"): disband_button = child
+	_check(game.selected_units == [squad[5]] and disband_button != null
+			and game.hud._selection_body.text.contains(campaign.company_report(lone).name),
+			"the panel for a lone soldier names the one-man company he marches with and offers to disband it")
+	if disband_button != null: disband_button.pressed.emit()
+	_check(not campaign.companies.has(lone) and campaign.company_of(squad[5]) == -1
+			and campaign.units.has(squad[5]),
+			"pressing it really disbands the one-man company and leaves the soldier himself untouched")
+
+	game._select_unit(squad[1], false, false)
+	_check(game.selected_units.size() == 4 and game.selected_units.has(squad[0])
+			and game.selected_units.has(squad[3]) and not game.selected_units.has(squad[4]),
+			"clicking one soldier selects the whole company he marches with")
+	game._select_unit(squad[4], false, false)
+	_check(game.selected_units == [squad[4]],
+			"clicking a soldier who is in no company still selects just him")
+	game._select_unit(squad[1], false, true)
+	_check(game.selected_units == [squad[1]],
+			"Alt-click takes one soldier back out of his company")
+	game._select_unit(squad[4], true, false)
+	_check(game.selected_units.size() == 2 and game.selected_units.has(squad[1])
+			and game.selected_units.has(squad[4]),
+			"Shift-click adds to the selection instead of replacing it")
+	game._select_unit(squad[4], true, false)
+	_check(game.selected_units == [squad[1]],
+			"Shift-clicking soldiers already held takes them back out again")
+	game.selected_units.assign([guard_id])
+	game._select_unit(squad[4], true, false)
+	_check(game.selected_units == [squad[4]],
+			"Shift-click never carries a rival guard into a selection of our own soldiers")
+
+	game._select_unit(squad[0], false, true)
+	game._select_unit(squad[1], true, true)
+	game._regroup_selection()
+	var detached := campaign.company_of(squad[0])
+	_check(detached > 0 and detached != first
+			and campaign.company_members(detached) == [squad[0], squad[1]]
+			and campaign.company_members(first) == [squad[2], squad[3]]
+			and campaign.companies[detached].width == 2,
+			"splitting peels the selected soldiers into a new company that inherits the old shape")
+	_check(campaign.split_company(first, [squad[2], squad[3]]) == -1
+			and campaign.split_company(first, [squad[0]]) == -1
+			and campaign.company_members(first) == [squad[2], squad[3]],
+			"a split refuses to take a whole company or a soldier who belongs to another")
+
+	var inherited := campaign.form_company([squad[2], squad[4]])
+	_check(inherited > 0 and campaign.companies[inherited].width == 2
+			and campaign.company_members(first) == [squad[3]],
+			"forming without a stated shape inherits it from a member's old company")
+	var fresh := campaign.form_company([squad[5]])
+	_check(fresh > 0 and campaign.companies[fresh].width == FrontierCampaign.COMPANY_WIDTH,
+			"soldiers with no past company fall back to the default frontage instead")
+	campaign.disband_company(fresh)
+	campaign.disband_company(inherited)
+	first = campaign.form_company([squad[2], squad[3]], 2)
+	detached = campaign.form_company([squad[0], squad[1]], 5)
+
+	# Named youngest first, and holding the higher-numbered company's soldiers
+	# first, so neither the argument order nor the click order can be mistaken
+	# for the id order both of these are supposed to impose.
+	var listed: Dictionary = campaign.selection_report([squad[0], squad[1], squad[2], squad[3]])
+	_check(listed.companies.size() == 2 and listed.companies[0].id == first
+			and listed.companies[1].id == detached and listed.mergeable,
+			"a selection report lists companies by id, not by the order the selection was assembled")
+
+	var merged := campaign.merge_companies([detached, first])
+	_check(merged > 0 and campaign.company_members(merged) == [squad[0], squad[1], squad[2], squad[3]]
+			and campaign.companies[merged].width == 2
+			and not campaign.companies.has(first) and not campaign.companies.has(detached)
+			and campaign.merge_companies([merged]) == -1,
+			"merging leaves one roster and no emptied companies, takes its frontage from the lowest-numbered company whichever was named first, and refuses a merge of one")
+
+	var spare := campaign.form_company([squad[4], squad[5]], 1)
+	game.selected_units.assign([squad[0], squad[1], squad[2], squad[3], squad[4]])
+	game._regroup_selection()
+	var regrouped := campaign.company_members(campaign.company_of(squad[0]))
+	_check(regrouped == [squad[0], squad[1], squad[2], squad[3], squad[4]]
+			and campaign.company_of(squad[5]) == spare
+			and campaign.companies[spare].members == [squad[5]],
+			"regrouping part of one company and all of another takes the selection, not the unselected men")
+	campaign.disband_company(campaign.company_of(squad[0]))
+	campaign.disband_company(spare)
+
+	var left := campaign.form_company([squad[0], squad[1], squad[2]], 2)
+	var right := campaign.form_company([squad[3], squad[4]], 1)
+	var ground := game.world.centre() + Vector3(0, 0, 40)
+	ground.y = game.world.heightmap.height_at(ground.x, ground.z)
+	campaign.command([squad[0], squad[1], squad[2]], ground)
+	_check(campaign.units[squad[0]]._goal.is_equal_approx(ground)
+			and campaign.units[squad[1]]._goal.is_equal_approx(ground + Vector3(2, 0, 0))
+			and campaign.units[squad[2]]._goal.is_equal_approx(ground + Vector3(0, 0, 2)),
+			"a two-file company marches two files wide, from its own shape rather than the order's")
+	campaign.units[squad[0]].clear_goal()
+	campaign.units[squad[1]].clear_goal()
+	campaign.units[squad[2]].clear_goal()
+	campaign.command([squad[2], squad[0], squad[1]], ground)
+	_check(campaign.units[squad[0]]._goal.is_equal_approx(ground)
+			and campaign.units[squad[2]]._goal.is_equal_approx(ground + Vector3(0, 0, 2)),
+			"the block follows the company's own roster however the order's ids were assembled")
+	var second_ground := ground + Vector3(0, 0, 30)
+	second_ground.y = game.world.heightmap.height_at(second_ground.x, second_ground.z)
+	campaign.command(campaign.friendly_ids(), second_ground)
+	var lanes := {}
+	for id in campaign.friendly_ids():
+		var key: int = campaign.company_of(id)
+		var x: float = campaign.units[id]._goal.x
+		if not lanes.has(key): lanes[key] = [x, x]
+		lanes[key][0] = minf(lanes[key][0], x)
+		lanes[key][1] = maxf(lanes[key][1], x)
+	var disjoint := true
+	for a in lanes:
+		for b in lanes:
+			if a < b and lanes[a][1] >= lanes[b][0]: disjoint = false
+	_check(lanes.size() == 3 and disjoint,
+			"mustering the whole army lands each company and the loose men on ground of their own")
+
+	var corner := Vector3(game.world.size_m - 1.0, 0, game.world.size_m - 1.0)
+	corner.y = game.world.heightmap.height_at(corner.x, corner.z)
+	campaign.command(campaign.friendly_ids(), corner)
+	var corner_lanes := {}
+	for id in campaign.friendly_ids():
+		corner_lanes[campaign.units[id]._goal.x] = true
+	_check(corner_lanes.size() >= 3 and campaign.units[squad[0]]._goal.x < corner.x,
+			"an order against the map edge forms the parade inland instead of stacking every company on one spot")
+
+	var saved := campaign.capture()
+	# Read through `get`, and bail rather than run on: a capture that dropped
+	# the roster would otherwise abort this function on the fixtures below and
+	# leave the suite reporting success over checks that never ran.
+	var written: Array = saved.get("companies", [])
+	# No claim about ordering here: the fixture formed its companies in
+	# ascending id, which is the only order live play can produce, so asserting
+	# it would pass with `capture` sorting nothing. The shuffled fixture below
+	# is the one that tests the sort, because `restore` can seed the table in
+	# any order a hand-edited save asks for.
+	_check(FrontierCampaign.validate(saved) == "" and written.size() == 2,
+			"a campaign holding companies produces a valid save")
+	if written.size() != 2:
+		game.free()
+		await process_frame
+		return
+	_check(campaign.restore(saved) == "" and campaign.capture() == saved
+			and campaign.company_of(squad[0]) == left
+			and campaign.company_members(left) == [squad[0], squad[1], squad[2]]
+			and campaign.companies[left].width == 2 and campaign.companies[right].width == 1
+			and campaign.companies[left].name == saved.companies[0].name,
+			"company rosters, names and shapes round-trip exactly and rebuild the reverse index")
+
+	# The rosters a save carries are copies. Sharing the array would let the
+	# save layer above — compression, validation, a future migration pass —
+	# reach into the living army by editing what it was handed, and nothing
+	# about the reloaded game would look wrong until the roster did.
+	var snapshot := campaign.capture()
+	var before_left: Array[int] = campaign.company_members(left)
+	var before_right: Array[int] = campaign.company_members(right)
+	for company in snapshot.companies:
+		company.members.append(-1)
+	_check(campaign.company_members(left) == before_left
+			and campaign.company_members(right) == before_right
+			and FrontierCampaign.validate(campaign.capture()) == "",
+			"a captured save copies the rosters rather than aliasing them, so editing the save enlists nobody")
+
+	var shuffled := saved.duplicate(true)
+	shuffled.companies.reverse()
+	_check(FrontierCampaign.validate(shuffled) == "" and campaign.restore(shuffled) == ""
+			and campaign.capture() == saved,
+			"a save whose companies were written out of order comes back in id order, so capture stays a function of state")
+
+	var malformed: Array = []
+	var bad := saved.duplicate(true)
+	bad.companies[0].members.append(bad.companies[0].members[0])
+	malformed.append(bad)
+	bad = saved.duplicate(true)
+	bad.companies[0].members[0] = guard_id
+	malformed.append(bad)
+	bad = saved.duplicate(true)
+	bad.companies[0].members[0] = 987654
+	malformed.append(bad)
+	bad = saved.duplicate(true)
+	bad.companies[0].members = []
+	malformed.append(bad)
+	bad = saved.duplicate(true)
+	bad.companies[0].id = bad.units[0].id
+	malformed.append(bad)
+	bad = saved.duplicate(true)
+	bad.companies[0].width = 0
+	malformed.append(bad)
+	bad = saved.duplicate(true)
+	bad.companies[0].name = 7
+	malformed.append(bad)
+	bad = saved.duplicate(true)
+	bad.companies[0].erase("members")
+	malformed.append(bad)
+	bad = saved.duplicate(true)
+	bad.companies[0] = "a company"
+	malformed.append(bad)
+	bad = saved.duplicate(true)
+	bad.companies = {}
+	malformed.append(bad)
+	bad = saved.duplicate(true)
+	bad.next_company_ordinal = 0
+	malformed.append(bad)
+	var atomic := true
+	for data in malformed:
+		atomic = atomic and campaign.restore(data) != "" and campaign.capture() == saved
+	_check(atomic, "malformed company data is rejected cleanly, before the living army is touched")
+
+	var whole_save := SaveGame.capture(game)
+	var error := game.restore_from(whole_save)
+	campaign = game.sim.campaign
+	_check(error == "" and campaign.company_of(squad[0]) == left
+			and campaign.company_members(left) == [squad[0], squad[1], squad[2]]
+			and campaign.company_members(right) == [squad[3], squad[4]],
+			"a full SaveGame capture and staged load keeps every roster: " + error)
+
+	var legacy := saved.duplicate(true)
+	legacy.erase("companies")
+	legacy.erase("next_company_ordinal")
+	_check(FrontierCampaign.validate(legacy) == "" and campaign.restore(legacy) == ""
+			and campaign.companies.is_empty() and campaign.company_of(squad[0]) == -1
+			and campaign.units.size() == saved.units.size(),
+			"a save written before companies existed still loads, with every soldier marching loose")
+
+	_check(campaign.restore(saved) == "", "companies come back for the casualty check")
+	campaign.units[squad[4]].apply_damage(100.0)
+	campaign.tick(0.05)
+	_check(not campaign.units.has(squad[4]) and campaign.company_of(squad[4]) == -1
+			and campaign.company_members(right) == [squad[3]]
+			and campaign.companies.has(right),
+			"a soldier killed in the field leaves his company's roster and the reverse index")
+	campaign.units[squad[3]].apply_damage(100.0)
+	campaign.tick(0.05)
+	_check(not campaign.companies.has(right) and campaign.company_of(squad[3]) == -1
+			and campaign.companies.has(left) and FrontierCampaign.validate(campaign.capture()) == "",
+			"a company whose last soldier dies stops existing, and leaves a valid save behind")
+	game.free()
+	await process_frame
+
+
+## Order a body of men to `ground` and report where they actually landed, by
+## the four measures that can go wrong: how many of them were given an order at
+## all, how far the nearest is from the click, how many separate spots the
+## order names, and how many men sit on the border line.
+##
+## `clamped` is the one to read first. "Every goal is on the map" would be a
+## tautology — `command` clamps every destination into the map as its last
+## resort — so what it asserts instead is that the clamp never had to fire. A
+## layout that overran the edge scored zero collisions on some clicks and
+## still crowded men onto the border; this sees that, and it is what caught a
+## parade laid out from a frontage measured before its columns folded.
+##
+## `ordered` exists because this issues the order itself, after clearing every
+## goal. `set_goal` ignores a target within 0.6 m of the one already held, so
+## reading `_goal` after a second order can hand back the first order's answer:
+## a soldier `command` silently skipped would look perfectly commanded.
+##
+## The front rank is found by distance rather than by its place in the id list,
+## so a check does not quietly depend on which group `command` lays down first.
+func _parade(campaign: FrontierCampaign, ids: Array[int], ground: Vector3) -> Dictionary:
+	for id in ids: campaign.units[id].clear_goal()
+	campaign.command(ids, ground)
+	var seen := {}
+	var ordered := 0
+	var nearest := INF
+	var clamped := 0
+	var edge: float = campaign.world.size_m - 0.5
+	for id in ids:
+		var unit: Soldier = campaign.units[id]
+		if not unit.has_goal(): continue
+		ordered += 1
+		var goal: Vector3 = unit._goal
+		seen[Vector2(goal.x, goal.z)] = true
+		nearest = minf(nearest, Vector2(goal.x - ground.x, goal.z - ground.z).length())
+		if is_equal_approx(goal.x, 0.5) or is_equal_approx(goal.x, edge) \
+				or is_equal_approx(goal.z, 0.5) or is_equal_approx(goal.z, edge):
+			clamped += 1
+	return {"ordered": ordered, "nearest": nearest, "distinct": seen.size(), "clamped": clamped}
+
+
+## The regimes a six-soldier fixture cannot see. A parade of six fits anywhere,
+## so nothing above notices a layout that only misbehaves once it is wider or
+## deeper than the map; the company ceiling needs 512 companies to reach; and
+## selecting one company only becomes expensive when the company is the army.
+##
+## Each check here was confirmed to fail against the code it guards, and the
+## click positions are chosen rather than convenient: the centre and a corner
+## both have room to spare in at least one direction and between them missed a
+## live bug, so the two clicks that pin the layout down are the ones a few
+## paces out from an edge, where there is nearly enough room.
+func _companies_at_scale() -> void:
+	var game := _new_game(42)
+	var campaign: FrontierCampaign = game.sim.campaign
+	campaign.set_personality("peaceful")
+	var at: Vector3 = game.sim.entrance_of(game.sim.keep, "att_entrance")
+	var army: Array[int] = []
+	for i in 2000:
+		var recruit := campaign._spawn_unit(0, at + Vector3(float(i % 50), 0, float(i / 50)))
+		recruit.position.y = game.world.heightmap.height_at(recruit.position.x, recruit.position.z)
+		recruit._wear_anchor = recruit.position
+		army.append(recruit.id)
+	var centre := game.world.centre()
+	centre.y = game.world.heightmap.height_at(centre.x, centre.z)
+
+	# 2,000 loose men four files wide want a kilometre of depth on a 768 m map,
+	# and 500 four-man companies want five kilometres of frontage. An earlier
+	# layout pulled the whole parade back by that overrun and then clamped what
+	# was still off the map: the front rank landed 383 m from the click, and
+	# hundreds of men were given the same destination.
+	var parade := _parade(campaign, army, centre)
+	_check(parade.ordered == army.size() and parade.nearest < 0.001
+			and parade.distinct == army.size() and parade.clamped == 0,
+			"2,000 loose men march to the ground the player clicked, onto 2,000 separate spots, none of them against the border")
+
+	# Not the centre and not a corner. A corner has no room either way, so the
+	# parade turns inland and the layout is never asked to judge a tight fit; a
+	# click a few paces out has just enough room to look like enough, and that
+	# is where a frontage measured before the columns fold gets it wrong. This
+	# exact order put 848 of these 2,000 men on top of one another.
+	var verge := Vector3(game.world.size_m - 10.0, 0, game.world.centre().z)
+	verge.y = game.world.heightmap.height_at(verge.x, verge.z)
+	parade = _parade(campaign, army, verge)
+	_check(parade.ordered == army.size() and parade.nearest < 0.001
+			and parade.distinct == army.size() and parade.clamped == 0,
+			"2,000 loose men ordered ten metres from the east edge form west of the click instead of crowding onto the border")
+
+	for i in range(0, army.size(), 4):
+		campaign.form_company(army.slice(i, i + 4))
+	parade = _parade(campaign, army, centre)
+	_check(campaign.companies.size() == 500 and parade.ordered == army.size()
+			and parade.nearest < 0.001 and parade.distinct == army.size()
+			and parade.clamped == 0,
+			"500 companies wrap into further bands instead of piling onto one lane, and the front rank still lands on the click")
+
+	# 715, 741 rather than the corner itself: the bands fit east-to-west but
+	# only just, and counting them by dividing frontage by room said seven
+	# where the wrap below takes eight. The eighth band ran off the map.
+	var awkward := Vector3(game.world.size_m - 53.0, 0, game.world.size_m - 27.0)
+	awkward.y = game.world.heightmap.height_at(awkward.x, awkward.z)
+	parade = _parade(campaign, army, awkward)
+	_check(parade.ordered == army.size() and parade.nearest < 0.001
+			and parade.distinct == army.size() and parade.clamped == 0,
+			"the band count is the one the layout actually takes, so the last band of 500 companies lands on the map too")
+
+	var corner := Vector3(game.world.size_m - 1.0, 0, game.world.size_m - 1.0)
+	corner.y = game.world.heightmap.height_at(corner.x, corner.z)
+	parade = _parade(campaign, army, corner)
+	_check(parade.ordered == army.size() and parade.nearest < 0.001
+			and parade.distinct == army.size() and parade.clamped == 0,
+			"the same 500 companies ordered into the far corner form inland from the click rather than being shoved off it")
+
+	for company_id in campaign.companies.keys(): campaign.disband_company(company_id)
+	var column: Array[int] = []
+	column.assign(army.slice(0, 400))
+	campaign.form_company(column, 1)
+	parade = _parade(campaign, column, centre)
+	_check(parade.ordered == column.size() and parade.nearest < 0.001
+			and parade.distinct == column.size() and parade.clamped == 0,
+			"a 400-man single file is 798 m deep on a 768 m map: it folds into further files rather than running off the edge or dragging the column back from the click")
+
+	campaign.form_company(army)
+	var best := INF
+	for attempt in 3:
+		game.selected_units.clear()
+		var started := Time.get_ticks_usec()
+		game._select_unit(army[0], false, false)
+		best = minf(best, float(Time.get_ticks_usec() - started) / 1000.0)
+	# A budget, not a benchmark. The build this replaced asked `Array.has` and
+	# `Array.erase` per id, which measured 11.3 ms here against 3.3 ms for the
+	# set; 8 ms sits clear of both, and the best of three keeps a scheduling
+	# spike from deciding it.
+	_check(game.selected_units.size() == army.size() and best < 8.0,
+			"one click takes the whole 2,000-man company in %.2f ms, inside the 8 ms budget" % best)
+
+	# The cost here is allocation, so the guard counts allocations rather than
+	# milliseconds: one mesh for 2,000 rings instead of 2,000. The material
+	# hangs off the mesh, so counting it too would prove nothing the mesh count
+	# has not already proved. Timing is printed, not asserted — a ceiling that
+	# has to sit clear of a 39 ms regression and a 10 ms pass is a coin toss on
+	# a loaded machine, and the identity below cannot be satisfied by luck.
+	var started_rings := Time.get_ticks_usec()
+	game._refresh_unit_rings()
+	var ring_ms := float(Time.get_ticks_usec() - started_rings) / 1000.0
+	var meshes := {}
+	var rings := 0
+	for id in game.selected_units:
+		var ring: MeshInstance3D = campaign.units[id].get_node_or_null("selection_ring")
+		if ring == null or not ring.visible: continue
+		rings += 1
+		meshes[ring.mesh.get_instance_id()] = true
+	_check(rings == army.size() and meshes.size() == 1,
+			"2,000 rings are raised from one shared mesh rather than a torus and a material allocated per soldier (%.2f ms to raise them all)" % ring_ms)
+
+	for company_id in campaign.companies.keys(): campaign.disband_company(company_id)
+	for i in FrontierCampaign.MAX_COMPANIES:
+		campaign.form_company([army[i]])
+	var spare: int = army[FrontierCampaign.MAX_COMPANIES]
+	_check(campaign.companies.size() == FrontierCampaign.MAX_COMPANIES
+			and campaign.form_company([spare]) == -1 and campaign.company_of(spare) == -1,
+			"company number %d is refused once the ceiling is reached" % (FrontierCampaign.MAX_COMPANIES + 1))
+	var oldest: int = campaign.company_of(army[0])
+	var next: int = campaign.company_of(army[1])
+	var joined := campaign.merge_companies([oldest, next])
+	_check(joined > 0 and campaign.companies.size() == FrontierCampaign.MAX_COMPANIES - 1
+			and campaign.company_members(joined) == [army[0], army[1]]
+			and campaign.form_company([spare]) > 0,
+			"a merge at the ceiling still runs, because it empties the two it draws from: the one order that gets the player back under the cap is not the order the cap refuses")
+	game.free()
+	await process_frame
+
+
 func _run() -> void:
 	await _generation_and_persistence()
 	await _foundation_save()
+	await _companies()
+	await _companies_at_scale()
 	await _military()
 	print("Campaign regression failures: %d" % _failures)
 	quit(1 if _failures else 0)

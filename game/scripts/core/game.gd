@@ -51,6 +51,7 @@ var _bridge_hover := Vector3.INF
 var _bridge_preview: Node3D
 var _world_generation_pending := false
 var selected_units: Array[int] = []
+var _ring_mesh: Mesh
 var road_scope := "busiest"
 var _road_quotes: Dictionary = {}
 var _road_preview: MultiMeshInstance3D
@@ -180,6 +181,12 @@ func _ready() -> void:
 	hud.recruit_requested.connect(func():
 		var error: String = sim.campaign.recruit()
 		if error != "": _on_alert(error, sim.keep.position)
+		_refresh_selection())
+	hud.company_form_requested.connect(_regroup_selection)
+	hud.company_disband_requested.connect(func(company_id: int):
+		var name_of: Dictionary = sim.campaign.company_report(company_id)
+		if sim.campaign.disband_company(company_id):
+			_on_alert("%s disbanded; its soldiers march loose." % name_of.get("name", "The company"), camera.focus)
 		_refresh_selection())
 	hud.muster_requested.connect(func():
 		selected_units.assign(sim.campaign.friendly_ids())
@@ -645,7 +652,13 @@ func _refresh_selection() -> void:
 	if not selected_units.is_empty() and sim.campaign != null:
 		var unit: Node = sim.campaign.units.get(selected_units[0])
 		if is_instance_valid(unit) and (unit.faction == 0 or sim.scouting.visibility_at(unit.position)):
-			hud.show_soldier(unit)
+			# One soldier keeps his own panel — armor, wounds, discharge. Two
+			# or more is a block, and the block's panel is about the block.
+			if selected_units.size() > 1:
+				hud.show_company(sim.campaign.selection_report(selected_units))
+			else:
+				hud.show_soldier(unit,
+						sim.campaign.company_report(sim.campaign.company_of(unit.id)))
 			return
 		selected_units.clear()
 		hud.clear_selection()
@@ -700,6 +713,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					place_yaw += PI * 0.25
 			KEY_F:
 				_focus_selection()
+			KEY_G:
+				_regroup_selection()
 			KEY_B:
 				hud.set_tray_open(not hud.tray_is_open())
 			KEY_C:
@@ -735,7 +750,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				Mode.BRIDGE: _bridge_click(mb.position)
 				Mode.PLACE: _try_place()
 				Mode.CLEAR: _order_clear_at(mb.position)
-				_: _pick_at(mb.position)
+				_: _pick_at(mb.position, mb.shift_pressed, mb.alt_pressed)
 		elif mb.button_index == MOUSE_BUTTON_RIGHT:
 			if mode == Mode.BRIDGE:
 				_cancel_bridge()
@@ -1079,7 +1094,7 @@ func _clear_selection() -> void:
 	hud.clear_selection()
 
 
-func _pick_at(screen_pos: Vector2) -> void:
+func _pick_at(screen_pos: Vector2, additive: bool = false, single: bool = false) -> void:
 	var ray := camera.screen_ray(screen_pos)
 	var space := get_world_3d().direct_space_state
 	var query := PhysicsRayQueryParameters3D.create(
@@ -1117,9 +1132,7 @@ func _pick_at(screen_pos: Vector2) -> void:
 			_refresh_selection()
 			return
 		if collider.has_meta("unit_id"):
-			_clear_selection()
-			selected_units.append(int(collider.get_meta("unit_id")))
-			_refresh_selection()
+			_select_unit(int(collider.get_meta("unit_id")), additive, single)
 			return
 		if collider.has_meta("rival_building_id"):
 			_clear_selection()
@@ -1325,6 +1338,117 @@ func _focus_wild_cattle() -> void:
 	_on_alert("No wild cattle are in sight. Send a scout to look for herds.", sim.keep.position)
 
 
+## Clicking a soldier selects the company he marches with.
+##
+## That is the whole point of a company: the block is the thing the player
+## gives orders to, so the block is what a click picks up. The two ways out are
+## the ordinary real-time-strategy ones — Alt for "just this man", Shift to add
+## to what is already held — and together they are also how a split is
+## expressed: Alt-click one, Shift+Alt-click the rest, then G.
+##
+## A drag box was the other candidate and is deliberately not here. It selects
+## by where soldiers happen to be standing, which is the opposite of what a
+## persistent company is for; it would also need its own screen-space pass over
+## every unit, and this project is trying to hold 2,000 of them a side.
+func _select_unit(unit_id: int, additive: bool, single: bool) -> void:
+	var campaign := sim.campaign
+	var unit: Soldier = campaign.units.get(unit_id) if campaign != null else null
+	if unit == null:
+		_clear_selection()
+		return
+	if unit.faction != 0:
+		# A rival guard is inspected, not commanded; he is not ours to group.
+		_clear_selection()
+		selected_units.append(unit_id)
+		_refresh_selection()
+		return
+	var ids: Array[int] = [unit_id]
+	if not single:
+		var members: Array[int] = campaign.company_members(campaign.company_of(unit_id))
+		if not members.is_empty(): ids = members
+	# The set is carried beside the array rather than asking the array. One
+	# click now picks up a company of 2,000, and `Array.has` and `Array.erase`
+	# per id made the loops below quadratic in the selection: 11.3 ms to take
+	# a company that size, against 3.3 ms once the set answers instead.
+	var previous: Array[int] = []
+	var already := {}
+	if additive:
+		# A rival guard never rides along into a selection of ours. He cannot
+		# be commanded, so half the selection would silently be ignored by the
+		# next order, and the panel would count him as one of our soldiers.
+		for id in selected_units:
+			var other: Soldier = campaign.units.get(id)
+			if other != null and other.faction == 0 and not already.has(id):
+				already[id] = true
+				previous.append(id)
+	_clear_selection()
+	# Shift over soldiers already wholly held takes them back out, which is how
+	# every other game of this kind behaves and is the only way to undo an
+	# over-eager addition without rebuilding the selection from nothing.
+	var held := true
+	for id in ids:
+		if not already.has(id): held = false
+	var kept: Array[int] = []
+	if held:
+		var leaving := {}
+		for id in ids: leaving[id] = true
+		for id in previous:
+			if not leaving.has(id): kept.append(id)
+	else:
+		kept = previous
+		for id in ids:
+			if already.has(id): continue
+			already[id] = true
+			kept.append(id)
+	selected_units.assign(kept)
+	_refresh_selection()
+
+
+## The player's one company verb, on G and on the block panel's first button:
+## the current selection becomes a company.
+##
+## Forming, splitting and merging are the same order seen from three starting
+## points, so there is one key to learn and the button renames itself after
+## whichever of the three the selection actually expresses. The named campaign
+## calls are still used where they apply, so their refusals really run — a
+## split may not take a whole company, a merge needs two of them.
+func _regroup_selection() -> void:
+	if sim.campaign == null: return
+	_prune_selection()
+	var report: Dictionary = sim.campaign.selection_report(selected_units)
+	if report.total == 0:
+		_on_alert("Select soldiers of your own before forming a company.", camera.focus)
+		return
+	if report.whole >= 0:
+		_on_alert("%s already holds exactly these soldiers — disband it to march them loose."
+				% report.companies[0].name, camera.focus)
+		return
+	var company_id := -1
+	var told := "formed"
+	if report.split_from >= 0:
+		company_id = sim.campaign.split_company(report.split_from, selected_units)
+		told = "split off from %s" % report.companies[0].name
+	elif report.mergeable:
+		# Only when every company in the selection is wholly selected. A merge
+		# takes whole rosters, so offering it for a partial selection would
+		# conscript men the player never clicked; that case forms from the
+		# selection instead, which is what the button and this comment promise.
+		var company_ids: Array = []
+		for row in report.companies: company_ids.append(row.id)
+		company_id = sim.campaign.merge_companies(company_ids)
+		told = "merged out of %d companies" % report.companies.size()
+	else:
+		company_id = sim.campaign.form_company(selected_units)
+	if company_id < 0:
+		_on_alert("Those soldiers cannot form a company.", camera.focus)
+		_refresh_selection()
+		return
+	var formed: Dictionary = sim.campaign.company_report(company_id)
+	_on_alert("%s %s — %d soldiers. Click any of them to select the whole company."
+			% [formed.name, told, formed.size], camera.focus)
+	_refresh_selection()
+
+
 func _order_units(screen_pos: Vector2) -> void:
 	var ray := camera.screen_ray(screen_pos)
 	var hit := world.terrain.raycast(ray.origin, ray.direction)
@@ -1486,24 +1610,43 @@ func _save_screenshot(tag: String) -> String:
 	return ProjectSettings.globalize_path(path)
 
 
+## Every ring is the same gold torus, so one mesh and one material are built
+## once and shared by all of them. A ring used to allocate its own TorusMesh
+## and StandardMaterial3D inside the loop below: 39 ms to raise the rings of a
+## 2,000-man company against 10 ms sharing one, and 2,000 unique resources left
+## alive for as long as the army was.
+func _ring_prototype() -> Mesh:
+	if _ring_mesh != null: return _ring_mesh
+	var mesh := TorusMesh.new()
+	mesh.inner_radius = 0.7
+	mesh.outer_radius = 1.0
+	mesh.rings = 16
+	mesh.ring_segments = 6
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = Color(0.94, 0.77, 0.32)
+	mesh.material = mat
+	_ring_mesh = mesh
+	return _ring_mesh
+
+
 func _refresh_unit_rings() -> void:
 	if sim.campaign == null: return
+	# One click now selects a whole company, so this can be handed two thousand
+	# ids rather than the handful a single pick used to give it. `Array.has` per
+	# unit made that units x selected; the set is built once instead.
+	var held := {}
+	for id in selected_units: held[id] = true
 	for unit in sim.campaign.units.values():
 		var ring := unit.get_node_or_null("selection_ring") as MeshInstance3D
-		var selected := selected_units.has(unit.id)
+		var selected: bool = held.has(unit.id)
 		if selected and ring == null:
 			ring = MeshInstance3D.new()
 			ring.name = "selection_ring"
-			var mesh := TorusMesh.new()
-			mesh.inner_radius = 0.7
-			mesh.outer_radius = 1.0
-			mesh.rings = 16
-			mesh.ring_segments = 6
-			var mat := StandardMaterial3D.new()
-			mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-			mat.albedo_color = Color(0.94, 0.77, 0.32)
-			mesh.material = mat
-			ring.mesh = mesh
+			# A deselected ring is hidden, not freed: selections change every
+			# click and rebuilding the node would give back the per-unit
+			# allocation this shared mesh exists to remove.
+			ring.mesh = _ring_prototype()
 			ring.scale.y = 0.15
 			ring.position.y = 0.06
 			ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF

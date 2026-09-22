@@ -851,13 +851,29 @@ func _campaign_fingerprint() -> Dictionary:
 				else game.sim.buildings_by_id
 		if targets.has(event.id):
 			impacts.append(event.duplicate())
+	# Companies are read from the live tables here, exactly as units are, and
+	# never through `capture()`. That is the whole point of this function: a
+	# serializer that quietly stopped writing a roster would still produce a
+	# save that loads clean, and only an independently derived fingerprint
+	# notices the rosters came back empty. Members are sorted because a company
+	# is a set of soldiers, not the order a player happened to click them in.
+	var companies := {}
+	for company_id in campaign.companies:
+		var record: Dictionary = campaign.companies[company_id]
+		var members: Array = record.members.duplicate()
+		members.sort()
+		companies[company_id] = {"name": record.name, "width": record.width,
+			"members": members}
+
 	return {"personality": campaign.personality, "rival_name": campaign.rival_name,
 		"town_population": campaign.town_population, "rival_position": campaign.rival_position,
 		"at_war": campaign.at_war, "defeated": campaign.defeated, "conquered": campaign.conquered,
 		"next_id": campaign._next_id, "time": campaign._time, "review": campaign._review,
 		"recruit_at": campaign._recruit_at, "rng_state": campaign._rng.state,
 		"buildings": buildings, "units": units, "workers": workers,
-		"ruins": campaign._ruins.duplicate(true), "impacts": impacts}
+		"ruins": campaign._ruins.duplicate(true), "impacts": impacts,
+		"companies": companies,
+		"next_company_ordinal": campaign._next_company_ordinal}
 
 
 ## Two ways a carried load goes wrong, and both are invisible from the resource

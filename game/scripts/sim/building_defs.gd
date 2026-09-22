@@ -266,9 +266,16 @@ static func _build() -> void:
 		"asset": "logging_camp",
 		"display_name": "Barracks",
 		"role": Role.BARRACKS,
-		"description": "Muster a militia company here. Soldiers need real food "
-				+ "from a market, supply hut or another reachable store.",
-		"cost": {Config.Res.TIMBER: 40, Config.Res.STONE: 20},
+		# Timber only, deliberately. A militia is raised from people who are
+		# already here, and gating that behind a quarry put the first muster a
+		# whole industry away from a settlement that could already feed one.
+		# Posts, a rack and a row of straw dummies is what it actually needs.
+		# A stone barracks, if it is ever wanted, is a separate building and
+		# not a tier bolted onto this one.
+		"description": "Muster a militia here, drilling against straw dummies. "
+				+ "Soldiers need real food from a market, supply hut or another "
+				+ "reachable store.",
+		"cost": {Config.Res.TIMBER: 40},
 		"build_time": 32.0,
 		"max_health": 300.0,
 		"min_height": 5.0,
