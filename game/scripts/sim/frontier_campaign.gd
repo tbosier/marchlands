@@ -37,6 +37,7 @@ var _visible_contacts: Array[int] = []
 var _contact_pending := false
 var _contact_war := false
 var _guard_contacts: Dictionary = {}
+var _patients: Dictionary = {} # faction -> candidates every medic of it shares this tick
 
 func setup(p_sim: Simulation, p_world: World, p_registry: AssetRegistry) -> void:
 	sim = p_sim
@@ -298,19 +299,45 @@ func equip_medic(unit_id: int) -> String:
 	return ""
 
 
+## Every medic of a faction scans the same people, so that side is built once
+## per tick instead of once per medic: population_members() allocates the whole
+## player population and the old `patients.has()` de-duplication was a linear
+## scan of that array for every person in it. Only faction 0 pays for the
+## population walk, so a rival medic never drags the player's civilians in.
+## A soldier removed later in this tick keeps a stale entry, which is harmless:
+## _remove_unit only ever fires on a body already at zero health, and can_treat
+## rejects those. Nothing adds units between here and the end of the tick.
+func _patient_pool(faction: int) -> Array:
+	if _patients.has(faction): return _patients[faction]
+	var pool: Array = []
+	for u in units.values():
+		if u.faction == faction: pool.append(u)
+	if faction == 0:
+		# Veterans serving as scouts, carriers or merchants stay treatable; a
+		# person already marching under this campaign is the same object, so
+		# the units gathered above are the whole of what must not repeat.
+		var enlisted := {}
+		for u in pool: enlisted[u] = true
+		for citizen in sim.population_members():
+			if citizen is Soldier and citizen.faction == 0 and not enlisted.has(citizen):
+				pool.append(citizen)
+	_patients[faction] = pool
+	return pool
+
 func _tick_medic(unit: Soldier) -> bool:
 	if unit.medical_role != "medic" or unit.medical_supplies <= 0 or unit.incapacitated():
 		return false
 	var patient: Soldier
 	var best := -INF
-	var patients: Array = units.values()
-	if unit.faction == 0:
-		for citizen in sim.population_members():
-			if citizen is Soldier and not patients.has(citizen): patients.append(citizen)
-	for other in patients:
-		if other.faction != unit.faction or not unit.can_treat(other): continue
+	# Distance rejects nearly every candidate for the price of a subtraction and
+	# a square root. can_treat costs more even now that Soldier memoises its
+	# derived body state, because treatment_need still walks the target's whole
+	# wound list uncached. It once cost ten full body evaluations; the cache
+	# took most of that away, and the ordering still pays for itself.
+	for other in _patient_pool(unit.faction):
 		var distance := unit.position.distance_to(other.position)
-		if distance > SUPPLY_REACH or not world.nav.can_reach(unit.position, other.position): continue
+		if distance > SUPPLY_REACH or not unit.can_treat(other) \
+				or not world.nav.can_reach(unit.position, other.position): continue
 		# Unconscious patients take priority, then the nearest treatable wound.
 		var priority: float = (100.0 if other.incapacitated() else 0.0) - distance
 		if priority > best:
@@ -405,6 +432,7 @@ func _door(b: Building) -> Vector3:
 func tick(delta: float) -> void:
 	if defeated or delta <= 0.0 or not is_finite(delta): return
 	Soldier.advance_projectiles(world.effects_root, delta)
+	_patients.clear()
 	_time += delta
 	_tick_town(delta)
 	for event in _impacts.duplicate():
@@ -427,7 +455,9 @@ func tick(delta: float) -> void:
 	if _review <= 0:
 		_review = 2.0
 		_assign_guards()
-	for u in units.values().duplicate():
+	# values() already hands back a detached array, so _remove_unit below cannot
+	# disturb this walk; the extra duplicate() only copied it a second time.
+	for u in units.values():
 		u.advance_condition(delta)
 		if u.health <= 0.0:
 			_remove_unit(u)
@@ -608,24 +638,36 @@ func _unregister_unit(unit: Soldier) -> void:
 			other.clear_goal()
 
 func _assign_guards() -> void:
-	for u in units.values():
+	# Both scans only ever match the opposing faction, and rival guards are
+	# capped at six. Splitting the roster once turns an n^2 walk that also
+	# re-allocated units.values() inside the loop into two thin cross products.
+	# The single pass below keeps the original interleaved order: a rival guard
+	# declares war as a side effect, and the soldiers reviewed before it in this
+	# same pass must still see peace.
+	var roster: Array = units.values()
+	var friendly: Array = []
+	var rival: Array = []
+	for u in roster:
+		if u.faction == 0: friendly.append(u)
+		elif u.faction == 1: rival.append(u)
+	for u in roster:
 		if u.faction == 0:
-			if _target(u) != null: continue
-			for other in units.values():
-				if other.faction == 1 and at_war and u.position.distance_to(other.position)<16:
+			if _target(u) != null or not at_war: continue
+			for other in rival:
+				if u.position.distance_to(other.position)<16:
 					u.target_id=other.id; u.target_kind="unit"; break
 			continue
 		var nearest: Soldier
 		var best := 90.0 if personality != "loner" else 45.0
-		for other in units.values():
-			if other.faction == 0 and other.health > 0.0 and (at_war
+		for other in friendly:
+			if other.health > 0.0 and (at_war
 					or (personality == "aggressive" and sim.day > 5.0)):
 				var distance: float = u.position.distance_to(other.position)
 				if distance < best: nearest=other; best=distance
 		if nearest != null:
 			at_war = true
 			u.target_id=nearest.id; u.target_kind="unit"; u.task_label="defending town"
-		elif personality == "aggressive" and not conquered and sim.day > 5 and not friendly_ids().is_empty():
+		elif personality == "aggressive" and not conquered and sim.day > 5 and not friendly.is_empty():
 			var candidate: Building
 			var closest := INF
 			for b in sim.buildings:
@@ -789,6 +831,8 @@ func _reset() -> void:
 	_impacts.clear()
 	_visible_contacts.clear()
 	_guard_contacts.clear()
+	# _reset frees its children outright, so no cached candidate may outlive it.
+	_patients.clear()
 	_contact_cooldown = 0.0
 	_contact_pending = false
 	_contact_war = false

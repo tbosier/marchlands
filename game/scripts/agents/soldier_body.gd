@@ -184,8 +184,17 @@ static func available(data: Dictionary, region: String) -> bool:
 	return false
 
 
-static func usable(data: Dictionary, group: String) -> bool:
-	if health(data) <= 0.0 or incapacitated(data): return false
+## The limb's own condition, with the systemic gate (dead, bled white,
+## unconscious) left to the caller. Splitting it out is purely for the benefit
+## of callers that ask about several limbs in a row: `health()` walks all six
+## parts, and `incapacitated()` calls `health()` again before looking at blood,
+## shock and organs, so each `usable()` below costs two whole-body walks and
+## asking four limbs costs eight — for a systemic answer that cannot have
+## changed between the four questions. Soldier's per-frame cache settles the
+## gate once and comes straight here. Nothing about the verdict differs;
+## `usable()` below is still the complete question and remains what callers
+## without such a cache should ask.
+static func limb_usable(data: Dictionary, group: String) -> bool:
 	for region in GROUPS[group]:
 		var part: Dictionary = data.regions[region]
 		if part.severed: return false
@@ -200,6 +209,11 @@ static func usable(data: Dictionary, group: String) -> bool:
 		var part: Dictionary = data.parts[group]
 		effective = float(part.cut) + float(part.puncture) * 1.2 + float(part.bruise) * 0.25
 	return effective < DISABLED_AT
+
+
+static func usable(data: Dictionary, group: String) -> bool:
+	if health(data) <= 0.0 or incapacitated(data): return false
+	return limb_usable(data, group)
 
 
 static func protection(tier: String, location: String, kind: String) -> float:
@@ -313,8 +327,18 @@ static func bleeding_rate(data: Dictionary) -> float:
 	return rate
 
 
-static func advance(data: Dictionary, delta: float) -> void:
-	if not is_finite(delta) or delta <= 0.0 or health(data) <= 0.0: return
+## Returns whether anything in `data` actually moved. Every mutation below is
+## to `blood`, to `shock`, or to a wound's age and bleeding, so those three
+## facts decide it exactly — the blood and shock comparisons are deliberately
+## exact rather than approximate, because a tick that changes a float's last
+## bit is a tick the save fingerprint will notice. Callers ignoring the return
+## lose nothing; Soldier uses it to leave its derived cache standing for the
+## unwounded, unshocked, full-blooded soldier, which is most of a marching
+## army and for whom this function provably does nothing at all.
+static func advance(data: Dictionary, delta: float) -> bool:
+	if not is_finite(delta) or delta <= 0.0 or health(data) <= 0.0: return false
+	var blood_before := float(data.blood)
+	var shock_before := float(data.shock)
 	var lost := 0.0
 	for wound in data.wounds:
 		wound.age = minf(1000000000.0, float(wound.age) + delta)
@@ -333,6 +357,9 @@ static func advance(data: Dictionary, delta: float) -> void:
 	# slowly only after bleeding subsides; dead bodies never enter this path.
 	if data.blood > 20.0 and bleeding_rate(data) < 0.001:
 		data.blood = minf(100.0, float(data.blood) + delta * 0.015)
+	# A body carrying wounds always changed: every wound's age advanced above.
+	return not data.wounds.is_empty() or float(data.blood) != blood_before \
+			or float(data.shock) != shock_before
 
 
 static func treatment_need(data: Dictionary) -> Dictionary:

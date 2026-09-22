@@ -51,8 +51,31 @@ func _identity(c: Citizen) -> int:
 		return sim.campaign._civilian_ids.get(c.id,c.id)
 	return c.id
 
-func _key(c: Citizen) -> String:
-	return "%d:%d" % [_faction(c),_identity(c)]
+## Faction and identity in one integer. This used to be a "%d:%d" String:
+## formatting and hashing one per person per tick, and twice more inside every
+## handles() call, was a measurable slice of the frame once the army was the
+## population. Nothing persisted changes shape — capture() writes the faction
+## and identity as separate fields and restore() packs them again, so old saves
+## load unaltered.
+##
+## The packing claims no more than the String did. Identities are positive and
+## the faction is one bit, so `_pack` is injective: it separates exactly the
+## pairs "%d:%d" separated, and merges exactly the ones it merged. It does NOT
+## make a person unique, because `_identity` above does not: a discharged
+## veteran carries an ordinary citizen id, and if that number also happened to
+## be some still-serving unit's military id the lookup would hand back that
+## unit's civilian identity instead. Military ids start at 100000 and citizen
+## ids at 1, so reaching the overlap means issuing a hundred thousand citizen
+## ids -- cumulative over a long game of immigration and burial, not a hundred
+## thousand people alive at once -- and a hand-built save may place a citizen
+## id anywhere up to MAX_ENTITY_ID without issuing any. It is a property of the
+## id registries, not of the key, and it is unchanged here: the String form
+## collided on exactly the same pairs.
+func _key(c: Citizen) -> int:
+	return _pack(_faction(c),_identity(c))
+
+static func _pack(faction: int, identity: int) -> int:
+	return (identity << 1) | faction
 
 func _people() -> Dictionary:
 	var out := {}
@@ -64,7 +87,10 @@ func _people() -> Dictionary:
 	return out
 
 func handles(c: Citizen) -> bool:
-	if _moved.has(_key(c)) or drinkers.has(_key(c)) or carriers.has(c.id): return true
+	# One key per call. Every campaign unit and every citizen asks this once a
+	# tick, so building the key twice here doubled a per-actor-per-frame cost.
+	var key := _key(c)
+	if _moved.has(key) or drinkers.has(key) or carriers.has(c.id): return true
 	for job in poison_jobs.values():
 		var scout: Scout = sim.scouting.scouts.get(job.scout_id) if sim.scouting != null else null
 		if scout != null and scout.person == c: return true
@@ -174,7 +200,7 @@ func tick(delta: float) -> void:
 			sim.campaign.town_population = maxi(0,sim.campaign.town_population-1)
 			c.queue_free()
 
-func _drink(c: Citizen, key: String, delta: float) -> void:
+func _drink(c: Citizen, key: int, delta: float) -> void:
 	var job: Dictionary = drinkers[key]
 	var b: Building = _buildings().get(job.well_id)
 	if b == null or not wells.has(b.id) or b.under_construction:
@@ -282,7 +308,8 @@ func _fire_tick(id: int, delta: float) -> void:
 		_finish_carrier(id,true)
 		return
 	c.update_hunger(sim.day,delta/Config.DAY_LENGTH)
-	if _moved.has(_key(c)) or drinkers.has(_key(c)): return
+	var key := _key(c)
+	if _moved.has(key) or drinkers.has(key): return
 	var target: Building = sim.buildings_by_id.get(job.target_id)
 	var well: Building = sim.buildings_by_id.get(job.well_id)
 	if target == null or target.fire <= 0 or well == null or not wells.has(well.id) or c.hunger >= Config.HUNGER_URGENT:
@@ -367,7 +394,8 @@ func _poison_tick(id: int, delta: float) -> void:
 	if scout == null or scout.person.service_health <= 0 or (scout.person is Soldier and scout.person.health <= 0):
 		cancel_poison(id)
 		return
-	if _moved.has(_key(scout.person)) or drinkers.has(_key(scout.person)): return
+	var key := _key(scout.person)
+	if _moved.has(key) or drinkers.has(key): return
 	var target: Building = sim.campaign.enemy_buildings.get(job.target_id)
 	if target == null or not wells.has(target.id) or sim.campaign.conquered:
 		sim.scouting.recall(id)
@@ -453,7 +481,7 @@ func restore(data: Variant) -> String:
 	if not carriers.is_empty() or not poison_jobs.is_empty(): return "restore water into an empty manager"
 	var people := _people()
 	for entry in data.get("carriers",[]):
-		if people.has("0:%d" % entry.citizen.id): return "water carrier identity is already assigned"
+		if people.has(_pack(0,entry.citizen.id)): return "water carrier identity is already assigned"
 	for entry in data.get("poison_jobs",[]):
 		if sim.scouting == null or not sim.scouting.scouts.has(entry.scout_id): return "sabotage mission has no scout"
 	for entry in data.get("wells",[]): wells[entry.id] = entry.duplicate()
@@ -467,7 +495,7 @@ func restore(data: Variant) -> String:
 		c.reparent(self)
 		carriers[c.id] = {"person":c,"target_id":entry.target_id,"well_id":entry.well_id,"state":entry.state}
 		_bucket(c)
-	for entry in data.get("drinkers",[]): drinkers["%d:%d" % [entry.faction,entry.person_id]] = entry.duplicate()
+	for entry in data.get("drinkers",[]): drinkers[_pack(entry.faction,entry.person_id)] = entry.duplicate()
 	for entry in data.get("poison_jobs",[]):
 		if sim.scouting == null or not sim.scouting.scouts.has(entry.scout_id): return "sabotage mission has no scout"
 		poison_jobs[entry.scout_id] = entry.duplicate()

@@ -125,6 +125,24 @@ const CULTIVATED_COST := 7.0
 ## Cached paths are reused for this long before being recomputed, so that
 ## improving roads actually changes where people walk.
 const PATH_CACHE_SECONDS := 12.0
+
+## How far a person's own renewal may be brought forward inside that window, as
+## a fraction of it — 0.25 spreads renewals over 9s to 12s. Everyone ordered out
+## in the same tick otherwise comes due on the same frame, and then keeps doing
+## so forever, which is how a modest median frame ends up beside a multi-second
+## one.
+##
+## The spread only ever shortens the window, never lengthens it: anything that
+## waits on the next renewal waits at most as long as it did before. The wade
+## out of a flooded cell in `Citizen.advance` is one of those — it drops the
+## route it cannot use and has nothing else to wake it — and a cache window
+## that sometimes ran past PATH_CACHE_SECONDS would make that stall worse than
+## it already is.
+##
+## Each person's place in the spread is fixed by their id (see
+## `Citizen._path_cache_interval`) and never rolled: where people walk decides
+## the positions that are saved and fingerprinted.
+const PATH_CACHE_JITTER := 0.25
 const ARRIVE_RADIUS := 1.1
 
 # --- Citizens --------------------------------------------------------------

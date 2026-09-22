@@ -12,10 +12,14 @@ var faction: int = 0
 ## authoritative; assigning legacy health changes systemic strain, never limbs.
 var health: float:
 	get:
-		return Body.health(_body_state)
+		_sync_body_cache()
+		return _cached_health
 	set(value):
 		if is_finite(value):
 			_body_state.strain = clampf(float(_body_state.strain) + health - value, 0.0, 100.0)
+			# Strain is a term of health; the old value above is read through
+			# the getter before the write, so invalidation belongs after it.
+			_body_changed(false)
 var armor_tier: String:
 	get:
 		return _body_state.armor
@@ -41,7 +45,57 @@ var _shield: Node3D
 var _armor_visuals: Array[Node3D] = []
 var _injury_visuals: Array[Node3D] = []
 var _dead_visualized := false
-var _injury_signature := ""
+
+## Derived body facts — alive or dead, conscious or not, whether a limb still
+## works, how fast the legs carry their owner — are recomputed from nested
+## String-keyed region, part, organ and wound dictionaries every time they are
+## asked for, and a marching soldier asks constantly: `can_strike()` costs
+## three whole-body walks on its own, `_refresh_condition()` nineteen,
+## `update_animation()` fifteen, `advance_condition()` twenty. Measured at 55
+## `Body.health()` evaluations per soldier per frame, which at 1,400 marching
+## soldiers came to 443 ms a frame against a 16.67 ms budget.
+##
+## They are memoised against `_body_version`, a counter bumped by every path in
+## this file that writes into `_body_state`. That is the whole invariant, and
+## it holds only as long as `_body_state` is written here and nowhere else:
+## a caller elsewhere reaching into the dictionary and moving a field would be
+## invisible to this, and the soldier would go on reporting the health, limbs
+## and gait he had beforehand. Outside code reads the dictionary — `harness.gd`
+## and the fingerprint test copy it wholesale — but nothing outside this file
+## writes to it, and nothing should start. Add a method here instead.
+##
+## The counter deliberately lives on the node and NOT inside the body
+## dictionary. `capture_body()`, `savegame.gd` and the fingerprint harness all
+## serialise `_body_state` verbatim; `Body.validate()` rejects a detailed body
+## whose key count is not exactly thirteen; and a monotonic counter would
+## differ between a played game and the same game reloaded — which is
+## precisely the difference the save fingerprint exists to catch.
+var _body_version := 0
+var _body_cached_at := -1
+var _cached_health := 0.0
+var _cached_incapacitated := false
+## NAN means "not computed since the last invalidation". Mobility is derived
+## from the cached health and leg verdicts, so it is filled lazily rather than
+## charged to every soldier who only wanted to know whether he was alive.
+var _cached_mobility := NAN
+var _cached_usable: Dictionary = {}
+
+## Injury decals are rebuilt by freeing and recreating Node3Ds, so they are
+## redrawn only when something that could have moved them happened — never once
+## a tick along with the bleeding. This tracks the narrower set of mutations
+## that can change a region's bruise/cut/puncture/severed state or a wound's
+## bandage or splint, and replaces a `str(_body_state.regions) +
+## str(treatments)` signature that serialised sixteen regions of four fields
+## each on every call, before its own early-out, at a measured 31 us per
+## soldier per frame.
+##
+## "Could have" is the honest word and the deliberate trade: a blow that lands
+## on an already-saturated region, or a restore of a body identical to the one
+## in place, now rebuilds decals the old comparison would have left alone. That
+## costs a handful of nodes on a rare event, in exchange for not serialising
+## sixteen dictionaries for every soldier on every frame of the campaign.
+var _marks_version := 0
+var _marks_drawn := -1
 
 
 ## A visual projectile has its own lifetime, so an attacker's removal cannot
@@ -199,6 +253,54 @@ func _equip() -> void:
 	_equipment_mesh(held, boss, Vector3(0, -0.06, 0), Color(0.5, 0.53, 0.56), 0.7)
 
 
+## Every write into `_body_state` anywhere in this file ends here. Forgetting
+## the call outright is the dangerous mistake: the derived cache then keeps
+## answering with the body as it was, and a soldier goes on swinging a sword
+## with an arm that is lying on the ground.
+##
+## `marks` is the lesser of the two, and only ever affects decals — the derived
+## cache is invalidated either way. It says whether the write can have moved
+## something `_refresh_injury_marks()` draws: a region's trauma or severance,
+## or a wound's bandage or splint. Pass it when unsure, since a needless decal
+## rebuild costs a few freed nodes and a missed one leaves a treated wound
+## still painted as an open one. The callers that pass `false` all write a
+## scalar nobody draws, except `advance_condition()`, whose reason is set out
+## at length there because getting that one wrong would rebuild every decal in
+## the army every tick.
+func _body_changed(marks: bool = true) -> void:
+	_body_version += 1
+	if marks:
+		_marks_version += 1
+
+
+func _sync_body_cache() -> void:
+	if _body_cached_at == _body_version:
+		return
+	_body_cached_at = _body_version
+	_cached_health = Body.health(_body_state)
+	_cached_incapacitated = Body.incapacitated(_body_state)
+	_cached_mobility = NAN
+	_cached_usable.clear()
+
+
+## `Body.usable()` asks two questions: is this body still running at all, and
+## is this particular limb attached and undamaged enough to work — an
+## unsplinted fracture counts against it but does not by itself disable it.
+## The first answer is shared by all six groups and is already cached; only the
+## second is looked up per group, and memoised too, since `update_animation()`
+## and `mobility_scale()` between them ask about the same four limbs several
+## times a frame.
+func _usable(group: String) -> bool:
+	_sync_body_cache()
+	if _cached_health <= 0.0 or _cached_incapacitated:
+		return false
+	if _cached_usable.has(group):
+		return bool(_cached_usable[group])
+	var verdict := Body.limb_usable(_body_state, group)
+	_cached_usable[group] = verdict
+	return verdict
+
+
 func capture_body() -> Dictionary:
 	return _body_state.duplicate(true)
 
@@ -216,6 +318,8 @@ func restore_body(data: Variant) -> String:
 	if problem != "":
 		return problem
 	_body_state = Body.migrate(data)
+	# A wholly different body: regions, wounds and treatments all replaced.
+	_body_changed()
 	if health > 0.0:
 		_dead_visualized = false
 		visible = not indoors
@@ -230,6 +334,10 @@ func equip_armor(tier: String) -> bool:
 	if tier not in Body.ARMOR or health <= 0.0:
 		return false
 	_body_state.armor = tier
+	# No cached value reads armor — the blow that consults it and the rebuild
+	# on the next line both read it fresh — but the rule here is that every
+	# write announces itself rather than every write argues its innocence.
+	_body_changed(false)
 	_rebuild_armor()
 	_refresh_condition(false)
 	return true
@@ -238,6 +346,11 @@ func equip_armor(tier: String) -> bool:
 func receive_hit(location: String, kind: String, force: float, anatomy_roll: float = 0.5) -> Dictionary:
 	var result := Body.hit(_body_state, location, kind, force, anatomy_roll)
 	if result.ok:
+		# Both of `Body.hit`'s refusals — a malformed blow and an unavailable
+		# target region — return before it touches `data`, so a rejected hit
+		# leaves nothing to invalidate. A landed one rewrites regions, parts,
+		# organs, shock and the wound list.
+		_body_changed()
 		_refresh_condition(true)
 	return result
 
@@ -251,7 +364,7 @@ func hit_locations() -> Array[String]:
 
 
 func can_strike() -> bool:
-	return not _civilian_mode and health > 0.0 and Body.usable(_body_state, "arm_r")
+	return not _civilian_mode and health > 0.0 and _usable("arm_r")
 
 
 func can_throw_firepot() -> bool:
@@ -259,17 +372,24 @@ func can_throw_firepot() -> bool:
 
 
 func can_use_shield() -> bool:
-	return not _civilian_mode and health > 0.0 and Body.usable(_body_state, "arm_l")
+	return not _civilian_mode and health > 0.0 and _usable("arm_l")
 
 
 func mobility_scale() -> float:
-	if health <= 0.0 or incapacitated():
+	_sync_body_cache()
+	if is_nan(_cached_mobility):
+		_cached_mobility = _compute_mobility()
+	return _cached_mobility
+
+
+func _compute_mobility() -> float:
+	if _cached_health <= 0.0 or _cached_incapacitated:
 		return 0.0
 	var usable := 0
 	var burden := 0.0
 	for location in ["leg_l", "leg_r"]:
 		var part: Dictionary = _body_state.parts[location]
-		usable += int(Body.usable(_body_state, location))
+		usable += int(_usable(location))
 		burden += Body.trauma(part)
 	if usable == 0:
 		return 0.0
@@ -285,18 +405,31 @@ func walking_speed() -> float:
 func workability() -> float:
 	if health <= 0.0 or incapacitated():
 		return 0.0
-	var usable := int(Body.usable(_body_state, "arm_l")) + int(Body.usable(_body_state, "arm_r"))
+	var usable := int(_usable("arm_l")) + int(_usable("arm_r"))
 	return [0.0, 0.45, 1.0][usable]
 
 
 func incapacitated() -> bool:
-	return Body.incapacitated(_body_state)
+	_sync_body_cache()
+	return _cached_incapacitated
 
 
 ## The owner ticks this exactly once for every person: army, civilian,
 ## merchant or scout. Movement calls must not double-count bleeding.
 func advance_condition(delta: float) -> void:
-	Body.advance(_body_state, delta)
+	# The only tick that costs a recomputation is one that moved something.
+	# A wounded man's bleeding, clotting and wound age move every tick and his
+	# cache expires every tick; an unhurt one's blood, shock and empty wound
+	# list provably do not move at all, and he is most of a marching army.
+	#
+	# The decals are a separate question with a permanent answer:
+	# `Body.advance()` writes `blood`, `shock` and each wound's `age`,
+	# `bleeding` and `internal_bleeding`, and `_refresh_injury_marks()` draws
+	# from none of those — bleeding can neither open a region nor tie a
+	# bandage. Bumping the marks version here would free and recreate every
+	# injury decal in the army sixty times a second.
+	if Body.advance(_body_state, delta):
+		_body_changed(false)
 	_refresh_condition(true)
 
 
@@ -308,6 +441,7 @@ func practice(skill: String, amount: float = 0.05) -> void:
 	if skill not in Body.SKILLS or not is_finite(amount) or amount <= 0.0 or health <= 0.0:
 		return
 	_body_state.skills[skill] = minf(100.0, skill_level(skill) + amount)
+	_body_changed(false)
 
 
 func hit_probability(target: Soldier) -> float:
@@ -332,6 +466,7 @@ func configure_medic(kits: int) -> bool:
 		return false
 	_body_state.role = "medic"
 	_body_state.medical_supplies += kits
+	_body_changed(false)
 	profession = "field medic"
 	return true
 
@@ -353,7 +488,13 @@ func treat(target: Soldier) -> Dictionary:
 	var need := target.treatment_need()
 	var result: Dictionary = Body.treat(target._body_state, need.wound_id, need.treatment, skill_level("medicine"))
 	if result.ok:
+		# `Body.treat()` refuses before writing anything, so only a successful
+		# treatment invalidates — and it invalidates the PATIENT, whose wound
+		# just gained a bandage or a splint that the decals colour differently
+		# and that `limb_usable()` reads when deciding a fracture is supported.
+		target._body_changed()
 		_body_state.medical_supplies -= 1
+		_body_changed(false)
 		practice("medicine", 0.5)
 		task_label = "Treating " + target.given_name
 		target._refresh_condition(false)
@@ -420,7 +561,7 @@ func update_animation(delta: float, speed: float) -> void:
 		if not _parts.has(location):
 			continue
 		var part: Node3D = _parts[location]
-		if not Body.usable(_body_state, location):
+		if not _usable(location):
 			part.rotation = Vector3(0.06, 0, 0.12 if location.ends_with("_l") else -0.12)
 	if mobility_scale() < 0.5 and _parts.has("torso"):
 		_parts.torso.rotation.z = 0.12 if Body.disabled(_body_state.parts.leg_l) else -0.12
@@ -480,12 +621,19 @@ func _rebuild_armor() -> void:
 func _refresh_condition(play_effects: bool) -> void:
 	if _unit_visual == null:
 		return
-	if play_effects and _sword.visible and not can_strike():
+	# One verdict each, shared by the drop check and the visibility it implies.
+	# This used to ask both questions twice over — twelve whole-body walks, at
+	# three apiece, for two answers. `_drop_equipment()` only reparents a
+	# duplicated mesh and cannot injure anyone, so nothing between the two uses
+	# of either verdict can change it.
+	var striking := can_strike()
+	var shielding := can_use_shield()
+	if play_effects and _sword.visible and not striking:
 		_drop_equipment(_sword)
-	if play_effects and _shield.visible and not can_use_shield():
+	if play_effects and _shield.visible and not shielding:
 		_drop_equipment(_shield)
-	_sword.visible = can_strike()
-	_shield.visible = can_use_shield()
+	_sword.visible = striking
+	_shield.visible = shielding
 	for location in Body.LOCATIONS:
 		if _parts.has(location):
 			_parts[location].visible = not _body_state.parts[location].severed
@@ -503,14 +651,13 @@ func _refresh_condition(play_effects: bool) -> void:
 
 
 func _refresh_injury_marks() -> void:
+	if _marks_drawn == _marks_version:
+		return
+	_marks_drawn = _marks_version
 	var treatments := {}
 	for wound in _body_state.wounds:
 		if wound.bandaged or wound.splinted:
 			treatments[wound.region] = true
-	var signature := str(_body_state.regions) + str(treatments)
-	if signature == _injury_signature:
-		return
-	_injury_signature = signature
 	for visual in _injury_visuals:
 		visual.free()
 	_injury_visuals.clear()
@@ -628,6 +775,9 @@ func apply_damage(damage: float) -> void:
 	if health <= 0.0 or damage <= 0.0 or not is_finite(damage):
 		return
 	_body_state.strain = minf(100.0, float(_body_state.strain) + damage)
+	# Strain kills but leaves no mark: thirst, hunger and exhaustion draw no
+	# decal, so the marks version stays where it is.
+	_body_changed(false)
 	_refresh_condition(true)
 
 

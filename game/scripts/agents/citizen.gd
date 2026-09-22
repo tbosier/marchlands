@@ -387,8 +387,44 @@ func advance(delta: float, world: World) -> float:
 	return step
 
 
+## How long this person keeps their cached route before recomputing it.
+##
+## Everyone given an order in the same tick used to renew exactly
+## PATH_CACHE_SECONDS later, together, and then together again, forever: a
+## column ordered out of the keep kept coming due on one frame, and a few
+## hundred routes landing on a single frame is what puts a multi-second frame
+## next to a four-millisecond median. Bringing each person's renewal forward by
+## their own share of the window breaks the column up. Forward only — see
+## Config.PATH_CACHE_JITTER for why nobody's route may outlive the plain
+## window.
+##
+## The share is derived from the citizen id and not from randf(): where a
+## person walks decides the position that is saved and fingerprinted, and a
+## route that depended on the RNG cursor or on the order actors happened to be
+## advanced in would make a reloaded save diverge from the one that wrote it.
+func _path_cache_interval() -> float:
+	# Multiplying by a large odd constant first, because ids are handed out in
+	# sequence: taken raw, the people ordered out together — neighbours in the
+	# roster, usually — would land on neighbouring shares, which is the
+	# synchronised renewal again with a second or two of smear on it. Odd times
+	# id is a bijection modulo a power of two, so the shares stay evenly spread
+	# while consecutive ids fall far apart in the window.
+	var share := float(posmod(id * 2654435761, 65536)) / 65536.0
+	return Config.PATH_CACHE_SECONDS * (1.0 - Config.PATH_CACHE_JITTER * share)
+
+
 func _repath(world: World) -> void:
-	_repath_timer = Config.PATH_CACHE_SECONDS
+	# Carry the overshoot instead of restarting the window from this frame.
+	# Simulation steps are capped at MAX_SIM_STEP and a fast-forwarded game sits
+	# on that cap, so a bare reset rounds every interval up to the same multiple
+	# of the step: two people a tenth of a second apart in their windows come due
+	# on the same frame anyway, cycle after cycle, and the spread buys nothing
+	# beyond its first turn. Keeping the fraction they overran by lets their
+	# renewals keep walking apart. Only the overshoot, and only one step of it:
+	# a repath forced early — by a road change, or by being wedged — starts its
+	# next window whole.
+	_repath_timer = _path_cache_interval() \
+			+ clampf(_repath_timer, -Config.MAX_SIM_STEP, 0.0)
 	_path = world.nav.find_path(global_position, _goal)
 	_path_index = 0
 	_path_revision = world.nav.revision

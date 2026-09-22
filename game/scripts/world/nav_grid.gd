@@ -330,12 +330,39 @@ func _label_component(start: Vector2i) -> void:
 func _smooth(points: PackedVector2Array) -> PackedVector2Array:
 	if points.size() <= 2:
 		return points
+	# Running cost of the waypoint chain from the first point up to each
+	# waypoint. Every candidate shortcut has to know what the stretch it would
+	# replace costs, and that stretch is always a run of consecutive segments;
+	# measuring it by walking those segments again per candidate re-priced the
+	# same segment once for every waypoint the anchor had not yet reached. With
+	# the chain totals to hand the answer is one subtraction.
+	#
+	# The pass below prices every consecutive segment once, including stretches
+	# that a candidate thrown out by the clearance test would never have asked
+	# about. That is two cell probes per waypoint, against a clearance walk that
+	# each candidate pays anyway — the trade is worth it in every direction but
+	# the degenerate one where nothing is ever smoothed.
+	var chain := PackedFloat64Array()
+	# How many segments up to each waypoint were impassable. INF cannot go into
+	# a running total — one blocked segment would make every later difference
+	# INF as well, including stretches that are perfectly walkable — so the sum
+	# stays finite and the blocked ones are counted alongside it instead.
+	var chain_blocks := PackedInt32Array()
+	chain.resize(points.size())
+	chain_blocks.resize(points.size())
+	chain[0] = 0.0
+	chain_blocks[0] = 0
+	for w in range(1, points.size()):
+		var seg := _line_cost(points[w - 1], points[w])
+		var impassable := seg == INF
+		chain[w] = chain[w - 1] + (0.0 if impassable else seg)
+		chain_blocks[w] = chain_blocks[w - 1] + (1 if impassable else 0)
 	var out := PackedVector2Array()
 	out.append(points[0])
 	var anchor := 0
 	var i := 1
 	while i < points.size() - 1:
-		if (grid_size > Config.GRID and i - anchor >= 24) or not _shortcut_is_worthwhile(points, anchor, i + 1):
+		if (grid_size > Config.GRID and i - anchor >= 24) or not _shortcut_is_worthwhile(points, chain, chain_blocks, anchor, i + 1):
 			out.append(points[i])
 			anchor = i
 		i += 1
@@ -345,18 +372,33 @@ func _smooth(points: PackedVector2Array) -> PackedVector2Array:
 
 ## True when going straight from `a` to `b` is passable and costs no more than
 ## following the waypoints between them.
-func _shortcut_is_worthwhile(points: PackedVector2Array, a: int,
+##
+## `chain` and `chain_blocks` are the running totals `_smooth` built over the
+## consecutive segments of `points`, so the cost of the stretch being replaced
+## is a difference rather than a fresh walk along it.
+func _shortcut_is_worthwhile(points: PackedVector2Array, chain: PackedFloat64Array,
+							 chain_blocks: PackedInt32Array, a: int,
 							 b: int) -> bool:
 	if not _clear_line(points[a], points[b]):
 		return false
 	var direct := _line_cost(points[a], points[b])
 	if direct == INF:
 		return false
-	var along := 0.0
-	for i in range(a, b):
-		along += _line_cost(points[i], points[i + 1])
-		if along == INF:
-			return true
+	# Some segment of the stretch is impassable to the straight-line sampler,
+	# so it has no finite price to beat: the clear line always wins. This is
+	# what the old accumulator did when `along` first went INF.
+	if chain_blocks[b] > chain_blocks[a]:
+		return true
+	# Differencing the totals is not bit-identical to adding the same segments
+	# up from zero; it differs in the last place or two of a double. Note what
+	# that does and does not buy: the test below is not equality but a 2% band,
+	# so a route sitting within a few ULPs of that boundary can be decided the
+	# other way, and a flipped decision moves `anchor` and reshapes the rest of
+	# the smoothing -- and with it where the wear trail is stamped. The claim
+	# here is only that the perturbation is ~1e-16 relative against a 2e-2
+	# threshold, so a flip needs a route already balanced on the boundary to
+	# that precision. No such route has been produced, and none is ruled out.
+	var along := chain[b] - chain[a]
 	# A little slack, or floating-point noise leaves the staircase in place.
 	return direct <= along * 1.02
 

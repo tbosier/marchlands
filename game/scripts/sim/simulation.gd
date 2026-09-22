@@ -1813,11 +1813,45 @@ func population_members() -> Array[Citizen]:
 	return members
 
 
+## Exactly the membership `population_members` returns, counted without
+## building the array. Callers that only want the head count were duplicating
+## the whole citizen list to read `.size()` off it, and `_update_stats` is one
+## of them — it runs once per death as well as on its timer, so a tick that
+## buried a dozen people duplicated the settlement a dozen times over.
+func population_count() -> int:
+	var total := citizens.size()
+	if campaign != null:
+		for unit in campaign.units.values():
+			if unit.faction == 0 and unit.health > 0.0:
+				total += 1
+	if trade != null:
+		total += trade.caravans.size()
+	if scouting != null:
+		total += scouting.scouts.size()
+	if water != null:
+		total += water.carriers.size()
+	return total
+
+
 ## Active armies advance in Campaign; civilian, merchant and scout veterans
 ## continue the same physical condition exactly once while assigned elsewhere.
 func _advance_civilian_conditions(delta: float) -> void:
+	# The skip is what keeps a serving soldier from bleeding twice in one tick,
+	# and it has to be identity on the object rather than on `id`. Enlisting
+	# hands the recruit a fresh number from the campaign's own counter and files
+	# the civilian one away in `_civilian_ids`, so the two lists being compared
+	# here are numbered by two independent registries; an id equal on both sides
+	# means nothing until you know which registry issued it.
+	# `campaign.units.values().has(c)` was that same object-identity test, but it
+	# built a fresh array of every unit in both armies and scanned it linearly
+	# once per person — quadratic as soon as the army is most of the population.
+	# A dictionary of instance ids is the identical test in one hash.
+	var serving := {}
+	if campaign != null:
+		for unit in campaign.units.values():
+			serving[unit.get_instance_id()] = true
 	for c in population_members():
-		if campaign != null and campaign.units.values().has(c): continue
+		if serving.has(c.get_instance_id()): continue
 		if c is Soldier: c.advance_condition(delta)
 		if (c.service_health <= 0 or (c is Soldier and c.health <= 0)) and citizens_by_id.get(c.id) == c:
 			var home: Building = buildings_by_id.get(c.home_id)
@@ -1997,7 +2031,7 @@ func _tick_immigrant(c: Citizen, delta: float) -> void:
 
 
 func _update_stats() -> void:
-	stat_population = population_members().size()
+	stat_population = population_count()
 	stat_homeless = 0
 	stat_idle = 0
 	for c in citizens:
