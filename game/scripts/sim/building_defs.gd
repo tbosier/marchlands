@@ -47,6 +47,26 @@ class Def:
 	var plots_per_worker := 0
 	var buildable := true
 
+	## Damage this building takes before it is destroyed.
+	##
+	## Lives here rather than in Building because save validation has to know a
+	## type's ceiling with no Building to ask. It used to restate the same
+	## table inline: lower one copy and not the other and every saved building
+	## already above the new ceiling is refused as "invalid building damage",
+	## and there is no migration to undo that.
+	var max_health := 200.0
+
+	## Least height this building occupies, whatever its generated asset
+	## measures.
+	##
+	## AssetRegistry.height() only knows the mesh it produced, and that height
+	## sizes the box the player clicks. Buildings wearing fittings bolted on
+	## afterwards — the fort's palisade, the barracks banner — stand taller
+	## than their mesh, so without a floor their upper half cannot be selected.
+	## A food depot gets its floor from its role instead, since every market
+	## and supply yard grows stalls; this field covers what a role cannot say.
+	var min_height := 0.0
+
 	## The type this building can grow into (design doc 6.4), and what that
 	## costs. Upgrading keeps the structure where it is and rebuilds it in
 	## place, which is what preserves the visible history of a settlement:
@@ -158,6 +178,7 @@ static func _build() -> void:
 		"stores": [Config.Res.FOOD, Config.Res.TIMBER, Config.Res.STONE,
 				   Config.Res.IRON, Config.Res.TOOLS, Config.Res.HIDES, Config.Res.LEATHER],
 		"buildable": false,
+		"max_health": 800.0,
 	})
 	_add({
 		"type_id": "house",
@@ -204,6 +225,7 @@ static func _build() -> void:
 		"worker_slots": 2,
 		"storage": 120.0,
 		"stores": [Config.Res.FOOD],
+		"max_health": 180.0,
 	})
 	_add({
 		"type_id": "supply_hut",
@@ -221,6 +243,7 @@ static func _build() -> void:
 		"upgrades_to": "fort",
 		"upgrade_cost": {Config.Res.TIMBER: 45, Config.Res.STONE: 35, Config.Res.TOOLS: 8},
 		"upgrade_time": 40.0,
+		"max_health": 180.0,
 	})
 	_add({
 		"type_id": "fort",
@@ -235,6 +258,8 @@ static func _build() -> void:
 		"storage": 180.0,
 		"stores": [Config.Res.FOOD],
 		"buildable": false,
+		"max_health": 600.0,
+		"min_height": 5.0,
 	})
 	_add({
 		"type_id": "barracks",
@@ -245,6 +270,8 @@ static func _build() -> void:
 				+ "from a market, supply hut or another reachable store.",
 		"cost": {Config.Res.TIMBER: 40, Config.Res.STONE: 20},
 		"build_time": 32.0,
+		"max_health": 300.0,
+		"min_height": 5.0,
 	})
 	_add({
 		"type_id": "scout_lodge", "asset": "logging_camp",
@@ -408,7 +435,7 @@ const _FIELDS := [
 	"type_id", "asset", "variants", "display_name", "description", "role",
 	"profession", "cost", "build_time", "worker_slots", "houses", "storage",
 	"stores", "produces", "consumes", "harvest_kind", "work_radius",
-	"plots_per_worker", "buildable",
+	"plots_per_worker", "buildable", "max_health", "min_height",
 	"upgrades_to", "upgrade_cost", "upgrade_time",
 ]
 
@@ -437,6 +464,8 @@ static func _add(row: Dictionary) -> void:
 	def.work_radius = float(row.get("work_radius", 40.0))
 	def.plots_per_worker = int(row.get("plots_per_worker", 0))
 	def.buildable = bool(row.get("buildable", true))
+	def.max_health = float(row.get("max_health", 200.0))
+	def.min_height = float(row.get("min_height", 0.0))
 	def.upgrades_to = String(row.get("upgrades_to", ""))
 	def.upgrade_cost = row.get("upgrade_cost", {})
 	def.upgrade_time = float(row.get("upgrade_time", 24.0))

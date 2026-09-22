@@ -14,6 +14,55 @@ const MARKET_STOCK_TARGETS := [40, 80, 120]
 const MARKET_SERVICE_RADIUS := 80.0
 const SUPPLY_RELAY_RANGE := 160.0
 
+## How far a blaze reaches, in metres of clear ground between two footprints.
+## Placement allows neighbours as close as 1 m apart (Simulation.can_place pads
+## only the building being placed, by CLEARANCE), so this covers a packed row
+## and a narrow lane and stops short of anything that reads as a street.
+const FIRE_SPREAD_REACH := 10.0
+## Fire an exposed building gains per second per unit of exposure, set against
+## the 0.01/s `tick_fire` takes back off. A firepot leaves fire 0.55, so that
+## building can hold a neighbour's blaze up out to about 5.7 m of clear ground;
+## past that the neighbour loses more each second than it gains and never gets
+## going, whatever the reach above allows. That is the distance the ask was
+## really about: houses built together, not houses across a lane.
+const FIRE_SPREAD_RATE := 0.10
+## The most exposure one building can take on at once, whatever is burning
+## around it: a roof has its own rate of catching, and being ringed by six fires
+## does not set it alight six times as fast. Fire feeds back — a neighbour that
+## catches starts lighting its neighbours — so without a ceiling the feedback is
+## superlinear in how many buildings are in range, and an uncapped nine-house
+## quarter went from one firepot to every roof at full blaze in about ten
+## seconds, which no bucket chain can answer.
+##
+## 0.20 is the whole answerability budget, and it was chosen by running packed
+## layouts rather than by eye. It holds the worst case at +0.01/s net however
+## many neighbours are alight, which gives a building taking maximum exposure
+## from cold about ninety seconds before `tick_fire` has destroyed it. Measured
+## at the tightest packing can_place allows, one firepot into a four-house row:
+## ignored, the row is lost entirely; answered by two carriers on a
+## forty-second round trip, two of the four survive; answered by a carrier sent
+## to each fire, all four survive at about half condition. A nine-house block
+## needs the player to answer every fire -- two carriers do not hold it — but
+## answering does save it.
+##
+## Every one of those answered figures is an UPPER BOUND, not a prediction. The
+## carriers in them are `regressions.gd::_buckets`, which empties the two worst
+## fires in the settlement every forty seconds; a real WaterSystem carrier holds
+## one target for the life of its job, draws a bucket only as deep as the well
+## it walked to, and goes home when it is hungry. The real response is weaker
+## than every number above, by an amount this cap has never been measured
+## against -- see that function for the three ways it differs. What the figures
+## do support is the ordering: ignored is worse than answered, and answering
+## every fire is better than answering two.
+##
+## Raise this and each of those falls a step: the row stops surviving two
+## carriers and the block stops being saveable at all.
+const FIRE_SPREAD_EXPOSURE_CAP := 0.20
+## What a blaze loses per second to nothing in particular — a roof falling in,
+## a thatch that has already burned. Named because the spread threshold above is
+## only meaningful against it.
+const FIRE_DECAY := 0.01
+
 var id: int = -1
 var type_id: String = ""
 var def: BuildingDefs.Def = null
@@ -91,11 +140,7 @@ func setup(building_id: int, definition: BuildingDefs.Def,
 	health = max_health()
 	asset_id = variant if variant != "" else def.asset
 	footprint = registry.footprint(asset_id)
-	_height = registry.height(asset_id)
-	if def.is_food_depot():
-		_height = maxf(_height, 3.6)
-	if type_id in ["fort", "barracks"]:
-		_height = maxf(_height, 5.0)
+	_apply_height_floor(registry)
 
 	inventory.resize(Config.RES_COUNT)
 	incoming.resize(Config.RES_COUNT)
@@ -110,6 +155,23 @@ func setup(building_id: int, definition: BuildingDefs.Def,
 	name = "%s_%d" % [type_id, building_id]
 	_build_visual(registry)
 	_build_body()
+
+
+## Measure the finished building, not just the mesh the generator produced.
+##
+## `_height` sizes the box the player clicks, and several types wear
+## fittings added after the registry measured them: market stalls on a food
+## depot, a palisade on a fort, a banner on a barracks. The stockpile and
+## camp meshes those share are short, so without a floor the upper part of
+## the building the player can see is not part of the building they can hit.
+##
+## Placement and upgrading both come through here, and used to repeat this
+## floor and its list of type ids line for line.
+func _apply_height_floor(registry: AssetRegistry) -> void:
+	_height = registry.height(asset_id)
+	if def.is_food_depot():
+		_height = maxf(_height, 3.6)
+	_height = maxf(_height, def.min_height)
 
 
 func _build_visual(registry: AssetRegistry) -> void:
@@ -221,13 +283,15 @@ func food_stock_target() -> int:
 	return market_stock_target if def.is_market() else 0
 
 
+## Damage this building takes before it is destroyed.
+##
+## The figure belongs to the definition, not to this class: save validation
+## has to check a saved health against its type's ceiling with no Building
+## to ask, and it used to restate this table inline. Lower one copy and not
+## the other and every saved building already above the new ceiling is
+## refused as "invalid building damage", which no migration can undo.
 func max_health() -> float:
-	match type_id:
-		"keep": return 800.0
-		"fort": return 600.0
-		"barracks": return 300.0
-		"market", "supply_hut": return 180.0
-	return 200.0
+	return def.max_health
 
 
 func apply_damage(amount: float, incendiary: float = 0.0) -> bool:
@@ -246,10 +310,90 @@ func tick_fire(delta: float) -> bool:
 		return health <= 0.0
 	if fire > 0.0:
 		health = maxf(0.0, health - fire * max_health() * 0.025 * delta)
-		fire = maxf(0.0, fire - delta * 0.01)
+		fire = maxf(0.0, fire - delta * FIRE_DECAY)
 		_fire_time += delta
 	_refresh_damage_visual()
 	return health <= 0.0
+
+
+# --- Fire spread ------------------------------------------------------------
+
+## The clear ground between this building and another, measured footprint to
+## footprint rather than centre to centre.
+##
+## Centres say nothing about whether two walls are close enough for one thatch
+## to light the other. A grain warehouse is 16 m deep and a cottage 10.4 m, so
+## their centres stand 13.2 m apart with the two walls already touching, while
+## two cottages 13.2 m apart have 2.8 m of lane between them. (The figure here
+## used to read 12 m against a 16 m building, which is 1.2 m inside the walls
+## rather than against them; the point it was making is unchanged.) Overlapping
+## footprints return 0.
+##
+## Both footprints are the world-axis ones from `plan_footprint`, which is the
+## same ground `can_place` refuses to build on and `NavGrid` refuses to walk
+## through. For a quarter turn that is the building's real outline; at 45° it is
+## the box around it, so fire will cross a diagonal pair whose walls are further
+## apart than their boxes. Deliberately left agreeing with the rest of the game:
+## that ground is already treated as occupied everywhere else, a player cannot
+## put anything in it, and the error only ever makes fire reach further than the
+## walls suggest, never shorter.
+func footprint_gap(other: Building) -> float:
+	return footprint_gap_between(position, plan_footprint(),
+			other.position, other.plan_footprint())
+
+
+## The same measurement for a caller that already holds both world-axis
+## footprints — the spread scan does, and recomputing them per candidate put two
+## pairs of trigonometry in its innermost loop.
+static func footprint_gap_between(a: Vector3, a_plan: Vector2,
+		b: Vector3, b_plan: Vector2) -> float:
+	var dx: float = absf(a.x - b.x) - (a_plan.x + b_plan.x) * 0.5
+	var dz: float = absf(a.z - b.z) - (a_plan.y + b_plan.y) * 0.5
+	return Vector2(maxf(0.0, dx), maxf(0.0, dz)).length()
+
+
+## What this building's blaze does to something standing `gap` metres clear of
+## it: proportional to how hard this one is burning, and falling away with the
+## square of the reach left. Squared rather than linear because the owner's ask
+## was about houses "built together" — at 2 m a neighbour takes 64% of the full
+## exposure and at 8 m only 4%, which is the difference between a packed row and
+## the far side of a lane.
+func fire_exposure_at(gap: float) -> float:
+	if fire <= 0.0 or gap >= FIRE_SPREAD_REACH or not is_finite(gap):
+		return 0.0
+	var near: float = 1.0 - maxf(0.0, gap) / FIRE_SPREAD_REACH
+	return fire * near * near
+
+
+## Take on heat from the fires around this building over `delta` seconds.
+## Returns true on the scan it catches, so the caller can warn the player once
+## instead of every scan.
+##
+## Everything standing is flammable, building sites included: an unroofed frame
+## with the week's timber stacked against it is the most combustible thing in a
+## settlement. Exempting sites was tried and abandoned. It hands the player a
+## firebreak — ring a street in blueprints and never finish them — and worse,
+## `begin_upgrade` puts a finished, stocked, occupied building back into
+## `under_construction` with an empty `delivered`, so the exemption quietly made
+## every building fireproof for as long as its upgrade waited on materials.
+##
+## What counts as catching is "was completely out, and is now taking on more
+## heat per second than it sheds". Both halves matter. A threshold on intensity
+## cannot be used: a fire climbing slowly across one straddles it — up on the
+## scan's gain, back under on the decay between — and warns over and over,
+## while a slightly different frame rate steps clean across it and never warns
+## at all. `tick_fire` clamps `fire` to exactly 0.0 whenever a building sheds
+## more than it takes, so "exactly 0.0" is an honest latch that needs nothing
+## saved, and the rate test stops the trickle a far-off blaze leaves on a roof
+## it could never light from being reported as a fire.
+func take_fire_exposure(exposure: float, delta: float) -> bool:
+	if delta <= 0.0 or exposure <= 0.0 or not is_finite(exposure) or not is_finite(delta):
+		return false
+	var gain := FIRE_SPREAD_RATE * minf(exposure, FIRE_SPREAD_EXPOSURE_CAP)
+	var caught := fire == 0.0 and gain > FIRE_DECAY
+	fire = clampf(fire + gain * delta, 0.0, 1.0)
+	_refresh_damage_visual()
+	return caught
 
 
 func _add_palisade(parent: Node3D) -> void:
@@ -555,11 +699,7 @@ func begin_upgrade(next: BuildingDefs.Def, cost: Dictionary, seconds: float,
 	health = max_health() * condition
 	asset_id = next.asset
 	footprint = registry.footprint(asset_id)
-	_height = registry.height(asset_id)
-	if def.is_food_depot():
-		_height = maxf(_height, 3.6)
-	if type_id in ["fort", "barracks"]:
-		_height = maxf(_height, 5.0)
+	_apply_height_floor(registry)
 
 	under_construction = true
 	build_progress = 0.0

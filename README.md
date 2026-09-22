@@ -495,12 +495,12 @@ before/after observations and test limitations.
 `first_road.json` is the §34 definition of done, executable:
 
 ```
-PASS wear_above 100 (peak 1928)
+PASS wear_above 100 (peak 1373)
 PASS road_level_at_least Footpath (reached Dirt track)
-PASS Timber >= 60 (have 326)
-PASS population 24 >= 20
-upgraded route at (397, 411): Dirt track -> Improved road
-PASS navigation weights match road levels (93 cells)
+PASS Timber >= 60 (have 156)
+PASS population 24 >= 22 (4 settled since day one)
+upgraded route at (375, 395): Dirt track -> Improved road
+PASS navigation weights match the ground (26041 walkable cells, 468 of them road)
 PASS road_level_at_least Dirt track (reached Improved road)
 ALL CHECKS PASSED
 ```
@@ -511,6 +511,14 @@ changing how the ground looked without ever reweighting the pathfinder, and
 every assertion still went green. Asserting on the road's *appearance* was
 never enough; the test now asserts on the graph the citizens actually use, and
 fails if the defect is reintroduced.
+
+A second review found the check itself passing by accident. It only looked at
+road cells, and a road cell is repriced whenever its level moves — so the one
+kind of cell it inspected was the one kind that healed itself. The cells that
+stayed wrong were the quiet ones ringing each building pad, where the ground is
+flattened wider than the footprint the placement refreshes. It now sweeps every
+walkable cell, and the road-level comparison is what keeps it honest about
+there being roads to check at all.
 
 | scenario | what it proves |
 |---|---|

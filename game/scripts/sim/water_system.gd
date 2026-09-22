@@ -10,6 +10,23 @@ const SEEK_AT := 0.45
 const BUCKET := 4.0
 const POISON_SECONDS := 12.0
 const POISON_DAYS := 4.0
+## Scrubbing a poisoned well out by hand: half a day of one resident's labour on
+## site, on top of the walk there and back. POISON_DAYS is four, so purging is
+## plainly the faster road -- but it is not free and it is not instant. The well
+## is also baled dry to do it, which is what keeps waiting a real option: the
+## price of acting is a worker's half-day plus a well that has to refill at
+## REFILL_PER_DAY, against the price of doing nothing, which is everyone who
+## drinks there falling ill for four days. It costs no stored resource; the
+## project already prices labour, and a tool or a plank would only add a second
+## way for the order to be refused.
+const PURGE_SECONDS := 90.0
+## A purge is a carrier job, not a second kind of mission. Both live in
+## `carriers`, share `_finish_carrier`, and are told apart by these two states.
+## Folding them together is deliberate: `Simulation.population_members` walks
+## `water.carriers` to find the people detached into water service, so a purger
+## kept in a dictionary of its own would stop eating, stop drinking and stop
+## counting as a resident for as long as the job lasted.
+const PURGE_STATES := ["approach","purging"]
 var sim: Simulation
 var world: World
 var registry: AssetRegistry
@@ -19,6 +36,11 @@ var carriers: Dictionary = {}
 var poison_jobs: Dictionary = {}
 var _review := 0.0
 var _moved := {}
+## Tick-scoped copy of the settlement's and the rival's buildings, held only for
+## the duration of `tick()` (see `_tick` for why it is safe, and `_buildings`
+## for what it deliberately does not cache).
+var _building_cache: Dictionary = {}
+var _building_cache_live := false
 
 func setup(p_sim: Simulation, p_world: World, p_registry: AssetRegistry) -> void:
 	sim = p_sim
@@ -28,7 +50,19 @@ func setup(p_sim: Simulation, p_world: World, p_registry: AssetRegistry) -> void
 	name = "water_system"
 	_sync_wells()
 
+## Every building either side of the frontier, by id. This duplicates a
+## dictionary and merges a second one, and `_well_for` and `_drink` each wanted
+## it once per person: with the army marching and thirsty that was one full
+## duplication of the settlement per soldier per tick, and it dominated the
+## water span. During `tick` the copy is made once and handed out unchanged.
+##
+## What is cached is the *membership* — which ids exist and which Building each
+## names. The Buildings themselves are the same references the simulation holds,
+## so `under_construction`, `fire`, inventory and position are all still read
+## live, and `wells` (the poison and water levels) is not cached at all: a well
+## poisoned by `_poison_tick` contaminates the next drinker immediately.
 func _buildings() -> Dictionary:
+	if _building_cache_live: return _building_cache
 	var out := sim.buildings_by_id.duplicate()
 	if sim.campaign != null: out.merge(sim.campaign.enemy_buildings)
 	return out
@@ -77,6 +111,18 @@ func _key(c: Citizen) -> int:
 static func _pack(faction: int, identity: int) -> int:
 	return (identity << 1) | faction
 
+## `_pack` is a shift and an or, so the two halves come straight back out. Any
+## caller already holding a key gets the faction and the identity for the price
+## of a mask, instead of re-running `_faction` (which scans the rival's worker
+## list for every civilian) and `_identity` (a dictionary lookup for every
+## soldier of ours). Four of those per person per tick were being recomputed
+## from a key that was already in hand.
+static func _faction_of(key: int) -> int:
+	return key & 1
+
+static func _identity_of(key: int) -> int:
+	return key >> 1
+
 func _people() -> Dictionary:
 	var out := {}
 	for c in sim.population_members(): out[_key(c)] = c
@@ -89,8 +135,13 @@ func _people() -> Dictionary:
 func handles(c: Citizen) -> bool:
 	# One key per call. Every campaign unit and every citizen asks this once a
 	# tick, so building the key twice here doubled a per-actor-per-frame cost.
-	var key := _key(c)
-	if _moved.has(key) or drinkers.has(key) or carriers.has(c.id): return true
+	# The carrier check wants only the citizen id, and neither of the keyed
+	# lookups can hit when both dictionaries are empty, so the key is not built
+	# at all in a settlement where nobody is drinking or being moved.
+	if carriers.has(c.id): return true
+	if not _moved.is_empty() or not drinkers.is_empty():
+		var key := _key(c)
+		if _moved.has(key) or drinkers.has(key): return true
 	for job in poison_jobs.values():
 		var scout: Scout = sim.scouting.scouts.get(job.scout_id) if sim.scouting != null else null
 		if scout != null and scout.person == c: return true
@@ -116,24 +167,50 @@ func sabotage_target(person_id: int) -> Vector3:
 			if b != null: return b.global_position
 	return Vector3.INF
 
-func _well_for(c: Citizen) -> Building:
+## `faction` is the drinker's side. Callers inside the tick loop already hold
+## the packed key and pass `_faction_of(key)` rather than paying for `_faction`
+## a second time for the same person.
+##
+## The search walks `wells` rather than every building. The old loop scanned the
+## whole settlement and discarded all but the wells on the first line of the
+## body, which cost a dictionary lookup per building per thirsty person; the
+## wells are the only candidates either way, and a well id with no building
+## behind it was never a candidate in the old form either.
+##
+## Identical candidates do not by themselves mean an identical winner, and this
+## is where walking a different dictionary could be seen. The old `d < distance`
+## left an exact tie to whichever entry came first, which was the building
+## order — an order a save restores, because the buildings are placed again in
+## the order they were recorded. `wells` is NOT restored in its own order:
+## `setup()` runs before `restore()` and reseeds it in building order, and
+## `restore()` then overwrites those entries in place. A settlement that
+## finished its wells out of the order it sited them would therefore have broken
+## a tie one way while playing and the other way after loading. So ties are
+## broken on the building id, which is stable in both, and the result no longer
+## depends on any insertion order at all: the nearest reachable well, and the
+## lowest id among equals.
+func _well_for(c: Citizen, faction: int) -> Building:
 	var best: Building
 	var distance := INF
-	var faction := _faction(c)
-	for b in _buildings().values():
-		if not wells.has(b.id) or b.under_construction or wells[b.id].water < 0.01: continue
-		var enemy: bool = sim.campaign != null and sim.campaign.enemy_buildings.has(b.id)
-		if int(enemy) != faction: continue
+	var buildings := _buildings()
+	var enemy_buildings: Dictionary = sim.campaign.enemy_buildings if sim.campaign != null else {}
+	for id in wells:
+		if wells[id].water < 0.01: continue
+		var b: Building = buildings.get(id)
+		if b == null or b.under_construction: continue
+		if int(enemy_buildings.has(id)) != faction: continue
 		var door := sim.entrance_of(b,"att_entrance")
 		var d := c.global_position.distance_squared_to(door)
-		if d < distance and world.nav.can_reach(c.global_position,door):
-			best = b
-			distance = d
+		if d > distance or (d == distance and (best == null or b.id > best.id)): continue
+		if not world.nav.can_reach(c.global_position,door): continue
+		best = b
+		distance = d
 	return best
 
-func _move(c: Citizen, p: Vector3, delta: float) -> bool:
+## `key` must be the caller's own `_key(c)`; every call site already has one.
+func _move(c: Citizen, p: Vector3, delta: float, key: int) -> bool:
 	if c.service_health <= 0 or (c is Soldier and c.health <= 0): return false
-	_moved[_key(c)] = true
+	_moved[key] = true
 	if c is Soldier and c.incapacitated(): return false
 	c.set_indoors(false)
 	c.set_goal(p)
@@ -144,12 +221,49 @@ func _damage(c: Citizen, amount: float) -> void:
 	if c is Soldier: c.apply_damage(amount)
 	else: c.service_health = maxf(0,c.service_health-amount)
 
+## Holds the building set still for the length of one tick. Nothing reached from
+## `_tick` adds or removes a building. The only writers of `sim.buildings_by_id`
+## are `Simulation.place_building` and `Simulation.demolish`, and of
+## `campaign.enemy_buildings` are `FrontierCampaign._create_building`,
+## `_destroy_enemy` and `_reset`. Every caller of those five is a player order,
+## world generation, a save restore, the test harness, or `FrontierCampaign.tick`
+## — which burns down and demolishes rival buildings, but which `Simulation.tick`
+## runs long after water, water being the very first thing it ticks.
+##
+## `_tick` does reach a fair way out of this file and twice comes back into it:
+## `request_firefighting` calls `sim.detach_for_service` and `_finish_carrier`
+## calls `sim.return_from_service`, and both end in `_update_stats` and its
+## `stats_changed` signal, which nothing in the project connects; the second also
+## runs `stores.refresh_totals`, which calls back into `transit` here. None of
+## those, nor `scouting.recall` — which returns straight into `cancel_poison` —
+## touches the building membership, and the ones that re-enter only read.
+##
+## The wrapper exists so that holding it still cannot outlive the tick. Leaving
+## the flag set past the end — through a future early `return` in `_tick`, say —
+## would serve a stale set to `well_info` and `sabotage_target` afterwards, and
+## then to a well that a player demolished between ticks. Keep the body in
+## `_tick` and let this clear it.
 func tick(delta: float) -> void:
 	if delta <= 0 or not is_finite(delta): return
+	_building_cache = _buildings()
+	_building_cache_live = true
+	_tick(delta)
+	_building_cache_live = false
+	_building_cache = {}
+
+func _tick(delta: float) -> void:
 	_moved.clear()
 	_sync_wells()
+	# A well under the brush holds nothing drinkable. This is the whole of the
+	# "steer people away" behaviour: `_well_for` already refuses a well with no
+	# water, so nobody needs telling about the purge and no second rule can drift
+	# out of step with the first.
+	var scrubbed := {}
+	for job in carriers.values():
+		if job.state == "purging": scrubbed[job.well_id] = true
 	for well in wells.values():
-		well.water = minf(CAPACITY,well.water+REFILL_PER_DAY*delta/Config.DAY_LENGTH)
+		if scrubbed.has(well.id): well.water = 0.0
+		else: well.water = minf(CAPACITY,well.water+REFILL_PER_DAY*delta/Config.DAY_LENGTH)
 		well.poison_days = maxf(0,well.poison_days-delta/Config.DAY_LENGTH)
 		if well.poison_days <= 0: well.poison = 0.0
 	var people := _people()
@@ -164,7 +278,7 @@ func tick(delta: float) -> void:
 			c.water_sickness = maxf(0,c.water_sickness-delta/(Config.DAY_LENGTH*4.0))
 		if c.hydration <= 0: _damage(c,delta*0.03)
 		if c.hydration <= SEEK_AT and not drinkers.has(key):
-			var well := _well_for(c)
+			var well := _well_for(c,_faction_of(key))
 			if well != null:
 				# A loaded delivery owns its destination's reserved room. Keep
 				# that job through the drinking trip, just as through a meal;
@@ -174,15 +288,27 @@ func tick(delta: float) -> void:
 					sim._retire_job(c)
 					if previous_job != null: sim._restore_felling_claim(previous_job)
 				c.clear_goal()
-				drinkers[key] = {"faction":_faction(c),"person_id":_identity(c),"well_id":well.id}
+				# Unpacked from the key rather than recomputed: `key` is
+				# `_pack(_faction(c),_identity(c))` for this very person, so the
+				# two fields capture() persists are the same integers either way.
+				drinkers[key] = {"faction":_faction_of(key),"person_id":_identity_of(key),"well_id":well.id}
 		if drinkers.has(key): _drink(c,key,delta)
-	for id in carriers.keys(): _fire_tick(id,delta)
+	# `carriers.has(id)` and not the bare key: one carrier's tick can now end
+	# another's. `_fire_tick` breaks off a purge that is holding the only well dry
+	# (see `_break_purges_for_fire`), and `_finish_carrier` erases that entry --
+	# which, without this guard, would index a key this loop had already copied
+	# and take the tick down with it.
+	for id in carriers.keys():
+		if carriers.has(id): _carrier_tick(id,delta)
 	for id in poison_jobs.keys(): _poison_tick(id,delta)
 	_review -= delta
 	if _review <= 0:
 		_review = 2.0
 		for b in sim.buildings:
-			if b.fire > 0.05 and carriers.size() < 2: request_firefighting(b.id)
+			# Purges share `carriers`, and a settlement that ordered one must not
+			# thereby stop answering its own fires. Only bucket carriers count
+			# against the automatic response limit.
+			if b.fire > 0.05 and _firefighters() < 2: request_firefighting(b.id)
 	# Enemy workers are actual people too; drinking poison never kills a
 	# remote population counter that did not visit the well.
 	if sim.campaign != null:
@@ -208,8 +334,20 @@ func _drink(c: Citizen, key: int, delta: float) -> void:
 		c.clear_goal()
 		_resume_civilian(c)
 		return
+	# A well pinned dry for scrubbing is not going to refill for the rest of the
+	# purge, and `amount <= 0.00001` below would otherwise leave this person
+	# standing at the head waiting on water that is not coming -- for the whole
+	# ninety seconds, not the moment an ordinary well takes to catch up. Release
+	# them so the next tick picks somewhere else. `_well_for` will not offer this
+	# well back, and if it was the only one they simply go thirsty, which is the
+	# price of the order rather than a bug in it.
+	if _scrubbing(b.id):
+		drinkers.erase(key)
+		c.clear_goal()
+		_resume_civilian(c)
+		return
 	c.task_label = "Fetching drinking water"
-	if not _move(c,sim.entrance_of(b,"att_entrance"),delta): return
+	if not _move(c,sim.entrance_of(b,"att_entrance"),delta,key): return
 	var well: Dictionary = wells[b.id]
 	var amount := minf(float(well.water),(1.0-c.hydration)*2.0)
 	if amount <= 0.00001: return
@@ -247,23 +385,31 @@ func request_firefighting(building_id: int) -> String:
 	var target: Building = sim.buildings_by_id.get(building_id)
 	if target == null or target.fire <= 0: return "Choose a burning building in your settlement."
 	for job in carriers.values():
-		if job.target_id == building_id: return "A bucket carrier is already responding."
-	var c: Citizen
-	var well: Building
-	for person in sim.citizens:
-		if person.immigrant or handles(person) or person.service_health <= 0 or person.carrying_amount + (person.rations if person is Soldier else 0.0) > Config.CARRY_CAPACITY-BUCKET: continue
-		if person is Soldier and (person.health <= 0 or person.incapacitated() or person.workability() <= 0): continue
-		var source := _well_for(person)
-		if source != null and world.nav.can_reach(sim.entrance_of(source,"att_entrance"),sim.entrance_of(target,"att_entrance")):
-			c = person
-			well = source
-			break
-	if c == null: return "No available resident can carry water from a reachable well."
+		if job.target_id == building_id and job.state not in PURGE_STATES: return "A bucket carrier is already responding."
+	var crew := _fire_crew(target)
+	if crew.is_empty():
+		# Nobody could be sent. If the reason is a purge holding water at zero, the
+		# purge gives way -- see `_break_purges_for_fire` for when it is judged to
+		# be the reason, and why it is broken off rather than suspended.
+		#
+		# No second search afterwards, because none could succeed. `_tick` refills
+		# at the top and the pin overwrote this well to zero on the way past, so
+		# the shaft holds nothing until the next tick, and `_well_for` wants 0.01.
+		# Nor can the freed purger be used: `_moved` still carries the key their
+		# own `_purge_tick` set this tick, so `handles` refuses them until it is
+		# cleared. The dispatcher's next pass is what actually sends somebody, and
+		# `_break_purges_for_fire` is honest about how long that takes.
+		if not _break_purges_for_fire(target): return "No available resident can carry water from a reachable well."
+		return "The well was being scrubbed out. The work is broken off, and a carrier goes as soon as the shaft has refilled enough to fill a bucket."
+	var c: Citizen = crew[0]
+	var well: Building = crew[1]
+	# Nobody detached here is overloaded: `_fire_crew` refuses a person whose
+	# hands are already full. See `_purge_worker` for why that matters.
 	sim.detach_for_service(c)
 	c.reparent(self)
 	c.profession = "bucket carrier"
 	c.clear_goal()
-	carriers[c.id] = {"person":c,"target_id":target.id,"well_id":well.id,"state":"fill"}
+	carriers[c.id] = {"person":c,"target_id":target.id,"well_id":well.id,"state":"fill","progress":0.0}
 	return ""
 
 func _bucket(c: Citizen) -> void:
@@ -300,7 +446,12 @@ func _finish_carrier(id: int, died: bool = false) -> void:
 	_bucket(c)
 	sim.return_from_service(c,c.id)
 
-func _fire_tick(id: int, delta: float) -> void:
+## Everything both kinds of water service owe regardless of the job. Neither a
+## bucket carrier nor a well purger is in `sim.citizens` any more, so hunger,
+## death and the one-movement-per-person rule are settled here for both before
+## the job's own leg runs -- and death routes through `_finish_carrier`, which is
+## the single place a detached person is ever handed back or buried.
+func _carrier_tick(id: int, delta: float) -> void:
 	var job: Dictionary = carriers[id]
 	var c: Citizen = job.person
 	if not sim.buildings_by_id.has(c.home_id): c.home_id = -1
@@ -309,20 +460,195 @@ func _fire_tick(id: int, delta: float) -> void:
 		return
 	c.update_hunger(sim.day,delta/Config.DAY_LENGTH)
 	var key := _key(c)
-	if _moved.has(key) or drinkers.has(key): return
+	# A movement already spent this tick, or a drinking trip under way, stops the
+	# job's own leg. It must not stop the job from ENDING. This used to return
+	# outright, which left a purger who had walked off to another well deaf to
+	# everything that finishes a purge: the well they were scrubbing was pinned
+	# dry for the rest of the game after its poison expired, and a well demolished
+	# while they drank left them in `carriers` and out of `citizens_by_id` for
+	# good -- a resident permanently lost. The termination checks run either way
+	# now; only the walking and the work wait on `busy`.
+	var busy := _moved.has(key) or drinkers.has(key)
+	if job.state in PURGE_STATES: _purge_tick(id,job,c,key,delta,busy)
+	else: _fire_tick(id,job,c,key,delta,busy)
+
+## True while a worker is actually standing at this well with the brush, which
+## is the window in which `_tick` pins its water to zero. It is NOT true while
+## they are still walking there: an untouched poisoned well is still a well
+## people can drink from, and saying otherwise on the panel would be a lie.
+func _scrubbing(well_id: int) -> bool:
+	for job in carriers.values():
+		if job.well_id == well_id and job.state == "purging": return true
+	return false
+
+func _firefighters() -> int:
+	var count := 0
+	for job in carriers.values():
+		if job.state not in PURGE_STATES: count += 1
+	return count
+
+## The well a bucket carrier could fill at and still reach `target` from.
+## `request_firefighting` asks it when it hands out the job and `_fire_tick` asks
+## it again when the chosen well runs dry, so a source nobody could have been
+## given is not a source anybody is left standing at either.
+func _fire_source(c: Citizen, target: Building) -> Building:
+	var source := _well_for(c,_faction(c))
+	if source == null: return null
+	if not world.nav.can_reach(sim.entrance_of(source,"att_entrance"),sim.entrance_of(target,"att_entrance")): return null
+	return source
+
+## Whether this person has the hands and the health to carry a bucket. Pulled
+## out because `_break_purges_for_fire` has to ask the same question `_fire_crew`
+## asks, about a person who is not in `sim.citizens` yet; two copies of a filter
+## this specific would drift the first time either was touched.
+func _could_carry(person: Citizen) -> bool:
+	if person.immigrant or person.service_health <= 0: return false
+	if person.carrying_amount + (person.rations if person is Soldier else 0.0) > Config.CARRY_CAPACITY-BUCKET: return false
+	if person is Soldier and (person.health <= 0 or person.incapacitated() or person.workability() <= 0): return false
+	return true
+
+## The first resident who could fetch water to `target`, and the well they would
+## draw from, or an empty array.
+func _fire_crew(target: Building) -> Array:
+	for person in sim.citizens:
+		if handles(person) or not _could_carry(person): continue
+		var source := _fire_source(person,target)
+		if source != null: return [person,source]
+	return []
+
+## Could anybody actually draw from this wellhead, if it held anything? This is
+## the person-side half of what `_fire_source` asks, put to one particular well.
+##
+## `also` is the purger standing on that well. They are not in `sim.citizens`
+## while detached and `handles` would refuse them in any case, but breaking the
+## purge hands them straight back, so they are a real candidate -- provided their
+## hands are as free as a bucket carrier's have to be, which `_purge_worker`
+## does not require and so does not guarantee.
+func _anyone_could_fetch(head: Vector3, also: Citizen = null) -> bool:
+	for person in sim.citizens:
+		if handles(person) or not _could_carry(person): continue
+		if world.nav.can_reach(person.global_position,head): return true
+	return also != null and _could_carry(also) and world.nav.can_reach(also.global_position,head)
+
+## Fire outranks scrubbing. Returns true if any purge was broken off.
+##
+## A purge pins its well to zero for as long as the scrubbing lasts -- the
+## PURGE_SECONDS of onsite work at least, and longer whenever the worker is
+## pushed off the well or walks away to drink, since `_purge_tick` banks onsite
+## time only while the pin in `_tick` keys on the job state alone. A march begins
+## with one well. With that well held dry `_well_for` skips it, `_fire_source` returns
+## null and `request_firefighting` refuses every candidate -- so one purge
+## disarmed the settlement's whole firefighting response, and the automatic
+## dispatcher in `_tick` went on failing at it every two seconds with nobody
+## told. Measured with fire spread live: the keep ended a purged fire on 39 of
+## 800 HP against 746 unpurged, which is a lost game rather than a slow one.
+## Nothing in the shipped game poisons a friendly well yet, so the order cannot
+## be given -- this is closed before rival sabotage makes it reachable.
+##
+## Broken off, not suspended. `_finish_carrier` is the single door a detached
+## person comes home through, and `_purge_tick` already discards onsite progress
+## the moment a worker steps off the well, so a suspended purge would either park
+## a resident at the wellhead banking nothing for the length of the fire or send
+## them home anyway -- the second with an extra state to save, validate and
+## resume. This cancels exactly as `cancel_purge` does: the worker goes back to
+## ordinary work and the well stays poisoned, because the buckets are wanted now
+## and the poison keeps.
+##
+## Releasing a well does not fill it. The shaft was physically baled out, so it
+## comes back at REFILL_PER_DAY -- 40 a day against a DAY_LENGTH of 180 s, about
+## 0.22 a second. It is a candidate for `_well_for` again within a tick, since
+## that asks only for 0.01, and the automatic dispatcher then sends somebody on
+## its own two-second cadence: measured in `water.gd`, four seconds from the
+## building catching to a carrier being detached. What is slow is the water, not
+## the dispatch. Each trip draws whatever has trickled in rather than a full
+## BUCKET -- about one bucket's worth every 18 s, against the twenty buckets a
+## full 80-unit shaft hands out on demand -- so the response is thin for the
+## first minute and ordinary after six, when the well is full again. That is the
+## honest price of the order, and it is what the player is warned about when
+## they give it.
+##
+## Broken only where the purge is genuinely the reason this fire has no water.
+## `_fire_crew` also comes back empty when every resident is busy or loaded, and
+## cancelling the player's order over that would be its own defect. So each
+## purged well is asked the two questions `_fire_source` would have asked of it
+## had it held anything: can a carrier reach the fire from its head, and could
+## anybody draw from that head. Both, or it is left alone.
+##
+## Asked about the purged well itself and NOT about what else the settlement has.
+## An earlier form here bailed out when any other watered well could reach the
+## fire, which is a different question and one that answers "yes" in cases where
+## no resident can use that well at all: `_well_for` offers only the NEAREST
+## watered well it can reach and `_fire_source` then tests that one against the
+## fire, so a second well standing full is no proof anybody can fight with it.
+## That form would have vetoed the break and left a carrier at a dry head for
+## the length of the purge -- the very lost game this function exists to stop.
+##
+## Only a state of "purging", too. A purge still walking to its well has baled
+## nothing, so an empty shaft is not its doing; and if it bales one under a
+## carrier already standing there, `_fire_tick` asks this question again and
+## catches it then.
+func _break_purges_for_fire(target: Building) -> bool:
+	var door := sim.entrance_of(target,"att_entrance")
+	var broken := false
+	for id in carriers.keys():
+		var job: Dictionary = carriers[id]
+		if job.state != "purging": continue
+		var well: Building = sim.buildings_by_id.get(job.well_id)
+		if well == null: continue
+		var head := sim.entrance_of(well,"att_entrance")
+		if not world.nav.can_reach(head,door): continue
+		if not _anyone_could_fetch(head,job.person): continue
+		_finish_carrier(id)
+		broken = true
+		sim.alert.emit("Well scrubbing broken off to fight the fire — the shaft is refilling, and the water is still poisoned.",well.global_position)
+	return broken
+
+func _fire_tick(id: int, job: Dictionary, c: Citizen, key: int, delta: float, busy: bool) -> void:
 	var target: Building = sim.buildings_by_id.get(job.target_id)
 	var well: Building = sim.buildings_by_id.get(job.well_id)
 	if target == null or target.fire <= 0 or well == null or not wells.has(well.id) or c.hunger >= Config.HUNGER_URGENT:
-		# Return unused bucket water to its source when possible.
-		if c.water_bucket > 0 and well != null and wells.has(well.id):
+		# Return unused bucket water to its source when possible -- but never into
+		# a well being held dry for a purge. An empty shaft is the whole premise of
+		# the order, and four units tipped back in are four that `_well_for` can
+		# offer a drinker before the next tick pins it to zero again. Poured out
+		# instead, which is the same loss a carrier with no well left takes.
+		# Nor at the price of holding the job open. A carrier part way through a
+		# drinking trip cannot walk anywhere, and a drink that never finishes --
+		# a well that stopped being reachable after it was chosen -- would keep
+		# them detached from the settlement for good. Tip the bucket out and hand
+		# them back, exactly as when the well was demolished under them: four
+		# units of a well that refills against a resident lost for good.
+		if c.water_bucket > 0 and well != null and wells.has(well.id) and not _scrubbing(well.id) and not busy:
 			c.task_label = "Returning unused bucket water"
-			if not _move(c,sim.entrance_of(well,"att_entrance"),delta): return
+			if not _move(c,sim.entrance_of(well,"att_entrance"),delta,key): return
 			wells[well.id].water = minf(CAPACITY,wells[well.id].water+c.water_bucket)
 		_finish_carrier(id)
 		return
+	if busy: return
 	if job.state == "fill":
+		# A source can run dry under a standing firefighter: a purge pins its well
+		# to zero for ninety seconds, and an ordinary well can simply be drunk
+		# down. Waiting at the head for water that is not coming burned a building
+		# to nothing -- the keep included -- while another well stood full, and no
+		# second carrier could be sent because this one already held the fire. Ask
+		# the assignment's own question again rather than wait.
+		if float(wells[well.id].water) < 0.01:
+			var replacement := _fire_source(c,target)
+			# No other well to go to, which in a one-well settlement is every
+			# time. Break the purge off and stand where they are. Not this tick's
+			# water: `_tick` refills at the top and the pin already zeroed this
+			# shaft on the way past, so `_fire_source` still comes back null here
+			# and the fill leg below still takes nothing. From the next tick the
+			# well refills instead of being pinned, and the fill leg takes
+			# whatever has arrived. `request_firefighting` cannot reach this case
+			# at all -- it refuses the moment a fire already has a carrier.
+			if replacement == null and _break_purges_for_fire(target): replacement = _fire_source(c,target)
+			if replacement != null:
+				job.well_id = replacement.id
+				well = replacement
+				c.clear_goal()
 		c.task_label = "Filling a firefighting bucket"
-		if not _move(c,sim.entrance_of(well,"att_entrance"),delta): return
+		if not _move(c,sim.entrance_of(well,"att_entrance"),delta,key): return
 		var amount := minf(BUCKET,float(wells[well.id].water))
 		if amount < 0.01: return
 		wells[well.id].water -= amount
@@ -332,12 +658,140 @@ func _fire_tick(id: int, delta: float) -> void:
 		c.clear_goal()
 	else:
 		c.task_label = "Carrying water to the fire"
-		if not _move(c,sim.entrance_of(target,"att_entrance"),delta): return
+		if not _move(c,sim.entrance_of(target,"att_entrance"),delta,key): return
 		target.fire = maxf(0,target.fire-c.water_bucket*0.25)
 		c.water_bucket = 0
 		_bucket(c)
 		job.state = "fill"
 		c.clear_goal()
+
+## The one worker a purge would take, or null. `purge_quote` and `request_purge`
+## both ask, so the button the player sees is disabled by exactly the search that
+## would have run had they pressed it.
+func _purge_worker(target: Building) -> Citizen:
+	var door := sim.entrance_of(target,"att_entrance")
+	for person in sim.citizens:
+		if person.immigrant or handles(person) or person.service_health <= 0: continue
+		# Hands already full. `sim.detach_for_service` hands the cart back but
+		# leaves the cargo on the person's back, so a carter part way through a
+		# cartload -- Cart.CAPACITY, four times what a pair of hands may hold --
+		# became a water carrier that `validate` rejects outright as an
+		# "overloaded water carrier", and the game could not be saved at all until
+		# the order was cancelled.
+		#
+		# Refused rather than made to put the load down: goods in this game move
+		# because somebody carries them, so tipping a cartload out at the wellhead
+		# would either destroy it or teleport it into a store nobody walked to,
+		# and neither is a thing an order to scrub a well should do. The
+		# settlement sends somebody whose hands are free instead, which is what
+		# `request_firefighting` above has always done -- it asks for the same
+		# room and a bucket's worth besides. A carter is not refused for good,
+		# only until they have walked their load to where it was going.
+		if person.carrying_amount + (person.rations if person is Soldier else 0.0) > Config.CARRY_CAPACITY: continue
+		if person is Soldier and (person.health <= 0 or person.incapacitated() or person.workability() <= 0): continue
+		if not world.nav.can_reach(person.global_position,door): continue
+		return person
+	return null
+
+## True when scrubbing this well out leaves the settlement with nothing else to
+## draw from. `_break_purges_for_fire` makes that survivable rather than fatal,
+## but it costs the first minute of a fire, so the order says so before it is
+## given (game.gd) and the panel says so while it runs (hud.gd). Wells still
+## being dug hold nothing and do not count; a rival's well is not in
+## `sim.buildings_by_id` at all, which is the same reason `purge_quote` reads
+## that dictionary rather than `_buildings()`.
+func _sole_well(well_id: int) -> bool:
+	for id in wells:
+		if id == well_id: continue
+		var other: Building = sim.buildings_by_id.get(id)
+		if other != null and not other.under_construction: return false
+	return true
+
+## Why this reads `sim.buildings_by_id` and not `_buildings()`: only the
+## settlement's own wells are there. A rival well is in `campaign.enemy_buildings`
+## and so cannot be named here at all, which is deliberate -- the player may
+## poison the enemy's water but may not send a resident across the frontier to
+## clean it, and refusing by lookup means there is no second rule to forget.
+func purge_quote(well_id: int) -> Dictionary:
+	var q := {"can_purge":false,"reason":"Select one of your own completed wells.","well_id":well_id,"purging":false,"poisoned":false,"sole_well":false}
+	var target: Building = sim.buildings_by_id.get(well_id)
+	if target == null or target.type_id != "well" or target.under_construction or not wells.has(well_id): return q
+	q.sole_well = _sole_well(well_id)
+	q.poisoned = wells[well_id].poison > 0
+	for job in carriers.values():
+		if job.well_id == well_id and job.state in PURGE_STATES:
+			q.purging = true
+			q.reason = "A worker is already scrubbing this well out."
+			return q
+	q.reason = "This well is clean. There is nothing to scrub out."
+	if not q.poisoned: return q
+	q.reason = "No available resident with free hands can reach this well on foot."
+	if _purge_worker(target) == null: return q
+	q.reason = ""
+	q.can_purge = true
+	return q
+
+func request_purge(well_id: int) -> String:
+	var q := purge_quote(well_id)
+	if not q.can_purge: return q.reason
+	var target: Building = sim.buildings_by_id[well_id]
+	var c := _purge_worker(target)
+	if c == null: return "No available resident with free hands can reach this well on foot."
+	sim.detach_for_service(c)
+	c.reparent(self)
+	c.profession = "well purger"
+	c.clear_goal()
+	carriers[c.id] = {"person":c,"target_id":well_id,"well_id":well_id,"state":"approach","progress":0.0}
+	return ""
+
+## The player's way back out, and the reason the order is not a trap: a worker
+## sent to a well can always be called home. Nothing is refunded, because nothing
+## was spent but time and the water already baled out of the shaft. Recalling
+## half way through leaves the well poisoned and empty, which is the honest price
+## of changing your mind.
+func cancel_purge(well_id: int) -> String:
+	for id in carriers.keys():
+		var job: Dictionary = carriers[id]
+		if job.well_id == well_id and job.state in PURGE_STATES:
+			_finish_carrier(id)
+			return ""
+	return "No worker is scrubbing this well out."
+
+## Every way out of a purge ends in `_finish_carrier`, which is the only thing
+## that hands a detached person back: the well finished, the well demolished, the
+## poison having decayed on its own while the worker walked, the worker getting
+## too hungry to stay, and -- one level up in `_carrier_tick` -- the worker dying.
+## Nothing here erases the entry itself.
+func _purge_tick(id: int, job: Dictionary, c: Citizen, key: int, delta: float, busy: bool) -> void:
+	var well: Building = sim.buildings_by_id.get(job.well_id)
+	if well == null or not wells.has(well.id) or well.under_construction or wells[well.id].poison <= 0 or c.hunger >= Config.HUNGER_URGENT:
+		_finish_carrier(id)
+		return
+	# Nothing above needs the worker to be here, so it is checked before `busy`;
+	# everything below is the work itself, which waits.
+	if busy: return
+	if job.state == "approach":
+		c.task_label = "Walking to the poisoned well"
+		if not _move(c,sim.entrance_of(well,"att_entrance"),delta,key): return
+		# Baling the shaft dry is the first hour of the work, and it is also what
+		# makes the work legible: an empty well is one `_well_for` already skips,
+		# and `_drink` lets go of anyone already walking here, so the settlement
+		# visibly turns round and drinks somewhere else.
+		wells[well.id].water = 0.0
+		job.state = "purging"
+		c.clear_goal()
+		return
+	c.task_label = "Scrubbing out the poisoned well"
+	# Progress is onsite time only. A worker shoved off the well -- or one whose
+	# path to it broke -- starts the scrubbing again, exactly as sabotage does.
+	if not _move(c,sim.entrance_of(well,"att_entrance"),delta,key):
+		job.progress = 0.0
+		return
+	job.progress += delta
+	if job.progress < PURGE_SECONDS: return
+	wells[well.id].poison = 0.0
+	wells[well.id].poison_days = 0.0
+	_finish_carrier(id)
 
 func poison_quote(scout_id: int) -> Dictionary:
 	var q := {"can_poison":false,"reason":"Select a trained scout.","cost":{Config.Res.TOOLS:1},"target_id":-1,"source_id":-1}
@@ -406,7 +860,7 @@ func _poison_tick(id: int, delta: float) -> void:
 			sim.scouting.recall(id)
 			return
 		scout.status = "Collecting a well sabotage kit"
-		if not _move(scout.person,sim.entrance_of(source,"att_entrance"),delta): return
+		if not _move(scout.person,sim.entrance_of(source,"att_entrance"),delta,key): return
 		source.reserved[Config.Res.TOOLS] = maxf(0,source.reserved[Config.Res.TOOLS]-1.0)
 		job.kit = source.remove(Config.Res.TOOLS,1.0)
 		job.reserved = false
@@ -421,7 +875,7 @@ func _poison_tick(id: int, delta: float) -> void:
 			scout.status = "Sabotage interrupted; retreating with the kit"
 			return
 	scout.status = "Approaching the enemy well" if job.state == "approach" else "Tampering with the enemy well"
-	if not _move(scout.person,sim.entrance_of(target,"att_entrance"),delta):
+	if not _move(scout.person,sim.entrance_of(target,"att_entrance"),delta,key):
 		job.progress = 0.0
 		return
 	job.state = "poisoning"
@@ -443,6 +897,13 @@ func well_info(id: int) -> Dictionary:
 	data.capacity = CAPACITY
 	data.position = b.global_position
 	data.poisoned = data.poison > 0
+	# Two different facts, because the panel says two different things: a purge is
+	# under way, and the shaft is currently empty because of it.
+	data.purging = _scrubbing(id)
+	data.purge_ordered = false
+	for job in carriers.values():
+		if job.well_id == id and job.state in PURGE_STATES: data.purge_ordered = true
+	data.sole_well = sim.buildings_by_id.has(id) and _sole_well(id)
 	data.refill_per_day = REFILL_PER_DAY
 	return data
 
@@ -453,7 +914,9 @@ func info() -> Dictionary:
 	var thirsty := 0
 	for c in sim.population_members():
 		if c.hydration <= SEEK_AT: thirsty += 1
-	return {"wells":rows,"thirsty":thirsty,"missions":carriers.size()+poison_jobs.size(),"firefighters":carriers.size()}
+	var firefighters := _firefighters()
+	return {"wells":rows,"thirsty":thirsty,"missions":carriers.size()+poison_jobs.size(),
+		"firefighters":firefighters,"purges":carriers.size()-firefighters}
 
 func transit(res: int) -> float:
 	var total := 0.0
@@ -472,7 +935,7 @@ func capture() -> Dictionary:
 		var c: Citizen = job.person
 		var identity := SaveGame._capture_citizen(c)
 		if not sim.buildings_by_id.has(c.home_id): identity.home_id = -1
-		workers.append({"citizen":identity,"target_id":job.target_id,"well_id":job.well_id,"state":job.state})
+		workers.append({"citizen":identity,"target_id":job.target_id,"well_id":job.well_id,"state":job.state,"progress":job.progress})
 	return {"wells":wells.values().duplicate(true),"drinkers":drinks,"carriers":workers,"poison_jobs":poison_jobs.values().duplicate(true)}
 
 func restore(data: Variant) -> String:
@@ -493,7 +956,13 @@ func restore(data: Variant) -> String:
 		if c is Soldier: c.rations = identity.get("veteran_rations",0.0)
 		sim.detach_for_service(c)
 		c.reparent(self)
-		carriers[c.id] = {"person":c,"target_id":entry.target_id,"well_id":entry.well_id,"state":entry.state}
+		# `progress` is additive and optional: a save written before wells could be
+		# purged has only bucket carriers in this array, and a bucket carrier's
+		# progress is zero, so an old save restores to exactly what it meant.
+		# There is no migration step to lean on -- save_validation rejects a
+		# version mismatch outright -- so nothing may become required here.
+		carriers[c.id] = {"person":c,"target_id":entry.target_id,"well_id":entry.well_id,
+			"state":entry.state,"progress":float(entry.get("progress",0.0))}
 		_bucket(c)
 	for entry in data.get("drinkers",[]): drinkers[_pack(entry.faction,entry.person_id)] = entry.duplicate()
 	for entry in data.get("poison_jobs",[]):
@@ -530,10 +999,26 @@ static func validate(data: Variant, size_m: float) -> String:
 		if error != "": return error
 		error = SaveGame.Validation._citizen(entry.citizen,null,size_m)
 		if error != "": return error
+		# A citizen record embedded in a subsystem is read back with property
+		# syntax below, but `_citizen` treats these fields as optional — it
+		# serves the top-level roster too, where `savegame.gd` tolerates their
+		# absence. Reading one that is missing throws inside the validator, and
+		# a validator that throws returns null into a String rather than
+		# rejecting, so a crafted save is neither loaded nor refused. Require
+		# them here, exactly as `trade_routes.gd` does for a merchant.
+		for field in ["asset_id", "workplace_id", "immigrant", "carrying_amount"]:
+			if not entry.citizen.has(field): return "water carrier identity missing " + field
 		if entry.citizen.workplace_id != -1 or entry.citizen.immigrant or ids.has(entry.citizen.id): return "invalid water carrier identity"
 		ids[entry.citizen.id] = true
-		if entry.target_id < 1 or entry.well_id < 1 or entry.state not in ["fill","carry"]: return "invalid firefighting mission"
-		if entry.state == "fill" and entry.citizen.get("water_bucket",0.0) > 0: return "empty carrier has uncollected water"
+		if entry.target_id < 1 or entry.well_id < 1 or entry.state not in ["fill","carry"]+PURGE_STATES: return "invalid water mission"
+		if entry.state != "carry" and entry.citizen.get("water_bucket",0.0) > 0: return "empty carrier has uncollected water"
+		# Optional, so a save from before purges existed is silent here rather
+		# than rejected; present, it must still be a real number in range, and a
+		# purger who has not reached the well yet cannot have banked any of it.
+		var progress: Variant = entry.get("progress",0.0)
+		if not TradeRoutes._number(progress,0,PURGE_SECONDS): return "invalid purge progress"
+		if float(progress) != 0.0 and entry.state != "purging": return "purge progress without onsite work"
+		if entry.state in PURGE_STATES and entry.target_id != entry.well_id: return "a purge works on its own well"
 		if entry.citizen.carrying_amount + entry.citizen.get("water_bucket",0.0) + entry.citizen.get("veteran_rations",0.0) > Config.CARRY_CAPACITY + 0.001: return "overloaded water carrier"
 	ids.clear()
 	for entry in data.poison_jobs:

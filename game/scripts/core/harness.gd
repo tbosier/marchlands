@@ -1068,40 +1068,60 @@ func _do_assert(step: Dictionary) -> void:
 					if drift.size() > 8:
 						_note("    ...and %d more" % (drift.size() - 8))
 		"nav_matches_roads":
+			# The weight sweep deliberately covers every walkable cell, not
+			# only the road cells the level comparison needs.
+			#
+			# Stopping at road cells made this a check that held by accident.
+			# A cell goes stale when a building pad is flattened across it,
+			# because the flatten reaches wider than the footprint a placement
+			# refreshes — but any cell whose road level later moves is handed
+			# to `apply_road_changes`, which reprices it from the ground as it
+			# then stands and so quietly heals it. Road cells are precisely the
+			# cells that happens to. So the old sweep passed on the opening
+			# scenario, where every building goes down before a single track has
+			# formed, passed again twelve days later, and failed only when two
+			# houses were sited across ground the carts were already using —
+			# which is the ordinary way a march grows. The cells that stay wrong
+			# are the quiet ones beside a pad, and they are the ones a route
+			# decides to bend around.
 			var wrong: Array[String] = []
-			var checked := 0
+			var roads := 0
+			var walkable := 0
 			for cz in game.world.grid_size:
 				for cx in game.world.grid_size:
+					if game.world.nav.is_solid(cx, cz):
+						continue
+					walkable += 1
 					# The level is recomputed from the raw wear field rather
 					# than read from the cache the pathfinder itself uses.
 					# Comparing the cache with the cache proved only that the
 					# two agreed with each other, which they do even when both
 					# are stale.
 					var truth: int = game.world.wear.level_from_wear(cx, cz)
-					if truth <= 0:
-						continue
-					if game.world.nav.is_solid(cx, cz):
-						continue
-					checked += 1
-					var cached: int = game.world.wear.road_level_of_cell(cx, cz)
-					if cached != truth:
-						wrong.append("(%d,%d) cached level %d, wear says %d"
-								% [cx, cz, cached, truth])
-						continue
+					if truth > 0:
+						roads += 1
+						var cached: int = game.world.wear.road_level_of_cell(cx, cz)
+						if cached != truth:
+							wrong.append("(%d,%d) cached level %d, wear says %d"
+									% [cx, cz, cached, truth])
+							continue
 					var live: float = game.world.nav.weight_at(cx, cz)
 					var want: float = game.world.nav.expected_weight(cx, cz)
 					if absf(live - want) > 0.001:
-						wrong.append("(%d,%d) weight %.4f, expected %.4f"
-								% [cx, cz, live, want])
-			if checked == 0:
+						wrong.append("(%d,%d) %s weight %.4f, expected %.4f"
+								% [cx, cz, "road" if truth > 0 else "open",
+								   live, want])
+			if roads == 0:
 				_fail("nav_matches_roads: no road cells exist to check, so "
 						+ "this proves nothing")
 			elif wrong.is_empty():
-				_note("PASS navigation weights match road levels (%d cells)"
-						% checked)
+				_note("PASS navigation weights match the ground "
+						+ "(%d walkable cells, %d of them road)"
+						% [walkable, roads])
 			else:
-				_fail("%d of %d road cells have stale navigation weights"
-						% [wrong.size(), checked])
+				_fail("%d of %d walkable cells have stale navigation weights "
+						% [wrong.size(), walkable]
+						+ "(%d road cells in the sweep)" % roads)
 				for line in wrong.slice(0, 3):
 					_note("    " + line)
 		"timber_not_lost":

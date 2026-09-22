@@ -159,6 +159,24 @@ func _ready() -> void:
 		var error: String = sim.water.poison(id)
 		_on_alert(error if error != "" else "Scout assigned to sabotage. Guards can detect and interrupt the attempt.", sim.keep.position)
 		_refresh_selection())
+	hud.purge_well_requested.connect(func(id):
+		# Scrubbing the settlement's only well out costs firefighting water as
+		# well as drinking water: WaterSystem breaks the work off when something
+		# catches, but the buckets then wait on the shaft refilling at
+		# REFILL_PER_DAY. The player is owed that when they give the order, not
+		# when the keep is alight — so the same quote the order itself runs is
+		# read first and its warning appended to the confirmation.
+		var sole: bool = sim.water.purge_quote(id).get("sole_well", false)
+		var error: String = sim.water.request_purge(id)
+		var told := "A worker is walking to the well. It stays poisoned until they arrive AND finish the work, and from the moment they start it holds no water at all — unless a fire breaks the job off, which refills the shaft and scrubs nothing."
+		if sole:
+			told += " This is your only well, so while it is dry there is nowhere to drink and no firefighting water either: a fire will break the scrubbing off, and the buckets then wait on the shaft refilling."
+		_on_alert(error if error != "" else told, sim.keep.position)
+		_refresh_selection())
+	hud.purge_cancel_requested.connect(func(id):
+		var error: String = sim.water.cancel_purge(id)
+		_on_alert(error if error != "" else "The worker is going back to ordinary work. The well is still poisoned.", sim.keep.position)
+		_refresh_selection())
 	hud.recruit_requested.connect(func():
 		var error: String = sim.campaign.recruit()
 		if error != "": _on_alert(error, sim.keep.position)

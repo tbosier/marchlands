@@ -87,6 +87,13 @@ var _wear_rate := Config.WEAR_PEDESTRIAN
 
 var _work_timer := 0.0
 var _anim_phase := 0.0
+## The lerp weight the last `update_animation()` posed the limbs with, or 0.0
+## if that call skipped the pose because the actor was too far from the camera
+## to be worth it. Soldier reads it after calling `super`, so that the two
+## levels of the animation agree about whether this frame is being drawn at
+## all rather than one of them writing limbs the other left alone. See
+## `LOD.animation_step()` for the policy and for what happens with no camera.
+var _pose_weight := 0.0
 
 var _parts := {}
 var _rest := {}
@@ -437,6 +444,7 @@ func _repath(world: World) -> void:
 
 func update_animation(delta: float, speed: float) -> void:
 	if _parts.is_empty():
+		_pose_weight = 0.0
 		return
 
 	var moving := speed > 0.15
@@ -446,27 +454,37 @@ func update_animation(delta: float, speed: float) -> void:
 		# Settle limbs back to rest instead of freezing mid-stride.
 		_anim_phase += delta * 0.6
 
+	# The phase advances above the gate, on every frame, for everyone. It is
+	# two multiplies and two adds, and keeping it tied to elapsed time means a
+	# distant actor's walk cycle runs at the right speed rather than at his
+	# share of it, and that walking back into the near band resumes the stride
+	# where it should be instead of wherever it was left. Everything below the
+	# gate is a transform write, and that is the part worth not doing.
+	_pose_weight = LOD.animation_step(self, id)
+	if _pose_weight <= 0.0:
+		return
+
 	var swing: float = sin(_anim_phase * 2.0) * (0.55 if moving else 0.0)
 	var bob: float = absf(sin(_anim_phase * 2.0)) * (0.045 if moving else 0.0)
 
-	_set_part("leg_l", Vector3(swing, 0, 0))
-	_set_part("leg_r", Vector3(-swing, 0, 0))
+	_set_part("leg_l", Vector3(swing, 0, 0), _pose_weight)
+	_set_part("leg_r", Vector3(-swing, 0, 0), _pose_weight)
 
 	if state == State.WORKING:
 		# Working: both arms rise and fall together (chopping, cutting, reaping).
 		var chop: float = sin(_anim_phase * 5.0)
-		_set_part("arm_l", Vector3(-1.15 + chop * 0.75, 0, 0))
-		_set_part("arm_r", Vector3(-1.15 + chop * 0.75, 0, 0))
-		_set_part("torso", Vector3(0.10 + chop * 0.08, 0, 0))
+		_set_part("arm_l", Vector3(-1.15 + chop * 0.75, 0, 0), _pose_weight)
+		_set_part("arm_r", Vector3(-1.15 + chop * 0.75, 0, 0), _pose_weight)
+		_set_part("torso", Vector3(0.10 + chop * 0.08, 0, 0), _pose_weight)
 	elif carrying_amount > 0.0:
 		# Carrying: arms held forward under the load.
-		_set_part("arm_l", Vector3(-1.25, 0, 0.12))
-		_set_part("arm_r", Vector3(-1.25, 0, -0.12))
-		_set_part("torso", Vector3(0.08, 0, 0))
+		_set_part("arm_l", Vector3(-1.25, 0, 0.12), _pose_weight)
+		_set_part("arm_r", Vector3(-1.25, 0, -0.12), _pose_weight)
+		_set_part("torso", Vector3(0.08, 0, 0), _pose_weight)
 	else:
-		_set_part("arm_l", Vector3(-swing * 0.8, 0, 0))
-		_set_part("arm_r", Vector3(swing * 0.8, 0, 0))
-		_set_part("torso", Vector3(0, 0, 0))
+		_set_part("arm_l", Vector3(-swing * 0.8, 0, 0), _pose_weight)
+		_set_part("arm_r", Vector3(swing * 0.8, 0, 0), _pose_weight)
+		_set_part("torso", Vector3(0, 0, 0), _pose_weight)
 
 	var torso: Node3D = _parts.get("torso")
 	if torso:
@@ -477,11 +495,15 @@ func update_animation(delta: float, speed: float) -> void:
 		head.rotation = Vector3(sin(_anim_phase * 2.0) * 0.04, 0, 0)
 
 
-func _set_part(key: String, euler: Vector3) -> void:
+## `weight` defaults to the plain per-frame smoothing rate, which is what the
+## one-off poses driven from outside the walk cycle — a soldier's swing — want.
+## `update_animation()` passes the weight its band earned instead; see
+## `LOD.ACTOR_ANIMATION_WEIGHTS`.
+func _set_part(key: String, euler: Vector3, weight: float = 0.35) -> void:
 	var part: Node3D = _parts.get(key)
 	if part == null:
 		return
-	part.rotation = part.rotation.lerp(euler, 0.35)
+	part.rotation = part.rotation.lerp(euler, weight)
 
 
 # --- Carrying ---------------------------------------------------------------

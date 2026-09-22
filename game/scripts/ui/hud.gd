@@ -33,6 +33,8 @@ signal city_report_requested()
 signal medic_requested(unit_id: int)
 signal firefighting_requested(building_id: int)
 signal poison_well_requested(scout_id: int)
+signal purge_well_requested(well_id: int)
+signal purge_cancel_requested(well_id: int)
 signal recruit_requested()
 signal muster_requested()
 signal rival_focus_requested()
@@ -1188,8 +1190,23 @@ func show_building(b: Building) -> void:
 		if b.type_id == "well" and _sim.water != null:
 			var water: Dictionary = _sim.water.well_info(b.id)
 			lines.append("\n[b]Water[/b] %.1f / %.0f\nPeople walk here to drink. Firefighters collect buckets here and carry them to fires." % [water.get("water", 0.0), water.get("capacity", 80.0)])
-			if float(water.get("poison", 0.0)) > 0.0:
-				lines.append("[color=#e0a85c]Contaminated water — drinking is dangerous.[/color]")
+			if water.get("purging", false):
+				# Two different sentences, because a sole well makes the usual one
+				# false: `_drink` lets go of everyone walking here and `_well_for`
+				# then offers nowhere else, so they do not drink elsewhere — they
+				# go thirsty and start taking damage at zero hydration.
+				if water.get("sole_well", false):
+					lines.append("[color=#e0a85c]Being scrubbed out — the shaft is baled dry, and it is your only well, so the settlement has nowhere to drink until it refills.[/color]")
+					lines.append("[color=#e0a85c]No firefighting water either. A fire breaks the scrubbing off, and the buckets then wait on the shaft refilling.[/color]")
+				else:
+					lines.append("[color=#e0a85c]Being scrubbed out — the shaft is baled dry, so people are drinking elsewhere.[/color]")
+			elif float(water.get("poison", 0.0)) > 0.0:
+				lines.append("[color=#e0a85c]Contaminated water — drinking is dangerous for about %.1f more days.[/color]" % float(water.get("poison_days", 0.0)))
+				if water.get("purge_ordered", false):
+					# Not "until they arrive": arriving only starts the work. The
+					# poison is cleared when the scrubbing finishes, and not at all
+					# if the worker is recalled or a fire breaks the job off.
+					lines.append("[color=#e0a85c]A worker is on their way. The water stays dangerous until the scrubbing is finished.[/color]")
 		if rebuild:
 			var fight_fire := _action_button("Send a worker with water")
 			fight_fire.name = "fight_fire"
@@ -1197,8 +1214,41 @@ func show_building(b: Building) -> void:
 				var live := _live_building(building_ref)
 				if live != null: firefighting_requested.emit(live.id))
 			_selection_actions.add_child(fight_fire)
+			if b.type_id == "well":
+				var purge := _action_button("Send a worker to scrub the well out")
+				purge.name = "purge_well"
+				purge.pressed.connect(func():
+					var live := _live_building(building_ref)
+					if live != null: purge_well_requested.emit(live.id))
+				_selection_actions.add_child(purge)
+				var recall := _action_button("Recall the well-scrubbing worker")
+				recall.name = "purge_cancel"
+				recall.pressed.connect(func():
+					var live := _live_building(building_ref)
+					if live != null: purge_cancel_requested.emit(live.id))
+				_selection_actions.add_child(recall)
 		var fire_button: Button = _selection_actions.get_node_or_null("fight_fire")
 		if fire_button != null: fire_button.visible = b.fire > 0.0
+		# The button shows only once there is something to scrub out, and its
+		# tooltip carries the same refusal the order itself would return, so the
+		# player never has to press it to find out why it cannot run.
+		var purge_button: Button = _selection_actions.get_node_or_null("purge_well")
+		if purge_button != null and _sim.water != null:
+			var offer: Dictionary = _sim.water.purge_quote(b.id)
+			purge_button.visible = offer.get("poisoned", false) or offer.get("purging", false)
+			purge_button.disabled = not offer.get("can_purge", false)
+			# The tooltip carries the sole-well warning as well as the refusal: a
+			# purge on the settlement's only well takes the firefighting buckets
+			# down with the drinking water, and the player should read that
+			# before pressing rather than after the keep catches.
+			var offered := "A resident walks here, bales the shaft dry and scrubs it clean. Half a day of their labour, and no drinking water here until the work is done and the well refills."
+			if offer.get("sole_well", false):
+				offered += " This is your only well, so no firefighting bucket can be filled either while it is dry: a fire breaks the scrubbing off, and the buckets then wait on the shaft refilling."
+			purge_button.tooltip_text = offer.get("reason", "") if not offer.get("can_purge", false) else offered
+			var recall_button: Button = _selection_actions.get_node_or_null("purge_cancel")
+			if recall_button != null:
+				recall_button.visible = offer.get("purging", false)
+				recall_button.tooltip_text = "Send them back to ordinary work. The well stays poisoned and stays empty until it refills."
 		if b.type_id in ["supply_hut", "fort"]:
 			lines.append("\n[b]Military food relay[/b]\nStock target %d · supply link up to 160 m\nSoldiers refill within 24 m. Assignments are automatic when workers are available." % b.food_stock_target())
 		if b.type_id == "ranch" and _sim.husbandry != null:

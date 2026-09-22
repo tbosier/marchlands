@@ -1391,6 +1391,53 @@ func entrance_of(b: Building, preferred: String) -> Vector3:
 # Buildings
 # ---------------------------------------------------------------------------
 
+## Put the travel weights back in step with ground that has just been
+## reshaped, over exactly the area the reshaping reached.
+##
+## Every pad is flattened wider than the footprint the building then blocks,
+## and `NavGrid.block_footprint` only refreshes the cells it claims — so the
+## ring between the two kept the weight scale it had before the pad was cut.
+## A cell's weight is part slope, so those cells priced the hillside that used
+## to be there for the rest of the session. On a fresh 768 m world that was
+## 178 cells, worst case 1.28 absolute and 36% relative, and it fell precisely
+## where routes are densest: around the doors people are walking to. It also
+## made a march that had been saved and reloaded path differently from one
+## that had not, because `finish_restore` rebuilds the whole grid afterwards
+## and so quietly corrected on load what play never corrected.
+##
+## The radius is the flatten window, not the pad. `Heightmap.flatten` writes
+## every corner from floor((centre - half) / CELL) to ceil((centre + half) /
+## CELL), and `Heightmap.cell_slope` is the spread across a cell's four
+## corners — so a corner at the low edge of that window belongs to the cell
+## one *before* it as well. Hence `- 1` on the near side and none on the far
+## side, where the ceil has already stepped out. Measured against the heights
+## themselves: the corners that actually move are always inside this window
+## (the apron's blend reaches zero before the last corner on a small pad), so
+## it is an upper bound rather than a guess, and a refresh of a cell whose
+## slope did not move is merely wasted, never wrong.
+##
+## `_refresh_cell` is NavGrid's own, and reaching into it is not something
+## this file does elsewhere; it wants to be a `refresh_region` there. It is
+## also the only entry point that re-derives a cell from the ground as it now
+## stands — `apply_road_changes` documents itself as being for callers where
+## the road level is the only thing that moved, and `rebuild_all` walks the
+## whole map, which is 2.4 million cells on the 6144 m world and would be paid
+## on every single placement.
+func resync_nav_after_flatten(centre: Vector3, half_w: float,
+							  half_d: float) -> void:
+	# NavGrid's own size, not the World's: `_refresh_cell` indexes straight
+	# into the arrays that were sized from the heightmap it was set up
+	# with, and does not bounds-check.
+	var last := world.nav.grid_size - 1
+	var cx0 := clampi(int(floor((centre.x - half_w) / Config.CELL)) - 1, 0, last)
+	var cx1 := clampi(int(ceil((centre.x + half_w) / Config.CELL)), 0, last)
+	var cz0 := clampi(int(floor((centre.z - half_d) / Config.CELL)) - 1, 0, last)
+	var cz1 := clampi(int(ceil((centre.z + half_d) / Config.CELL)), 0, last)
+	for cz in range(cz0, cz1 + 1):
+		for cx in range(cx0, cx1 + 1):
+			world.nav._refresh_cell(cx, cz)
+
+
 ## `forced_id` exists for loading a save, where ids are already spoken for by
 ## the citizens who work and live in them. Ordinary play leaves it alone and
 ## takes the next id in sequence.
@@ -1428,6 +1475,7 @@ func place_building(type_id: String, position: Vector3, yaw: float,
 				position.z - half_d, plan.x, plan.y))
 	# Later terrain edits can change the height beneath an existing building.
 	# Restoring its original footing must not move it to that newer height.
+	var flattened := not restoring and flatten_ground
 	var ground := position.y if restoring else (
 			world.heightmap.flatten(position, half_w + 1.5, half_d + 1.5)
 			if flatten_ground else world.heightmap.height_at(position.x, position.z))
@@ -1442,6 +1490,10 @@ func place_building(type_id: String, position: Vector3, yaw: float,
 
 	world.terrain.rebuild_region(position, half_w + 8.0, half_d + 8.0)
 	world.nav.block_footprint(b.global_position, half_w * 0.8, half_d * 0.8, true)
+	if flattened:
+		# The same centre and half-extents the flatten above was given, so the
+		# ring outside the blocked footprint is repriced on the new ground.
+		resync_nav_after_flatten(position, half_w + 1.5, half_d + 1.5)
 	_invalidate_entrances(b)
 	# A new building changes what can be walked to, in both directions.
 	jobs.clear_refusals()
@@ -1566,6 +1618,11 @@ func upgrade(b: Building) -> Dictionary:
 			plan.y * 0.5 + 8.0)
 	world.nav.block_footprint(b.global_position, plan.x * 0.4, plan.y * 0.4,
 			true)
+	# The larger pad reshapes ground the smaller building never touched, and
+	# the release above repriced the old footprint against heights the flatten
+	# then moved. Both are inside this window.
+	resync_nav_after_flatten(b.global_position, plan.x * 0.5 + 1.5,
+			plan.y * 0.5 + 1.5)
 	_invalidate_entrances(b)
 	workforce.mark_all_dirty()
 	alert.emit("%s is being made into a %s" % [was, next.display_name],

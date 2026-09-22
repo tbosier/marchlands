@@ -9,6 +9,8 @@ const PACK_DAYS := 4.0
 const SUPPLY_REACH := 24.0
 const GUARD_SIGHT := 60.0
 const CONTACT_COOLDOWN := 60.0
+const FIRE_SPREAD_INTERVAL := 0.5
+const FIRE_CELL := 24.0
 var sim: Simulation
 var world: World
 var registry: AssetRegistry
@@ -150,6 +152,13 @@ func _create_building(type_id: String, p: Vector3, id: int = -1, restoring: bool
 	if not restoring:
 		world.nodes.clear_area(b.position,maxf(b.footprint.x,b.footprint.y)*0.6)
 	world.nav.block_footprint(b.position,b.footprint.x*0.4,b.footprint.y*0.4,true)
+	if not restoring:
+		# A rival pad is flattened wider than the footprint it blocks, exactly
+		# as a player one is, so the ring around it needs the same reprice —
+		# otherwise Ashcombe's approaches keep the weights of the hillside that
+		# stood there, and our own people path through it.
+		sim.resync_nav_after_flatten(b.position, b.footprint.x*0.5 + 1.5,
+			b.footprint.y*0.5 + 1.5)
 	enemy_buildings[b.id] = b
 	return b
 
@@ -433,6 +442,11 @@ func tick(delta: float) -> void:
 	if defeated or delta <= 0.0 or not is_finite(delta): return
 	Soldier.advance_projectiles(world.effects_root, delta)
 	_patients.clear()
+	# The fire scan below needs the tick's *starting* clock, not `_time - delta`
+	# back-calculated from it: floating point does not give that subtraction
+	# back exactly, and at a thirtieth of a second the reconstruction landed on
+	# the wrong side of a half-second boundary and skipped a scan outright.
+	var was := _time
 	_time += delta
 	_tick_town(delta)
 	for event in _impacts.duplicate():
@@ -441,6 +455,7 @@ func tick(delta: float) -> void:
 			var b: Building = enemy_buildings.get(event.id) if event.faction == 0 else sim.buildings_by_id.get(event.id)
 			if b != null: b.apply_damage(6.0,0.55)
 			_impacts.erase(event)
+	_spread_fire(was)
 	for b in enemy_buildings.values().duplicate():
 		if b.tick_fire(delta): _destroy_enemy(b)
 	for b in sim.buildings.duplicate():
@@ -482,6 +497,86 @@ func tick(delta: float) -> void:
 		u.tick(delta,world)
 	_tick_security(delta)
 
+
+## Fire crosses from a burning building to whatever stands close to it, on both
+## sides of the frontier — a blaze does not ask whose roof it is under, and
+## making Ashcombe fireproof would make our own firepots pointless.
+##
+## Scanned on a cadence taken from `_time` rather than every tick. Nothing the
+## spread depends on is unsaved and nothing is random: a building's gain is a
+## function of the fires around it, the ground between, and `_time`, which is
+## captured and restored. So a loaded fire lands its scans on the same absolute
+## boundaries an uninterrupted one would and, stepped the same way, develops
+## digit for digit identically. It is not step-size independent — neither is
+## `tick_fire`, which charges damage over whatever slice it is handed — so a
+## session resumed at a different frame rate diverges in the last decimals like
+## every other accumulator in the simulation.
+func _spread_fire(previous: float) -> void:
+	var scans := floori(_time / FIRE_SPREAD_INTERVAL) - floori(previous / FIRE_SPREAD_INTERVAL)
+	if scans > 0: _spread_fire_scan(float(scans) * FIRE_SPREAD_INTERVAL)
+
+## Driven from the burning set, never from all pairs. A settlement with nothing
+## alight costs one walk of each building list and stops; only once something
+## burns is the coarse grid of possible targets built, and each blaze then reads
+## the handful of cells its reach covers instead of every building.
+##
+## Per scan that costs O(buildings) to collect the burning set, O(buildings) to
+## file the grid, and for each burning building the candidates standing in the
+## cells its reach covers — a small constant while placement keeps buildings
+## from stacking. Against that, an all-pairs proximity test is O(buildings^2),
+## every frame. The grid also carries each footprint as it lies in world axes,
+## because computing it per candidate put two `cos`/`sin` pairs inside the
+## innermost loop of the one code path that runs when the town is on fire.
+func _spread_fire_scan(elapsed: float) -> void:
+	var rival: Array = enemy_buildings.values()
+	var sources: Array[Building] = []
+	for b: Building in rival:
+		if b.fire > 0.0: sources.append(b)
+	for b in sim.buildings:
+		if b.fire > 0.0: sources.append(b)
+	if sources.is_empty(): return
+	var grid := {}
+	var plans := {}
+	var widest := 0.0
+	for b: Building in rival: widest = maxf(widest,_index_fire(grid,plans,b))
+	for b in sim.buildings: widest = maxf(widest,_index_fire(grid,plans,b))
+	# Exposure is summed per target before any of it is applied. Applying each
+	# source separately would let the cap in `take_fire_exposure` be paid once
+	# per neighbour, which is the whole thing the cap exists to stop.
+	var exposure := {}
+	for s in sources:
+		var plan: Vector2 = plans[s]
+		# Reach is edge to edge, so the cell sweep has to allow for the widest
+		# half-extent on the map at both ends of the measurement.
+		var span := ceili((Building.FIRE_SPREAD_REACH + maxf(plan.x,plan.y) * 0.5 + widest) / FIRE_CELL)
+		var home := _fire_cell(s)
+		for dz in range(-span,span + 1):
+			for dx in range(-span,span + 1):
+				var key := home + Vector2i(dx,dz)
+				if not grid.has(key): continue
+				for n: Building in grid[key]:
+					if n == s: continue
+					var heat := s.fire_exposure_at(Building.footprint_gap_between(
+						s.position,plan,n.position,plans[n]))
+					if heat > 0.0: exposure[n] = float(exposure.get(n,0.0)) + heat
+	for n: Building in exposure:
+		if n.take_fire_exposure(float(exposure[n]),elapsed) and sim.buildings_by_id.get(n.id) == n:
+			sim.alert.emit("%s has caught fire" % n.display_name(),n.position)
+
+func _fire_cell(b: Building) -> Vector2i:
+	return Vector2i(floori(b.position.x / FIRE_CELL),floori(b.position.z / FIRE_CELL))
+
+## File a building as a possible target and remember the footprint it presents
+## in world axes, so the sweep below neither recomputes it per candidate nor has
+## to guess how far a footprint can reach out of its own cell. Returns that
+## building's half-extent.
+func _index_fire(grid: Dictionary, plans: Dictionary, b: Building) -> float:
+	var key := _fire_cell(b)
+	if not grid.has(key): grid[key] = []
+	grid[key].append(b)
+	var plan := b.plan_footprint()
+	plans[b] = plan
+	return maxf(plan.x,plan.y) * 0.5
 
 func _tick_security(delta: float) -> void:
 	# Only current friendly sight can produce a contact or its alert position.

@@ -322,7 +322,12 @@ static func _building(b: Variant, registry: AssetRegistry, world_size: float = C
 	var def := BuildingDefs.get_def(b.type_id)
 	if b.get("market_stock_target", 80) not in [40, 80, 120]:
 		return "invalid market stock target"
-	var maximum_health := 800.0 if b.type_id == "keep" else (600.0 if b.type_id == "fort" else (300.0 if b.type_id == "barracks" else (180.0 if b.type_id in ["market", "supply_hut"] else 200.0)))
+	# Read from the definition, never restated here. This was an inlined copy
+	# of the table behind Building.max_health(), and lowering one copy alone
+	# refuses every saved building already above the new ceiling as "invalid
+	# building damage". Safe to reach `def` for it: an unknown type_id was
+	# turned away above, so no save can steer this at a missing definition.
+	var maximum_health := def.max_health
 	if b.get("health", maximum_health) < 0 or b.get("health", maximum_health) > maximum_health or b.get("fire", 0.0) < 0 or b.get("fire", 0.0) > 1:
 		return "invalid building damage"
 	var asset: String = b.get("asset_id", def.asset)

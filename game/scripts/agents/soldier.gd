@@ -97,6 +97,39 @@ var _cached_usable: Dictionary = {}
 var _marks_version := 0
 var _marks_drawn := -1
 
+## Which body version the equipment, limb and armour visibility in
+## `_refresh_condition()` was last written for.
+##
+## Those `.visible` writes were the largest single item left in the frame:
+## sword, shield, six body parts and up to six armour pieces — fourteen
+## property sets per soldier, by a function the owner calls once per person per
+## tick whether anything happened or not. Measured by patching them out at
+## ~16 ms of the 23.6 ms the refresh cost at 1,400 soldiers, and nearly all of
+## it assigning a property the value it already held. `Node3D::set_visible()`
+## does return early when the value has not changed, so what is being paid for
+## is not propagation but the dispatch: every one of those fourteen is a
+## scripted property set going out through the setter, 1,400 times, sixty times
+## a second. The cheapest one is the one not written.
+##
+## Every input to those writes is either `_body_state` — severance, and the
+## strike/shield verdicts, both already memoised against `_body_version` — or
+## `_civilian_mode`. So the writes cannot change unless the body version moves,
+## and the two things that can change them without moving it are handled by
+## resetting this to -1: `set_civilian_mode()`, and `_rebuild_armor()`, whose
+## fresh Node3Ds are born visible and have never been told otherwise.
+##
+## Deliberately NOT extended to the rest of `_refresh_condition()`. The goal
+## clearing, the death check and `_die()` below it run every time, because they
+## are the parts a save and the simulation can see, and because a soldier who
+## dies must be dead on the frame he dies on whatever is or is not being
+## redrawn.
+var _visuals_drawn := -1
+## Whether `_unit_visual` is currently tipped over for an incapacitated man.
+## Tracked rather than read back off the node so that keeping the posture right
+## every frame — which it must be, since it is how a downed soldier reads from
+## any distance — costs a bool compare and not a transform read.
+var _slumped_visual := false
+
 
 ## A visual projectile has its own lifetime, so an attacker's removal cannot
 ## leave a floating firepot or call a method on a freed unit. It deals no damage.
@@ -508,6 +541,10 @@ func work_tick(delta: float) -> bool:
 
 
 func set_civilian_mode(value: bool) -> void:
+	# Civilian mode is the one input to the visibility block that is not the
+	# body, so it invalidates the block itself: it decides whether the armour
+	# shows, and it is a term of `can_strike()` and `can_use_shield()`.
+	_visuals_drawn = -1
 	_civilian_mode = value
 	if value:
 		_attack_left = 0.0
@@ -557,6 +594,26 @@ static func _region_label(region: String) -> String:
 
 func update_animation(delta: float, speed: float) -> void:
 	super.update_animation(delta, speed)
+
+	# A man on the ground stays on the ground at any distance, and he goes down
+	# the next time he is ticked rather than when the camera comes round to
+	# look at him. This is posture and not animation: it is
+	# one rotation, it is driven by body state rather than by the walk cycle,
+	# and it is the difference between a casualty and a bystander when the
+	# camera finally comes round. So it sits above the gate — and, since it
+	# changes only when the body does, it is written only when it changes.
+	if _unit_visual != null:
+		var slumped := incapacitated()
+		if slumped != _slumped_visual:
+			_slumped_visual = slumped
+			_unit_visual.rotation.z = PI * 0.42 if slumped else 0.0
+
+	# The rest is the pose, and follows `super`'s decision about whether this
+	# frame is worth posing at all. Both halves must agree: the droop below
+	# overwrites limbs the walk cycle wrote, so posing one without the other
+	# would leave a distant soldier's arms arguing with his injuries.
+	if _pose_weight <= 0.0:
+		return
 	for location in Body.LIMBS:
 		if not _parts.has(location):
 			continue
@@ -565,13 +622,12 @@ func update_animation(delta: float, speed: float) -> void:
 			part.rotation = Vector3(0.06, 0, 0.12 if location.ends_with("_l") else -0.12)
 	if mobility_scale() < 0.5 and _parts.has("torso"):
 		_parts.torso.rotation.z = 0.12 if Body.disabled(_body_state.parts.leg_l) else -0.12
-	if incapacitated() and _unit_visual != null:
-		_unit_visual.rotation.z = PI * 0.42
-	elif _unit_visual != null:
-		_unit_visual.rotation.z = 0.0
 
 
 func _rebuild_armor() -> void:
+	# The pieces below are created visible, so whatever the last refresh
+	# decided about civilian mode has to be decided again for these ones.
+	_visuals_drawn = -1
 	for visual in _armor_visuals:
 		visual.free()
 	_armor_visuals.clear()
@@ -621,24 +677,33 @@ func _rebuild_armor() -> void:
 func _refresh_condition(play_effects: bool) -> void:
 	if _unit_visual == null:
 		return
-	# One verdict each, shared by the drop check and the visibility it implies.
-	# This used to ask both questions twice over — twelve whole-body walks, at
-	# three apiece, for two answers. `_drop_equipment()` only reparents a
-	# duplicated mesh and cannot injure anyone, so nothing between the two uses
-	# of either verdict can change it.
-	var striking := can_strike()
-	var shielding := can_use_shield()
-	if play_effects and _sword.visible and not striking:
-		_drop_equipment(_sword)
-	if play_effects and _shield.visible and not shielding:
-		_drop_equipment(_shield)
-	_sword.visible = striking
-	_shield.visible = shielding
-	for location in Body.LOCATIONS:
-		if _parts.has(location):
-			_parts[location].visible = not _body_state.parts[location].severed
-	for armor in _armor_visuals:
-		armor.visible = not _civilian_mode
+	# Nothing below can have moved unless the body did, or civilian mode was
+	# switched, or the armour was rebuilt — see `_visuals_drawn`. Dropping the
+	# equipment belongs inside the guard rather than outside it: the drop fires
+	# on the transition from a visible sword to an unusable arm, and on a tick
+	# where the verdicts cannot have changed there is no transition to catch.
+	if _visuals_drawn != _body_version:
+		_visuals_drawn = _body_version
+		# One verdict each, shared by the drop check and the visibility it
+		# implies. This used to ask both questions twice over — twelve
+		# whole-body walks, at three apiece, for two answers.
+		# `_drop_equipment()` only reparents a duplicated mesh and cannot
+		# injure anyone, so nothing between the two uses of either verdict can
+		# change it.
+		var striking := can_strike()
+		var shielding := can_use_shield()
+		if play_effects and _sword.visible and not striking:
+			_drop_equipment(_sword)
+		if play_effects and _shield.visible and not shielding:
+			_drop_equipment(_shield)
+		_sword.visible = striking
+		_shield.visible = shielding
+		for location in Body.LOCATIONS:
+			if _parts.has(location):
+				_parts[location].visible = \
+						not _body_state.parts[location].severed
+		for armor in _armor_visuals:
+			armor.visible = not _civilian_mode
 	_refresh_injury_marks()
 	if mobility_scale() <= 0.0:
 		clear_goal()

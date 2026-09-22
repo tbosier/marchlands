@@ -42,6 +42,55 @@ var revision := 0
 var _component_revision := -1
 var _components := PackedInt32Array()
 var _next_component := 0
+## The two halves of `_weight` that do not depend on the road level, held per
+## cell so the smoother does not rebuild them from the heightmap once per
+## sample. `_line_cost` walks a cell every two metres and a single smoothed
+## route walks thousands of them, so the surface lookup, the four corner
+## heights behind `cell_slope` and the two Vector2i dictionary probes were
+## being repeated far more often than anything underneath them changed.
+##
+## Deliberately *not* the weight itself: the road level is read live on every
+## lookup, exactly as before, because that is the feedback loop the file's
+## opening comment describes and a route that starts preferring a forming path
+## partway through a frame is the intended behaviour.
+##
+## The slope penalty has to be a double: `_weight` works it out in one, and a
+## narrower cache would price routes fractionally differently from the graph
+## A* searches. The surface does not, so it is kept as its code and looked up
+## in `_surface_speed`. Together they cost nine bytes a cell — a third of a
+## megabyte on the default map, and about 21 MB on the 6144 m one, of which
+## the slope half is 19. The code doubles as the validity flag;
+## `_SURFACE_UNKNOWN` is what invalidation writes.
+var _surface_cache := PackedByteArray()
+var _slope_cache := PackedFloat64Array()
+const _SURFACE_UNKNOWN := 255
+## Code-to-speed, flattened at setup from the enum-keyed table below so the
+## hot lookup is an array index. Keyed by name rather than written out in
+## enum order, so adding a surface cannot silently shift the mapping.
+##
+## Sized to cover every byte a cell can hold, not just the codes the enum
+## names, and pre-filled with the grass speed — which is what
+## `Heightmap.surface_speed` returns from its own `_:` branch. Anything this
+## table has not heard of therefore prices exactly as the uncached path prices
+## it. Sizing it to the enum instead made a sixth surface, or a stray byte in
+## `Heightmap.surface`, either read off the end or come back as a zero speed,
+## and a zero speed here means 1000 — the drowning price. The smoother would
+## have called the cell a wall while A* walked over it as ordinary ground.
+var _surface_speed := PackedFloat64Array()
+const _SURFACE_SPEEDS := {
+	Heightmap.Surface.WATER: Config.SPEED_WATER,
+	Heightmap.Surface.MARSH: Config.SPEED_MARSH,
+	Heightmap.Surface.GRASS: Config.SPEED_GRASS,
+	Heightmap.Surface.FOREST: Config.SPEED_FOREST,
+	Heightmap.Surface.ROCK: Config.SPEED_ROCK,
+}
+## How many flattenings the heightmap had been through when the caches were
+## last known good. Placing or upgrading a building flattens a pad wider than
+## the footprint it then blocks, so cells outside that footprint change slope
+## with no per-cell refresh to hang an invalidation on; `Heightmap.edits` grows
+## by exactly one whenever ground actually moves, and nothing else moves it
+## after generation.
+var _terrain_epoch := -1
 
 
 func setup(hm: Heightmap, wear: WearField) -> void:
@@ -51,9 +100,28 @@ func setup(hm: Heightmap, wear: WearField) -> void:
 	_blocked.resize(grid_size * grid_size)
 	_node_blocked.resize(grid_size * grid_size)
 	_cultivated.resize(grid_size * grid_size)
+	_surface_cache.resize(grid_size * grid_size)
+	_slope_cache.resize(grid_size * grid_size)
 	_blocked.fill(0)
 	_node_blocked.fill(0)
 	_cultivated.fill(0)
+	_surface_cache.fill(_SURFACE_UNKNOWN)
+	_slope_cache.fill(0.0)
+	_terrain_epoch = -1
+	# Rebuilt unconditionally. Guarding this on the table's own size meant a
+	# second setup skipped the check below along with the build, so the one
+	# run that could have reported a missing surface was the one that never
+	# happened again.
+	_surface_speed.resize(256)
+	_surface_speed.fill(Config.SPEED_GRASS)
+	for code in _SURFACE_SPEEDS:
+		_surface_speed[code] = _SURFACE_SPEEDS[code]
+	# The fill above keeps an unlisted surface priced the same either way, so
+	# this is a note to whoever added one, not a guard against a wrong number.
+	if _SURFACE_SPEEDS.size() != Heightmap.Surface.size():
+		push_error("nav weights list %d of %d surfaces; the rest are priced "
+				% [_SURFACE_SPEEDS.size(), Heightmap.Surface.size()]
+				+ "as grass")
 	revision += 1
 
 	astar.region = Rect2i(0, 0, grid_size, grid_size)
@@ -68,15 +136,25 @@ func setup(hm: Heightmap, wear: WearField) -> void:
 			_refresh_cell(cx, cz)
 
 
-func _refresh_cell(cx: int, cz: int) -> void:
+## `terms_moved` is false only for a caller that has changed the road level and
+## nothing else. The road level is read live and is not cached, so dropping the
+## cached terms for it is pure waste — and it is the change that happens most,
+## since it is how wear turns into road. Every other caller keeps the default,
+## so a new one has to say it is safe rather than be assumed to be.
+func _refresh_cell(cx: int, cz: int, terms_moved: bool = true) -> void:
 	var p := Vector2i(cx, cz)
+	var i := cz * grid_size + cx
 	var solid := not _hm.is_passable(cx, cz) and not _deck_cells.has(p)
 	if not solid:
-		var i := cz * grid_size + cx
 		solid = _blocked[i] > 0 or _node_blocked[i] != 0
 	if astar.is_point_solid(p) != solid:
 		revision += 1
 	astar.set_point_solid(p, solid)
+	# Bridge decking and cultivation both arrive here and both move the cached
+	# terms, so drop them whether the cell ended up solid or not and let the
+	# next lookup work them out.
+	if terms_moved:
+		_surface_cache[i] = _SURFACE_UNKNOWN
 	if solid:
 		return
 	astar.set_point_weight_scale(p, _weight(cx, cz))
@@ -90,16 +168,64 @@ func _weight(cx: int, cz: int) -> float:
 	if speed <= 0.0:
 		return 1000.0
 	speed *= Config.ROAD_SPEED[_wear.road_level_of_cell(cx, cz)]
+	return clampf(_slope_penalty(cx, cz) / speed, 0.05, 1000.0)
+
+
+## The part of the weight that the road level does not touch: how steep the
+## cell is, and whether it is someone's crop. Split out so `_weight` and the
+## cached lookup below share one definition of it rather than two that have to
+## be kept agreeing to the last bit.
+func _slope_penalty(cx: int, cz: int) -> float:
 	var slope := 0.0 if _deck_cells.has(Vector2i(cx, cz)) else _hm.cell_slope(cx, cz)
-	var slope_penalty := 1.0 + slope * slope * 3.2
+	var penalty := 1.0 + slope * slope * 3.2
 	if _cultivated[cz * grid_size + cx] != 0:
-		slope_penalty *= Config.CULTIVATED_COST
-	return clampf(slope_penalty / speed, 0.05, 1000.0)
+		penalty *= Config.CULTIVATED_COST
+	return penalty
 
 
+## `_weight` for a cell known to be in bounds, reusing the per-cell terms.
+##
+## Arithmetically the same expression in the same order as `_weight`, on the
+## same doubles, so it returns the identical bit pattern — which matters,
+## because `_shortcut_is_worthwhile` compares two of these against a 2% band
+## and a route sitting on that boundary would otherwise be smoothed one way
+## before this change and the other way after it, moving where the wear trail
+## is stamped.
+func _cached_weight(cx: int, cz: int) -> float:
+	var i := cz * grid_size + cx
+	var code := _surface_cache[i]
+	if code == _SURFACE_UNKNOWN:
+		# A bridge deck is walked at grass speed whatever is underneath it,
+		# which is the one thing `surface_speed` says that `cell_surface` does
+		# not, so it is recorded as grass rather than as the water below.
+		code = (Heightmap.Surface.GRASS if _deck_cells.has(Vector2i(cx, cz))
+				else _hm.cell_surface(cx, cz))
+		_surface_cache[i] = code
+		_slope_cache[i] = _slope_penalty(cx, cz)
+	var speed: float = _surface_speed[code]
+	if speed <= 0.0:
+		return 1000.0
+	speed *= Config.ROAD_SPEED[_wear.road_level_of_cell(cx, cz)]
+	return clampf(_slope_cache[i] / speed, 0.05, 1000.0)
+
+
+## Throw the cached terms away if the ground has been reshaped since they were
+## worked out. Cheap enough to ask on every segment: one array size against an
+## integer, against a fill that happens once per building pad.
+func _sync_terrain_epoch() -> void:
+	var epoch: int = _hm.edits.size()
+	if epoch == _terrain_epoch:
+		return
+	_terrain_epoch = epoch
+	_surface_cache.fill(_SURFACE_UNKNOWN)
+
+
+## Reweight the cells whose road level has moved. Every caller hands this the
+## list `WearField` returned, so road level is the only thing that changed —
+## which is why the cached terms survive it.
 func apply_road_changes(cells: Array) -> void:
 	for c in cells:
-		_refresh_cell(c.x, c.y)
+		_refresh_cell(c.x, c.y, false)
 
 
 ## Re-derive every cell from the ground as it stands now.
@@ -110,6 +236,10 @@ func apply_road_changes(cells: Array) -> void:
 ## down — so the incremental path has nothing to react to and the whole grid
 ## has to be rebuilt. Two hundred thousand cells, once, on load.
 func rebuild_all() -> void:
+	# Loading replays the whole edit list over freshly generated ground, so the
+	# edit count can land back on the number the caches were built against even
+	# though every height under them moved. Force the next lookup to refill.
+	_terrain_epoch = -1
 	for cz in grid_size:
 		for cx in grid_size:
 			_refresh_cell(cx, cz)
@@ -412,13 +542,16 @@ func _line_cost(a: Vector2, b: Vector2) -> float:
 	var steps := maxi(1, int(dist / (Config.CELL * 0.5)))
 	var seg := dist / float(steps)
 	var total := 0.0
+	_sync_terrain_epoch()
 	for s in range(steps):
 		var p := a + delta * ((s + 0.5) / float(steps))
 		var cx := int(p.x / Config.CELL)
 		var cz := int(p.y / Config.CELL)
 		if is_solid(cx, cz):
 			return INF
-		total += seg * _weight(cx, cz)
+		# `is_solid` has already rejected anything off the grid, so the cached
+		# lookup can index without repeating the bounds check.
+		total += seg * _cached_weight(cx, cz)
 	return total
 
 

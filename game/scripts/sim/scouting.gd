@@ -486,6 +486,15 @@ static func validate(data: Variant, size_m: float, buildings: Variant = null) ->
 		ids[entry.id] = true
 		error = SaveGame.Validation._citizen(entry.citizen,null,size_m)
 		if error != "": return error
+		# A citizen record embedded in a subsystem is read back with property
+		# syntax below, but `_citizen` treats these fields as optional — it
+		# serves the top-level roster too, where `savegame.gd` tolerates their
+		# absence. Reading one that is missing throws inside the validator, and
+		# a validator that throws returns null into a String rather than
+		# rejecting, so a crafted save is neither loaded nor refused. Require
+		# them here, exactly as `trade_routes.gd` does for a merchant.
+		for field in ["asset_id", "workplace_id", "immigrant", "carrying_amount"]:
+			if not entry.citizen.has(field): return "scout identity missing " + field
 		if entry.citizen.workplace_id != -1 or entry.citizen.immigrant: return "scout cannot also hold a civilian job"
 		if entry.state not in STATES or entry.status.length() > 240 or not TradeRoutes._position(entry.destination,size_m): return "invalid scout orders"
 		for key in ["lodge_id","food_source","tool_source"]:
