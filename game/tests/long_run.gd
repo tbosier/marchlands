@@ -62,10 +62,16 @@ func _site(game: SeededGame, type_id: String, anchor: Vector3) -> Vector3:
 			p.y = game.world.heightmap.height_at(p.x, p.z)
 			if not game.sim.can_place(type_id, p)["ok"]:
 				continue
+			if _reserved_site(game, type_id, p):
+				continue
 			if game.world.nav.find_path(from, p).is_empty():
 				continue
 			return p
 	return Vector3.INF
+
+
+func _reserved_site(_game: SeededGame, _type_id: String, _position: Vector3) -> bool:
+	return false
 
 
 func _build(game: SeededGame, type_id: String, anchor: Vector3,

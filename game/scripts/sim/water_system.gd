@@ -140,7 +140,10 @@ func tick(delta: float) -> void:
 		if c.hydration <= SEEK_AT and not drinkers.has(key):
 			var well := _well_for(c)
 			if well != null:
-				if sim.citizens_by_id.get(c.id) == c:
+				# A loaded delivery owns its destination's reserved room. Keep
+				# that job through the drinking trip, just as through a meal;
+				# cancelling it sends scarce workshop inputs back to their mine.
+				if sim.citizens_by_id.get(c.id) == c and c.carrying_amount <= 0.01:
 					var previous_job := c.job
 					sim._retire_job(c)
 					if previous_job != null: sim._restore_felling_claim(previous_job)
@@ -177,6 +180,7 @@ func _drink(c: Citizen, key: String, delta: float) -> void:
 	if b == null or not wells.has(b.id) or b.under_construction:
 		drinkers.erase(key)
 		c.clear_goal()
+		_resume_civilian(c)
 		return
 	c.task_label = "Fetching drinking water"
 	if not _move(c,sim.entrance_of(b,"att_entrance"),delta): return
@@ -190,15 +194,28 @@ func _drink(c: Citizen, key: String, delta: float) -> void:
 		drinkers.erase(key)
 		c.clear_goal()
 		c.task_label = "Finished drinking"
-		# The water movement already consumed this tick. Give a loaded civilian
-		# their real delivery destination now, without walking them twice or
-		# leaving an observable idle tick with an unaccounted-for handload.
-		if sim.citizens_by_id.get(c.id) == c and c.job == null and c.carrying_amount > 0.01 and c.workability() > 0:
-			var store := sim.stores.find_store(c.carrying_res,c.global_position,-1)
-			if store != null:
-				c.set_goal(sim.entrance_of(store,"att_cart_bay"))
-				c.state = Citizen.State.TRAVELLING
-				c.task_label = "returning %s" % Res.display(c.carrying_res)
+		_resume_civilian(c)
+
+func _resume_civilian(c: Citizen) -> void:
+	# The water movement already consumed this tick. Restore the destination
+	# without walking again or depositing the load at the well's doorstep.
+	if sim.citizens_by_id.get(c.id) != c or c.carrying_amount <= 0.01 or c.workability() <= 0: return
+	if c.job != null:
+		var target := sim._loaded_delivery_target(c.job)
+		if c.job.kind == JobBoard.Kind.BRIDGE_HAUL and sim.bridges != null:
+			var bridge: Dictionary = sim.bridges.bridges.get(c.job.bridge_id,{})
+			target = bridge.get("a",Vector3.INF) if not bridge.get("complete",true) else Vector3.INF
+		if not c.job.cancelled and target != Vector3.INF:
+			c.set_goal(target)
+			c.state = Citizen.State.TRAVELLING
+			c.task_label = c.job.describe()
+			return
+		sim._retire_job(c)
+	var store := sim.stores.find_store(c.carrying_res,c.global_position,-1)
+	if store != null:
+		c.set_goal(sim.entrance_of(store,"att_cart_bay"))
+		c.state = Citizen.State.TRAVELLING
+		c.task_label = "returning %s" % Res.display(c.carrying_res)
 
 func request_firefighting(building_id: int) -> String:
 	var target: Building = sim.buildings_by_id.get(building_id)

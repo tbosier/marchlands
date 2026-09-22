@@ -12,7 +12,8 @@ extends RefCounted
 ## has been built and how far, who lives here, and what is in the stores.
 ##
 ## **Save state, not local job schedules.** Local jobs and claimed haulage are
-## rebuilt on load; their carried goods remain on the citizens. Caravan phases,
+## rebuilt on load; a loaded haul retains its destination and carried goods.
+## Caravan phases,
 ## identities, cargo and stock promises are persistent orders and are restored
 ## explicitly. Bridge deliveries and lost-cart recovery orders likewise survive,
 ## while their transient worker assignments are rebuilt.
@@ -182,7 +183,7 @@ static func capture(game: Node) -> Dictionary:
 
 	var citizens: Array = []
 	for c in sim.citizens:
-		citizens.append(_capture_citizen(c))
+		citizens.append(_capture_citizen(c,game.sim))
 
 	return {
 		"version": VERSION,
@@ -247,7 +248,7 @@ static func _capture_building(b: Building) -> Dictionary:
 	}
 
 
-static func _capture_citizen(c: Citizen) -> Dictionary:
+static func _capture_citizen(c: Citizen, sim: Simulation = null) -> Dictionary:
 	var record := {
 		"id": c.id,
 		"name": c.given_name,
@@ -276,6 +277,15 @@ static func _capture_citizen(c: Citizen) -> Dictionary:
 	if c is Soldier:
 		record["body"] = c.capture_body()
 		record["veteran_rations"] = c.rations
+	# The goods have already left their source. Their destination is physical
+	# intent, not a disposable work schedule: losing it strands workshop and
+	# construction loads whenever the general stores are full.
+	if sim != null and c.job != null and not c.job.cancelled \
+			and c.job.kind == JobBoard.Kind.HAUL and c.job.loaded \
+			and c.job.claimed_by == c.id and c.carrying_amount > 0.01 \
+			and c.carrying_res == c.job.res and sim.buildings_by_id.has(c.job.source_id) \
+			and sim.buildings_by_id.has(c.job.dest_id):
+		record["delivery"] = {"source_id":c.job.source_id,"dest_id":c.job.dest_id}
 	return record
 
 
@@ -452,4 +462,20 @@ static func _restore_citizen(sim: Simulation, entry: Dictionary) -> bool:
 	c.apply_state(entry, sim.registry)
 	if c is Soldier:
 		c.rations = float(entry.get("veteran_rations", 0.0))
+	if entry.has("delivery"):
+		var destination: Building = sim.buildings_by_id[entry.delivery.dest_id]
+		var job := sim.jobs.post(JobBoard.Kind.HAUL,c.position,72.0)
+		job.source_id = entry.delivery.source_id
+		job.dest_id = destination.id
+		job.res = c.carrying_res
+		job.amount = c.carrying_amount
+		job.loaded = true
+		sim.jobs.index(job)
+		# Each restored load is claimed before the next is posted, so the
+		# normal board API removes it from the open list exactly once.
+		c.job = sim.jobs.best_for(c.id,c.position,JobBoard.Accept.ANY,c.workplace_id)
+		destination.incoming[job.res] += job.amount
+		c.state = Citizen.State.TRAVELLING
+		c.task_label = job.describe()
+		c.set_goal(sim.entrance_of(destination,"att_cart_bay"))
 	return true

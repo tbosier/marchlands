@@ -147,7 +147,11 @@ func _bridge_controls(game: SeededGame) -> void:
 	var q := _bank_quote(game)
 	_check(not q.is_empty(), "generated river exposes a valid two-bank placement")
 	if q.is_empty(): return
-	game.sim.citizens[0].position = (q.a + q.b) * 0.5
+	# Reveal from a dry bank. Putting the observer in the channel both blocks
+	# demolition and leaves the next merchant stranded on unbridged water.
+	var observer: Citizen = game.sim.citizens[0]
+	var home_position := observer.position
+	observer.position = q.a - Vector3(0, Bridges.DECK_LIFT, 0)
 	game.sim.scouting.refresh_visibility()
 	game.camera.yaw = 0
 	game.camera.look_at_position((q.a + q.b) * 0.5, 75)
@@ -177,7 +181,10 @@ func _bridge_controls(game: SeededGame) -> void:
 	await _click_at(endpoint)
 	_check(game.sim.bridges.bridges.size() == 1 and game.selected_bridge >= 0,
 		"second terrain click commissions and selects an unfinished bridge")
-	if game.selected_bridge < 0: return
+	if game.selected_bridge < 0:
+		observer.position = home_position
+		game.sim.scouting.refresh_visibility()
+		return
 	var id: int = game.selected_bridge
 	_check(not game.sim.bridges.info(id).complete, "bank clicks do not grant an instant completed crossing")
 	game._clear_selection()
@@ -185,6 +192,13 @@ func _bridge_controls(game: SeededGame) -> void:
 	await _click_at(game.camera.camera().unproject_position((q.a + q.b) * 0.5 + Vector3(0, 0.4, 0)))
 	_check(game.selected_bridge == id, "clicking the scaffold selects its bridge")
 	await _shot("bridge_site")
+	var remove := _button(game.hud._selection_actions, "Remove bridge")
+	_check(remove != null and remove.disabled and not game.sim.bridges.info(id).can_remove,
+		"bridge removal stays disabled while the observer occupies its bank approach")
+	observer.position = home_position
+	game.sim.scouting.refresh_visibility()
+	game._refresh_selection()
+	await _settle_ui()
 	await _click(_button(game.hud._selection_actions, "Remove bridge"))
 	_check(game.sim.bridges.bridges.is_empty(), "remove click cancels the empty construction site")
 
@@ -208,6 +222,9 @@ func _lost_cart_controls(game: SeededGame) -> void:
 	for i in 2000:
 		game.sim.trade.tick(0.25)
 		if route.state == "outward": break
+	if route.state != "outward":
+		print("RECOVERY_FIXTURE state=%s status=%s merchant=%s cargo=%.1f" %
+			[route.state, route.status, route.merchant.position, route.cargo_amount])
 	_check(route.state == "outward" and route.cargo_amount > 0,
 		"recovery UI fixture loads real timber and provisions before the incident")
 	if route.state != "outward": return

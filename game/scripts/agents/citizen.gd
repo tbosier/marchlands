@@ -155,11 +155,9 @@ func setup(citizen_id: int, registry: AssetRegistry,
 	add_child(_body)
 
 
-## Re-apply a saved person. Their job is deliberately not restored: the board
-## is rebuilt from scratch on load, so everyone starts the first tick idle and
-## is given work by the same rota that would have given it to them anyway.
-## Whatever they were carrying stays on their back, so a load in transit is
-## delivered rather than destroyed.
+## Re-apply a saved person and their physical cargo. SaveGame separately
+## rebuilds a loaded delivery's destination claim; other local work is assigned
+## again by the production rota.
 func apply_state(entry: Dictionary, registry: AssetRegistry = null) -> void:
 	given_name = String(entry.get("name", given_name))
 	profession = String(entry.get("profession", profession))

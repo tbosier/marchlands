@@ -14,6 +14,7 @@ func _hydration_and_claims() -> void:
 	var c: Citizen = sim.citizens[0]
 	var citizen_id := c.id
 	var store: Building = sim.buildings.filter(func(b): return b.type_id == "stockpile")[0]
+	var store_id := store.id
 	var job := sim.jobs.post(JobBoard.Kind.HAUL,c.position,1000.0)
 	job.source_id = sim.keep.id
 	job.dest_id = store.id
@@ -27,8 +28,8 @@ func _hydration_and_claims() -> void:
 	c.hydration = 0.2
 	var before := c.global_position
 	_water_step(game)
-	_check(c.job == null and store.incoming[Config.Res.TIMBER] == 0 and c.carrying_amount == 4,
-		"a drinking errand releases hauling claims while preserving already carried cargo")
+	_check(c.job == job and store.incoming[Config.Res.TIMBER] == 4 and c.carrying_amount == 4,
+		"a drinking errand preserves the loaded delivery and its destination claim")
 	_check(c.hydration < 0.2 and c.global_position.distance_to(before) < 2 and water.wells[well.id].water == WaterSystem.CAPACITY,
 		"thirst sends the actual resident walking before any well water is consumed")
 	var state := SaveGame.capture(game)
@@ -47,7 +48,8 @@ func _hydration_and_claims() -> void:
 	var cargo_before := c.carrying_amount
 	var timber_before := cargo_before
 	for b in sim.buildings: timber_before += b.inventory[Config.Res.TIMBER]
-	_check(c.job == null and c.has_goal() and c.task_label == "returning Timber" and cargo_before == 4.0,
+	_check(c.job != null and c.job.dest_id == store_id and c.has_goal()
+		and c._goal == sim.entrance_of(sim.buildings_by_id[store_id],"att_cart_bay") and cargo_before == 4.0,
 		"finishing a drink immediately restores the actual loaded resource's delivery route")
 	c.next_meal = sim.day + 2.0
 	sim._tick_citizen(c,0.25)
@@ -91,6 +93,103 @@ func _hydration_and_claims() -> void:
 	invalid = SaveGame.capture(game)
 	invalid.citizens[0].hydration = NAN
 	_check(SaveGame.validate(invalid,game.registry) != "","save validation rejects nonfinite hydration")
+	game.free()
+	await process_frame
+
+func _loaded_drinking_destination(construction: bool) -> void:
+	var game := _prepare_scouts()
+	var sim := game.sim
+	var target := _build(game,"house" if construction else "blacksmith",
+		game.world.centre()+Vector3(50,0,-35),not construction)
+	var target_id := target.id
+	var res := Config.Res.STONE if construction else Config.Res.IRON
+	var amount := minf(12.0,float(target.build_cost.get(res,12.0))) if construction else 12.0
+	var c: Citizen = sim.citizens[0]
+	var citizen_id := c.id
+	c.position = sim.entrance_of(sim.keep,"att_cart_bay")
+	c.next_meal = sim.day+10.0
+	sim.keep.inventory[res] = amount
+	var job := sim.jobs.post(JobBoard.Kind.HAUL,c.position,1000.0)
+	job.source_id = sim.keep.id
+	job.dest_id = target.id
+	job.res = res
+	job.amount = amount
+	sim.jobs.index(job)
+	sim.keep.reserved[res] += amount
+	target.incoming[res] += amount
+	c.job = sim.jobs.best_for(c.id,c.position,JobBoard.Accept.ANY,c.workplace_id)
+	sim._tick_haul(c,0.0)
+	_check(job.loaded and c.carrying_amount == amount and sim.keep.inventory[res] == 0,
+		"drinking delivery regression starts with goods physically collected from their source")
+	# Full mixed stores cannot accept a fallback load. The workshop/site still
+	# owns reserved delivery room, which must survive the water interruption.
+	for b in sim.stores.buildings_storing(res):
+		if b == target: continue
+		b.inventory.fill(0)
+		b.inventory[Config.Res.TIMBER if b.stores(Config.Res.TIMBER) else res] = b.capacity()
+	_check(sim.stores.find_store(res,c.position,-1) == null,
+		"saturated stores cannot conceal a lost workshop or construction destination")
+	c.hydration = 0.2
+	_water_step(game)
+	_check(c.job == job and target.incoming[res] == amount,
+		"thirst pauses a loaded %s delivery without freeing its reservation" % target.type_id)
+	var error := game.restore_from(SaveGame.capture(game))
+	_check(error == "","loaded drinking delivery and destination claim survive save/load: " + error)
+	sim = game.sim
+	c = sim.citizens_by_id[citizen_id]
+	target = sim.buildings_by_id[target_id]
+	for i in 4000:
+		_water_step(game)
+		if c.hydration >= 0.95: break
+	_check(c.job != null and c.job.dest_id == target_id and not sim.water.drinkers.has(sim.water._key(c)),
+		"finishing the drink retains the loaded delivery after the water order ends")
+	var after_drink := SaveGame.capture(game)
+	var saved_person: Dictionary = after_drink.citizens.filter(func(person): return person.id == citizen_id)[0]
+	var invalid := after_drink.duplicate(true)
+	var invalid_person: Dictionary = invalid.citizens.filter(func(person): return person.id == citizen_id)[0]
+	invalid_person.delivery.dest_id = 999999
+	_check(SaveGame.validate(invalid,game.registry).contains("unknown endpoint"),
+		"a saved loaded delivery cannot reference a missing destination")
+	invalid = after_drink.duplicate(true)
+	invalid_person = invalid.citizens.filter(func(person): return person.id == citizen_id)[0]
+	invalid_person.delivery.source_id = sim.buildings.filter(func(b): return b.type_id == "well")[0].id
+	_check(SaveGame.validate(invalid,game.registry).contains("invalid source"),
+		"a saved loaded delivery requires a source that could hold its actual resource")
+	invalid = after_drink.duplicate(true)
+	invalid_person = invalid.citizens.filter(func(person): return person.id == citizen_id)[0]
+	invalid_person.carrying_amount = 0.0
+	invalid_person.carrying_res = -1
+	_check(SaveGame.validate(invalid,game.registry).contains("invalid loaded delivery"),
+		"a delivery intent cannot recreate cargo absent from its person")
+	invalid = after_drink.duplicate(true)
+	for person in invalid.citizens:
+		person.delivery = saved_person.delivery.duplicate()
+		person.carrying_amount = amount
+		person.carrying_res = res
+	_check(SaveGame.validate(invalid,game.registry).contains("loaded deliveries exceed"),
+		"multiple loaded deliveries cannot overpromise the destination's shared capacity")
+	error = game.restore_from(after_drink)
+	_check(error == "","a second save after drinking preserves the original delivery: " + error)
+	sim = game.sim
+	c = sim.citizens_by_id[citizen_id]
+	target = sim.buildings_by_id[target_id]
+	_check(c.job != null and c.job.loaded and c.job.claimed_by == c.id
+		and sim.jobs.open_jobs() == 0 and target.incoming[res] == amount
+		and sim.keep.reserved[res] == 0,
+		"restoring a carried delivery reserves only its destination and cannot offer it to a second worker")
+	for i in 4000:
+		_water_step(game)
+		sim._tick_citizen(c,0.25)
+		if c.carrying_amount <= 0.01: break
+	var delivered := float(target.delivered.get(res,0)) if construction else target.inventory[res]
+	_check(c.carrying_amount == 0 and c.job == null and target.incoming[res] == 0
+		and is_equal_approx(delivered,amount)
+		and c.position.distance_to(sim.entrance_of(target,"att_cart_bay")) <= Config.ARRIVE_RADIUS+0.2,
+		"after drinking, %s receives the full original load exactly once by physical delivery" % target.type_id)
+	_check(SaveGame.validate(SaveGame.capture(game),game.registry) == "",
+		"completed delivery leaves no stale stock or destination claims")
+	_check(not SaveGame._capture_citizen(c,sim).has("delivery"),
+		"completed loads do not leave a persistent delivery that can run twice")
 	game.free()
 	await process_frame
 
@@ -198,6 +297,8 @@ func _poison_and_drinkers() -> void:
 
 func _run() -> void:
 	await _hydration_and_claims()
+	await _loaded_drinking_destination(false)
+	await _loaded_drinking_destination(true)
 	await _fire_buckets()
 	await _poison_and_drinkers()
 	print("Water regression failures: %d" % _failures)

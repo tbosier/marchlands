@@ -138,6 +138,7 @@ static func validate(data: Variant, registry: AssetRegistry = null,
 		if citizens.has(c.id):
 			return "duplicate citizen id %d" % c.id
 		citizens[c.id] = c
+	var local_citizens := citizens.keys()
 	# Serving soldiers still own a civilian identity and home, but cannot also
 	# appear in the civilian workforce or duplicate another person's identity.
 	for unit in data.get("campaign", {}).get("units", []):
@@ -217,6 +218,9 @@ static func validate(data: Variant, registry: AssetRegistry = null,
 	for drinker in data.get("water",{}).get("drinkers",[]):
 		if not (citizens.has(drinker.person_id) if drinker.faction == 0 else enemy_people.has(drinker.person_id)):
 			return "drinking order has no living person"
+	for cid in citizens:
+		if citizens[cid].has("delivery") and not local_citizens.has(cid):
+			return "service citizen cannot also hold a local delivery"
 	var water_buildings := buildings.duplicate()
 	water_buildings.merge(rival_buildings)
 	var saved_wells := {}
@@ -404,12 +408,43 @@ static func _citizen(c: Variant, registry: AssetRegistry, world_size: float = Co
 				or not is_finite(float(c.veteran_rations)) \
 				or c.veteran_rations < 0 or c.veteran_rations > 4.0:
 			return "invalid veteran rations"
+	if c.has("delivery"):
+		error = _fields(c.delivery,{"source_id":TYPE_INT,"dest_id":TYPE_INT},"loaded delivery")
+		if error != "": return error
+		if c.get("immigrant",false) or amount <= 0.01 or c.delivery.source_id < 1 \
+				or c.delivery.dest_id < 1 or c.delivery.source_id == c.delivery.dest_id:
+			return "invalid loaded delivery"
 	return ""
 
 
 static func _references(buildings: Dictionary, citizens: Dictionary) -> String:
+	var deliveries := {}
+	var storage_claims := {}
 	for cid in citizens:
 		var c: Dictionary = citizens[cid]
+		if c.has("delivery"):
+			var delivery: Dictionary = c.delivery
+			if not buildings.has(delivery.source_id) or not buildings.has(delivery.dest_id):
+				return "loaded delivery has an unknown endpoint"
+			var source: Dictionary = buildings[delivery.source_id]
+			var destination: Dictionary = buildings[delivery.dest_id]
+			var res: int = c.carrying_res
+			if source.under_construction or not BuildingDefs.get_def(source.type_id).stores_resource(res):
+				return "loaded delivery has an invalid source"
+			var key := "%d:%d" % [destination.id,res]
+			deliveries[key] = float(deliveries.get(key,0))+c.carrying_amount
+			var def := BuildingDefs.get_def(destination.type_id)
+			if destination.under_construction:
+				var needed := float(destination.get("build_cost",def.cost).get(res,0))-float(destination.delivered.get(res,0))
+				if deliveries[key] > needed+0.01:
+					return "loaded deliveries exceed outstanding construction materials"
+			else:
+				if not def.stores_resource(res): return "loaded delivery destination cannot store its cargo"
+				storage_claims[destination.id] = float(storage_claims.get(destination.id,0))+c.carrying_amount
+				var stocked := 0.0
+				for units in destination.inventory: stocked += units
+				if stocked+storage_claims[destination.id] > def.storage+0.01:
+					return "loaded deliveries exceed destination storage"
 		for pair in [["home_id", "residents"], ["workplace_id", "workers"]]:
 			var bid: int = c.get(pair[0], -1)
 			if bid == -1:

@@ -63,6 +63,22 @@ func _ore_in_range(game: SeededGame, mine: Building) -> float:
 	return amount
 
 
+func _reserved_site(game: SeededGame, type_id: String, position: Vector3) -> bool:
+	# Planning the forge at the smithy's initial placement is not enough:
+	# later houses must also leave its larger footprint clear. This fixture
+	# places every building at yaw zero; normal placement still checks terrain,
+	# resources and current building footprints independently.
+	var fp := game.registry.footprint(BuildingDefs.get_def(type_id).asset)
+	var here := Rect2(Vector2(position.x, position.z) - fp * 0.5,
+		fp).grow(Simulation.CLEARANCE)
+	var forge_fp := game.registry.footprint(BuildingDefs.get_def("forge").asset)
+	for b in game.sim.buildings:
+		if b.type_id != "blacksmith": continue
+		var planned := Rect2(Vector2(b.position.x, b.position.z) - forge_fp * 0.5, forge_fp)
+		if here.intersects(planned): return true
+	return false
+
+
 func _paid_site(game: SeededGame, type_id: String, offset: Vector3) -> Building:
 	# Leave room for the later forge; this is planning a larger footprint, not
 	# receiving the upgrade before its materials have been hauled and built.
