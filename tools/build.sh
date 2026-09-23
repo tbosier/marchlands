@@ -11,6 +11,7 @@
 #   tools/build.sh import      let Godot import the assets
 #   tools/build.sh run         play the game
 #   tools/build.sh harness S   run scripted scenario S headlessly + screenshot
+#   tools/build.sh export [P]  release builds into build/ (Linux, Windows, or both)
 #   tools/build.sh all         assets -> validate -> sync -> import -> shaders
 #
 # Blender and Godot are looked for on PATH first (`pacman -S blender godot`),
@@ -187,6 +188,38 @@ cmd_harness() {
 	godot --path game --resolution 1600x900 "$@" -- "--harness=$script"
 }
 
+# Release exports need Godot's export templates for exactly this engine
+# version. They live under the repo-local data directory godot_env.sh sets up,
+# so a system-wide install in ~/.local is not seen; say where they must go
+# rather than letting Godot fail with its own terser message.
+cmd_export() {
+	require GODOT godot
+	local version
+	version="$(godot --headless --version 2>/dev/null | tail -1 | cut -d. -f1-4)"
+	local templates="${MARCHLANDS_GODOT_HOME:-$ROOT/.godot-home}/data/godot/export_templates/$version"
+	if [[ ! -d "$templates" ]]; then
+		echo "error: no export templates for Godot $version at" >&2
+		echo "       $templates" >&2
+		echo "       Download Godot_v${version%.stable}-stable_export_templates.tpz from" >&2
+		echo "       https://godotengine.org/download/archive/ and unzip its" >&2
+		echo "       templates/ directory to that path." >&2
+		exit 1
+	fi
+	local presets=("$@")
+	[[ ${#presets[@]} -eq 0 ]] && presets=(Linux Windows)
+	for preset in "${presets[@]}"; do
+		local out
+		case "$preset" in
+			Linux) out="$ROOT/build/linux/marchlands.x86_64" ;;
+			Windows) out="$ROOT/build/windows/marchlands.exe" ;;
+			*) echo "error: unknown preset '$preset' (Linux or Windows)" >&2; exit 1 ;;
+		esac
+		mkdir -p "$(dirname "$out")"
+		echo "==> exporting $preset -> $out"
+		godot --headless --path game --export-release "$preset" "$out"
+	done
+}
+
 cmd_all() {
 	cmd_assets
 	cmd_validate
@@ -207,6 +240,7 @@ case "${1:-all}" in
 	import)   shift; cmd_import ;;
 	run)      shift; cmd_run "$@" ;;
 	harness)  shift; cmd_harness "$@" ;;
+	export)   shift; cmd_export "$@" ;;
 	all)      cmd_all ;;
 	*)
 		sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'

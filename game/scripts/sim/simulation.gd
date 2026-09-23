@@ -1361,6 +1361,10 @@ func market_service(market: Building) -> Dictionary:
 
 ## Night: home, and indoors.
 func _tick_sleep(c: Citizen, delta: float) -> void:
+	# Nightfall stops a spell of work part way; keep what is left of it on the
+	# job, or the morning starts the whole craft, reap or dig again.
+	if c.state == Citizen.State.WORKING and c.job != null:
+		c.job.work_left = c.work_remaining()
 	c.state = Citizen.State.SLEEPING
 	var home: Building = buildings_by_id.get(c.home_id)
 	var has_home: bool = (home != null and is_instance_valid(home)

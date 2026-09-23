@@ -67,6 +67,13 @@ var dev_mode := false
 ## Set by `--dev`. A release export only opens the developer tools when asked.
 var _dev_launch := false
 var _defeat_shown := false
+## A hash of the march as it was last saved, loaded or begun. Closing the window
+## compares the march against it and asks before throwing changes away —
+## including ones made while paused, which a clock comparison would miss.
+var _saved_hash := 0
+var _quit_dialog: ConfirmationDialog
+## Whether the quit dialog paused the clock, so cancelling it resumes play.
+var _quit_paused := false
 var show_nav_overlay := false
 
 ## keycode -> [command name, whether Alt must be held]. Built from
@@ -95,6 +102,8 @@ var _screenshot_script := ""
 
 func _ready() -> void:
 	randomize()
+	# Closing the window is answered by `_notification`, which offers to save.
+	get_tree().set_auto_accept_quit(false)
 	var world_seed := _seed_from_args()
 
 	registry.load_all()
@@ -295,6 +304,7 @@ func _ready() -> void:
 
 	camera.look_at_position(sim.keep.global_position, 78.0)
 	world.set_time_of_day(clock.day_fraction(), clock.season_fraction())
+	_saved_hash = _state_hash()
 
 	_run_harness()
 
@@ -373,6 +383,7 @@ func new_world(seed_value: int, size_m: int) -> String:
 		return "Could not start this march: " + error
 	error = _adopt_world(staged)
 	camera.look_at_position(sim.keep.global_position, 78.0)
+	_saved_hash = _state_hash()
 	return error
 
 
@@ -381,6 +392,59 @@ func new_world(seed_value: int, size_m: int) -> String:
 # ---------------------------------------------------------------------------
 
 ## Returns "" on success, or the reason it failed.
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST:
+		_request_quit()
+
+
+## The march as a save would record it, minus the wall-clock stamp and the
+## game speed: pausing after a save is not a change worth being asked about.
+func _state_hash() -> int:
+	var data := SaveGame.capture(self)
+	for key in ["saved_at", "speed_index", "resume_speed_index"]:
+		data.erase(key)
+	return hash(data)
+
+
+## Leave, or ask first if the march has changed since it was last saved.
+func _request_quit() -> void:
+	if _quit_dialog != null and _quit_dialog.visible:
+		return
+	if _state_hash() == _saved_hash:
+		get_tree().quit()
+		return
+	if _quit_dialog == null:
+		_quit_dialog = ConfirmationDialog.new()
+		_quit_dialog.title = "Leave the march?"
+		_quit_dialog.dialog_text = "Everything since the last save will be lost."
+		_quit_dialog.ok_button_text = "Save and quit"
+		_quit_dialog.cancel_button_text = "Keep playing"
+		_quit_dialog.add_button("Quit without saving", true, "discard")
+		_quit_dialog.confirmed.connect(func():
+			if save_game() == "":
+				get_tree().quit()
+			else:
+				_resume_after_quit_dialog())
+		_quit_dialog.canceled.connect(_resume_after_quit_dialog)
+		_quit_dialog.custom_action.connect(func(action: StringName):
+			if action == &"discard":
+				get_tree().quit())
+		add_child(_quit_dialog)
+	# Nothing burns or starves while the player decides.
+	_quit_paused = not clock.paused()
+	if _quit_paused:
+		clock.toggle_pause()
+		hud.refresh()
+	_quit_dialog.popup_centered()
+
+
+func _resume_after_quit_dialog() -> void:
+	if _quit_paused and clock.paused():
+		clock.toggle_pause()
+		hud.refresh()
+	_quit_paused = false
+
+
 func save_game(slot: String = SaveGame.QUICK_SLOT) -> String:
 	# Settle the world before writing it down. Road levels are a cache over the
 	# wear field refreshed on a timer, so a save taken inside that window
@@ -393,6 +457,7 @@ func save_game(slot: String = SaveGame.QUICK_SLOT) -> String:
 		sim.jobs.clear_refusals()
 	var problem := SaveGame.write(self, slot)
 	if problem == "":
+		_saved_hash = _state_hash()
 		_on_alert("Saved as '%s'" % slot, camera.focus)
 	else:
 		_on_alert("Could not save: %s" % problem, camera.focus)
@@ -411,6 +476,7 @@ func load_game(slot: String = SaveGame.QUICK_SLOT) -> String:
 	if invalid != "":
 		_on_alert("Could not load: %s" % invalid, camera.focus)
 		return invalid
+	_saved_hash = _state_hash()
 	_on_alert("Loaded '%s' — day %d" % [slot, int(data.get("day", 0)) + 1],
 			camera.focus)
 	return ""

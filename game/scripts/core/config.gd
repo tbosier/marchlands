@@ -207,9 +207,9 @@ const TILLAGE_PRIORITY := 12.0
 ##
 ## Longer than reaping (which is CARRY_CAPACITY * WORK_TICKS_PER_UNIT * 0.8,
 ## about 11 s) because breaking frozen ground is the heavier job. Kept well
-## under a third of a day on purpose: a spell interrupted by dinner or by
-## nightfall is abandoned along with the job, so a spell that routinely
-## outlasted a working stretch would never finish at all.
+## under a third of a day on purpose: a spell interrupted by dinner is
+## abandoned along with the job (nightfall only pauses it), so a spell that
+## routinely outlasted a working stretch would rarely finish.
 const TILLAGE_SECONDS := 26.0
 
 ## Spells of work that bring one farm's field from bare to fully broken.
@@ -294,6 +294,23 @@ const MEAL_FOOD := HUNGER_PER_DAY / float(MEALS_PER_DAY)
 const LARDER_DAYS := 3.0
 ## How long a missed meal takes to become starvation.
 const STARVE_DAYS := 2.5
+
+
+## Hunger for someone eating continuously on the road (scouts, merchants), after
+## a step that called for `ration` food and left `unfed` of it uneaten.
+##
+## Short rations push toward starvation at the rate a citizen's missed meals do
+## — `STARVE_DAYS` with nothing at all, proportionally longer on part rations —
+## and only a full ration lets it ease back, at one level a day. The old sum
+## starved a traveller with an empty pack in a single day and held one on half
+## rations level for ever.
+static func travel_hunger(hunger: float, unfed: float, ration: float) -> float:
+	if ration <= 0.0:
+		return hunger
+	var days := ration / HUNGER_PER_DAY
+	var short := clampf(unfed / ration, 0.0, 1.0)
+	var change := -days if short <= 0.0 else days * short / STARVE_DAYS
+	return clampf(hunger + change, 0.0, 1.0)
 ## Hunger past this and a citizen drops what they are doing to go and eat.
 const HUNGER_URGENT := 0.45
 ## How long a citizen who found no food waits before trying again.

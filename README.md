@@ -58,7 +58,13 @@ sudo pacman -S blender godot python-pillow rsync xorg-server-xvfb xorg-xauth mes
 
 tools/build.sh all      # generate assets -> validate -> import into Godot
 tools/build.sh run      # play
+tools/build.sh export   # release builds: build/linux/ and build/windows/
 ```
+
+`export` needs Godot's 4.7.2 export templates under
+`.godot-home/data/godot/export_templates/4.7.2.stable/` (the command prints
+where to get them if they are missing). Closing the window with unsaved changes
+asks whether to save first.
 
 `tools/build.sh` looks for `blender` and `godot` on `PATH` first, and falls
 back to `tools/vendor/` so a checkout can carry its own toolchain.
@@ -693,7 +699,7 @@ marchlands/
 ├── assets/
 │   ├── specs/                 style + material specification (source)
 │   ├── generated/             .glb + .json manifests (build product)
-│   └── previews/              turntable contact sheets
+│   └── previews/              turntable contact sheets (generated, not committed)
 ├── tools/
 │   ├── blender/               the generators and the modular kit
 │   ├── validators/            spec enforcement, glb inspection

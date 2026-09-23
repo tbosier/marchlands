@@ -301,7 +301,7 @@ func _feed(scout: Scout, delta: float) -> void:
 			if b.under_construction or c.global_position.distance_to(sim.entrance_of(b,"att_entrance")) > Config.ARRIVE_RADIUS + 0.25: continue
 			need -= b.remove(Config.Res.FOOD,minf(need,b.available(Config.Res.FOOD)))
 			if need <= 0: break
-	c.hunger = clampf(c.hunger + need - (delta / Config.DAY_LENGTH - need),0,1)
+	c.hunger = Config.travel_hunger(c.hunger, need, delta / Config.DAY_LENGTH * Config.HUNGER_PER_DAY)
 	c.next_meal = Config.next_meal_after(sim.day)
 	if c.hunger >= 1:
 		if c is Soldier: c.apply_damage(delta*0.15)
@@ -389,6 +389,9 @@ func _lose(scout: Scout) -> void:
 	if home != null: home.residents.erase(c.id)
 	_trained.erase(c.id)
 	scouts.erase(scout.id)
+	# Their pack is lost with them, by design: the settlement only knows the
+	# scout did not come back, not where (see `tests/scouting.gd`, "without
+	# disclosing the hidden incident"). A recoverable pack would reveal the spot.
 	var last_contact := home.global_position if home != null else (sim.keep.global_position if sim.keep != null else world.centre())
 	sim.alert.emit("Lost contact with %s. The scout has not returned." % c.given_name,last_contact)
 	scout.queue_free()

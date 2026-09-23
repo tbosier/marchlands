@@ -65,7 +65,29 @@ static func slot_path(slot: String) -> String:
 	return "%s/%s.%s" % [DIR, _sanitise(slot), EXTENSION]
 
 
+## A slot name already made only of lowercase letters, digits and `_` is its
+## own file name, exactly as it always was, so existing saves such as the
+## quicksave are still found. Any other name is folded the old way and then
+## given eight hex digits of a hash of the name as typed. The old rule stopped
+## at the fold, so "My Save" and "my_save" wrote to the same file; the suffix
+## keeps them apart while adding only nine characters to the length.
 static func _sanitise(slot: String) -> String:
+	if not slot.is_empty() and _is_plain(slot):
+		return slot
+	return "%s_%08x" % [_legacy_name(slot), slot.hash()]
+
+
+static func _is_plain(slot: String) -> bool:
+	for i in slot.length():
+		var code := slot.unicode_at(i)
+		if not ((code >= 0x61 and code <= 0x7a) or (code >= 0x30 and code <= 0x39) or code == 0x5f):
+			return false
+	return true
+
+
+## The file name every slot had before `_sanitise` kept names apart. `read`
+## falls back to it so a save written under the old rule still loads.
+static func _legacy_name(slot: String) -> String:
 	var out := ""
 	for c in slot.to_lower():
 		out += c if c.is_valid_identifier() or c.is_valid_int() else "_"
@@ -124,7 +146,10 @@ static func write(game: Node, slot: String) -> String:
 				temp, error_string(FileAccess.get_open_error())]
 	var round_trip: Variant = check.get_var(false)
 	check.close()
-	if validate(round_trip, game.registry) != "" or round_trip != snapshot:
+	# Compared, not re-validated: `snapshot` passed validation above, and a
+	# file that reads back identical to it is exactly as valid. A second full
+	# pass cost as much as the first on the largest map.
+	if round_trip != snapshot:
 		DirAccess.remove_absolute(temp)
 		return "wrote %s but it did not read back whole; the previous save " \
 				% path + "is untouched"
@@ -284,8 +309,18 @@ static func _capture_citizen(c: Citizen, sim: Simulation = null) -> Dictionary:
 
 ## Returns the saved dictionary, or an empty one if the slot is unusable.
 ## `problem` is filled with a human-readable reason when that happens.
+##
+## Only the shape is checked here. The full validation runs once, in
+## `Game.restore_from`, with the asset registry this function does not have;
+## running it here as well doubled the cost of a load, and on the largest map
+## each pass walks nine million wear texels.
 static func read(slot: String, problem: Array[String] = []) -> Dictionary:
 	var path := slot_path(slot)
+	var legacy := "%s/%s.%s" % [DIR, _legacy_name(slot), EXTENSION]
+	if not FileAccess.file_exists(path) and not FileAccess.file_exists(path + ".prev") \
+			and FileAccess.file_exists(legacy):
+		# Written under the old naming rule, before this name had its own file.
+		path = legacy
 	if not FileAccess.file_exists(path):
 		# A write interrupted between setting the old save aside and moving the
 		# new one in leaves the previous march under `.prev`. It is a whole
@@ -313,9 +348,8 @@ static func read(slot: String, problem: Array[String] = []) -> Dictionary:
 	var data: Variant = file.get_var(false)
 	file.close()
 
-	var invalid := validate(data)
-	if invalid != "":
-		problem.append(invalid)
+	if not data is Dictionary:
+		problem.append("%s does not hold a saved march" % path)
 		return {}
 	return data
 

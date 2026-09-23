@@ -540,6 +540,9 @@ func _update_carried_visual(registry: AssetRegistry) -> void:
 func begin_work(seconds: float) -> void:
 	state = State.WORKING
 	_work_timer = seconds
+	if job != null and job.work_left > 0.0:
+		_work_timer = minf(seconds, job.work_left)
+		job.work_left = -1.0
 
 
 ## Injured veterans override this; ordinary citizens retain full ability.

@@ -64,6 +64,10 @@ class Job:
 	var target := Vector3.INF
 	## Set when the job was sized for the cart rather than for a pair of arms.
 	var uses_cart := false
+	## Work time still owed on a spell that nightfall interrupted, or -1. The
+	## next `Citizen.begin_work` on this job resumes from it instead of starting
+	## the whole spell again.
+	var work_left := -1.0
 	var priority := 40.0
 	var claimed_by := -1
 	var cancelled := false

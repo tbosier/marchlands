@@ -198,8 +198,30 @@ static func advance_projectiles(effects: Node3D, delta: float) -> void:
 	if not is_instance_valid(effects) or delta <= 0.0 or not is_finite(delta):
 		return
 	for effect in effects.get_children():
-		if effect is FirepotVisual and not effect.is_queued_for_deletion():
+		if effect.is_queued_for_deletion():
+			continue
+		if effect is FirepotVisual:
 			effect._process(delta)
+		elif effect.has_meta(&"sim_tween"):
+			var tween: Tween = effect.get_meta(&"sim_tween")
+			if tween.is_valid():
+				tween.custom_step(delta)
+
+
+## A tween stepped by `advance_projectiles` in simulation seconds rather than
+## by the scene tree in real ones, so a fading corpse or a dropped sword holds
+## still while the game is paused and keeps pace at 64x, as firepots do.
+##
+## Only for a node under the effects root, which is the one place that walk
+## visits. A veteran back in civilian life has none bound and leaves his corpse
+## under his own parent; that one runs on the scene tree as before, rather than
+## standing upright for ever.
+func _sim_tween(node: Node) -> Tween:
+	var tween := node.create_tween()
+	if is_instance_valid(_effects_root) and node.get_parent() == _effects_root:
+		tween.pause()
+		node.set_meta(&"sim_tween", tween)
+	return tween
 
 
 func setup_unit(registry: AssetRegistry, hm: Heightmap, unit_id: int,
@@ -780,7 +802,7 @@ func _drop_equipment(equipment: Node3D) -> void:
 	dropped.global_position = global_position + Vector3(0.35 if equipment == _sword else -0.35, 0.08, 0.1)
 	dropped.rotation = Vector3(0, rotation.y, PI * 0.5 if equipment == _sword else 0.0)
 	dropped.visible = true
-	var tween := dropped.create_tween()
+	var tween := _sim_tween(dropped)
 	tween.tween_interval(12.0)
 	tween.tween_callback(dropped.queue_free)
 
@@ -874,7 +896,7 @@ func _leave_corpse() -> void:
 			mesh.material_override = null
 			mesh.set_surface_override_material(surface, material)
 			materials.append(material)
-	var tween := corpse.create_tween()
+	var tween := _sim_tween(corpse)
 	tween.tween_property(corpse, "rotation:z", PI * 0.5, 0.25)
 	tween.tween_interval(1.5)
 	for i in materials.size():

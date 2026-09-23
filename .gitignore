@@ -17,7 +17,9 @@
 # Harness output. Images kept for documentation are copied into
 # design/screenshots/, which is committed.
 /artifacts/
-/assets/previews/.frames/
+# Turntable previews are review output of `tools/build.sh previews`, ~30 MB a
+# run; design/screenshots/asset_sheet.png keeps the documented contact sheet.
+/assets/previews/
 
 *.tmp
 __pycache__/
@@ -37,3 +39,6 @@ __pycache__/
 /.profile
 /.gitconfig
 /.gitmodules
+
+# Release exports (tools/build.sh export).
+/build/

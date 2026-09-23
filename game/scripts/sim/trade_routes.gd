@@ -282,7 +282,8 @@ func _feed(route: Caravan, delta: float) -> void:
 		c.carrying_amount -= eaten
 		need -= eaten
 		if c.carrying_amount <= 0.00001: c.drop()
-	c.hunger = clampf(c.hunger + need - (delta / Config.DAY_LENGTH - need), 0.0, 1.0)
+	c.hunger = Config.travel_hunger(c.hunger, need,
+			delta / Config.DAY_LENGTH * Config.HUNGER_PER_DAY)
 	if c.hunger >= 1.0:
 		if c is Soldier: c.apply_damage(delta * 0.15)
 		else: route.health = maxf(0.0, route.health - delta * 0.15)
