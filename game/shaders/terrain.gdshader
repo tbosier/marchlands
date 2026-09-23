@@ -9,7 +9,8 @@ render_mode cull_back, diffuse_lambert;
 // track, then to a metalled road. Nothing about the road is authored: this
 // shader is simply reading the world's memory of where people walked.
 //
-//   wear.r : accumulated traffic, perceptually shaped  (0..1)
+//   wear.r : the visible surface, perceptually shaped   (0..1)
+//   wear.g : footfall alone, on the same scale, ignoring what was paid for
 //   wear.b : player-commissioned road level / 5
 // Fertility has a separate static world map shared by all detail levels.
 //
@@ -55,6 +56,45 @@ uniform float rock_height = 26.0;
 uniform vec3 season_tint = vec3(1.0, 1.0, 1.0);
 uniform float season_dry : hint_range(0.0, 1.0) = 0.15;
 uniform float season_frost : hint_range(0.0, 1.0) = 0.0;
+
+// --- the footfall overlay (P) ----------------------------------------------
+//
+// The wear field is the most distinctive thing the simulation does and very
+// nearly the least visible: the player sees a track appear months after the
+// pressure that made it, and never sees the pressure. This draws the pressure.
+//
+// It is drawn *here*, in the terrain shader, rather than as a mesh over the
+// ground, because every number it needs is already on the GPU — the wear
+// texture the road appearance above is painted from, which flush_texture
+// uploads for the road's own sake whenever the ground has changed, at most
+// once per rendered frame and rate-limited below that. So the overlay adds no
+// geometry, no upload and no per-frame CPU work of its own: all it ever costs
+// the processor is the one extra byte per changed texel that flush_texture
+// writes into the green channel, inside a loop that was already writing two.
+// The field is grid^2 * WEAR_SCALE^2 texels — 147k on the opening map and 9.4
+// million on the 6 km one — so anything that walked it per frame instead
+// would be unaffordable, and nothing here walks it.
+//
+// Zero when off: the value is the default until a player asks for the
+// overlay, and every line that reads it is inside a branch on it. The branch
+// is on a uniform, so it is coherent across each draw — though not across the
+// frame, since the terrain runs a separate material per detail tile and, on
+// a large world, deliberately leaves the far ones off (see the fragment).
+uniform float wear_overlay : hint_range(0.0, 1.0) = 0.0;
+
+// A deliberately unnatural ramp — indigo, violet, rose, amber. Nothing in the
+// landscape's palette is any of those, which is the point: read as data, not
+// as ground. It rises monotonically in lightness from end to end, so the order
+// survives a greyscale screenshot and colour-blind vision, and the terrain
+// underneath is drained to its own luminance first so no hue competes with it.
+// Values are linear, like every other colour in this shader.
+const vec3 FOOT_LOW = vec3(0.0110, 0.0232, 0.1471);   // #1B2A6B, barely trodden
+const vec3 FOOT_MID = vec3(0.1981, 0.0497, 0.3915);   // #7B3FA8
+const vec3 FOOT_HIGH = vec3(0.6308, 0.0802, 0.1946);  // #D0507A
+const vec3 FOOT_PEAK = vec3(0.8879, 0.3915, 0.0452);  // #F2A83C, a dirt track
+// Cool and pale, so it cannot be mistaken for the warm end of the ramp.
+const vec3 FOOT_EDGE = vec3(0.6240, 0.8633, 1.0);     // #CFEFFF
+const vec3 FOOT_BUILT = vec3(0.2542, 0.2789, 0.3186); // #8A9099
 
 varying vec3 v_world;
 varying float v_height;
@@ -254,6 +294,86 @@ void fragment() {
 	albedo = mix(albedo, albedo * 1.14, built * crown * 0.8);
 	albedo = mix(albedo, albedo * 0.84, built * (1.0 - crown) * improved * 0.6);
 
+	// --- the footfall overlay ---------------------------------------------
+	// Three things, because the player is asking three questions: where do my
+	// people walk, how heavily, and what is about to change.
+	//
+	// The heat is read from field.g — footfall on its own — and not from
+	// field.r, which the paid surface has already been max()ed into. On field.r
+	// a paved road nobody walks on is the brightest thing on the map, which is
+	// the exact opposite of the truth the player needs.
+	//
+	// The second half of the condition is not decoration. Worlds larger than
+	// the opening map do not keep a world-sized wear texture at all — it is a
+	// 1x1 stub, and only the handful of detail tiles around the camera carry
+	// real data (WearField.setup, Terrain.update_detail). Draining the whole
+	// kingdom to grey and then painting footfall on the near ground only would
+	// have the overlay asserting "nobody walks here" over most of the screen,
+	// which is worse than not drawing it: the distant ground simply keeps its
+	// ordinary colours, and what is drained is exactly what has data.
+	if (wear_overlay > 0.0 && textureSize(wear_map, 0).x > 1) {
+		// Drain the landscape to its own luminance, faintly cooled. The land
+		// keeps its light and shape — hills still read as hills, which is what
+		// lets the player recognise where they are looking — and gives up its
+		// colour to the ramp. An overlay laid on top of the full palette
+		// instead had to shout to be seen over the greens and straws, which is
+		// the failure this project's colour notes warn about.
+		float lum = dot(albedo, vec3(0.2126, 0.7152, 0.0722));
+		albedo = mix(albedo, vec3(lum * 0.72) * vec3(0.97, 0.99, 1.06),
+				wear_overlay);
+
+		// 0 untrodden, 1 worn, 2 footpath, 3 dirt track — the same scale the
+		// road bands above use, so the two readings agree.
+		//
+		// `raw` and `foot` are kept apart on purpose. The jitter is the same
+		// grain that ragged-edges the road above, at about a tenth of its
+		// amplitude because the rim window below is only a fifth of a stage
+		// wide; but it swings either way, and every *decision* here — is this
+		// ground walked on at all, is it already at the ceiling — has to be
+		// taken on the unjittered value. Deciding on the jittered one put a
+		// sixth of a stage of indigo across untrodden meadow and speckled the
+		// promotion rim over finished tracks, both in noise-shaped patches.
+		float raw = field.g * 5.0;
+		float foot = raw + (grain - 0.5) * 0.03;
+		float trodden = smoothstep(0.0, 0.10, raw);
+
+		// What the player paid for, underneath. It is not a desire path, and
+		// letting the heat answer for it would hide the one question worth
+		// asking about a commissioned road: is anybody using it? The heat is
+		// held back over paid ground rather than laid over it at full
+		// strength, which used to leave under a tenth of the grey showing on
+		// any road that was actually being walked — so the one case the grey
+		// exists to mark was the one case it disappeared in.
+		float built = smoothstep(0.0, 0.10, field.b);
+		albedo = mix(albedo, FOOT_BUILT, wear_overlay * built);
+
+		float t = clamp(foot / 3.0, 0.0, 1.0);
+		vec3 heat = mix(FOOT_LOW, FOOT_MID, smoothstep(0.0, 0.42, t));
+		heat = mix(heat, FOOT_HIGH, smoothstep(0.38, 0.76, t));
+		heat = mix(heat, FOOT_PEAK, smoothstep(0.74, 1.0, t));
+		albedo = mix(albedo, heat,
+				wear_overlay * trodden * 0.92 * (1.0 - built * 0.45));
+
+		// Ground in the last fifth of its stage: one more season of this
+		// traffic and it becomes the next surface. This is the whole reason
+		// the overlay exists — it is the only place on the map where moving a
+		// building still changes the outcome, and a colour on a continuous
+		// ramp is not something anyone can judge to a fifth by eye. Because
+		// the map is filtered, the rim also falls where the value sweeps
+		// through a threshold between texels, which is the verge of a route
+		// and is the same answer: that ground is close to turning over.
+		//
+		// Natural wear stops at a dirt track, so at the ceiling there is no
+		// next surface to promote to and a rim there would be a lie. The gate
+		// is on `raw` and sits well clear of 3.0, because the texel value
+		// reaches the ceiling as 153/255*5, which in float is a hair *over*
+		// three, and because a gate on the jittered value would be crossed by
+		// the jitter itself.
+		float rim = smoothstep(0.80, 0.98, fract(foot)) * trodden
+				* (1.0 - step(2.97, raw));
+		albedo = mix(albedo, FOOT_EDGE, wear_overlay * rim * 0.8);
+	}
+
 	ALBEDO = albedo;
 
 	// Surfaces are not all equally matt. Compacted and metalled road takes a
@@ -263,6 +383,18 @@ void fragment() {
 	float hard = max(improved, paved);
 	ROUGHNESS = mix(0.96, 0.66, max(hard, wet_sand * shore));
 	SPECULAR = mix(0.03, 0.22, max(hard * 0.7, wet_sand * shore));
+	// Flat while the overlay is up. A low sun glancing off a metalled road is
+	// a nice thing to look at and a liar in a heat map: it puts a highlight on
+	// the road the player paid for and none on the lane beside it.
+	//
+	// Inside the branch, not multiplied by a zero weight outside it. Two mixes
+	// a fragment is not much, but "costs nothing when it is off" has to mean
+	// nothing, and these ran on every terrain fragment of every frame whether
+	// the overlay had ever been raised or not.
+	if (wear_overlay > 0.0) {
+		ROUGHNESS = mix(ROUGHNESS, 0.99, wear_overlay);
+		SPECULAR = mix(SPECULAR, 0.02, wear_overlay);
+	}
 
 	// A little contact darkening in the verge and on rock, so the ground has
 	// somewhere to sit rather than floating at one brightness. Kept light,

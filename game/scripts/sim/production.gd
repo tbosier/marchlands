@@ -14,6 +14,15 @@ extends RefCounted
 ## before delivery. A site with no timber on it should be pulling timber, not
 ## queuing builders who will stand about.
 
+## The frost has fallen and taken `lost_food` worth of standing crop off
+## `farms` fields. Emitted when the year turns, and again for any farm that
+## meets the frost later than that — one raised after the turn has to be told
+## what month it is when it is first reviewed, and what it loses then is as
+## real as what the sweep took.
+##
+## Not emitted on the first turn after a load: see `_turn_the_year`.
+signal frost_fell(lost_food: float, farms: int, position: Vector3)
+
 ## How often any individual building is reconsidered, in in-game seconds.
 const REVIEW_INTERVAL := 0.4
 
@@ -31,11 +40,81 @@ var _next_review: Dictionary = {}       # building id -> in-game seconds
 var _clock := 0.0
 var _cursor := 0
 
+# --- The agricultural year -------------------------------------------------
+#
+# None of this is persisted. The season is a pure function of the simulation's
+# day counter (see the block comment in `clock.gd`), which every save already
+# carries, so a march loaded in the middle of autumn resumes in the middle of
+# autumn and a march loaded in winter resumes frozen — without one new save
+# field. That was a hard requirement: `save_validation.gd` rejects a version
+# mismatch outright and there is no migration system to lean on.
+
+## Season index last acted on, or -1 before the first tick. The *year* is kept
+## beside it because whether a frost bites depends on which winter it is: two
+## consecutive winters carry the same season index and are not the same event.
+var _season := -1
+var _season_year := -1
+var _growing := true
+var _hard_frost := false
+## What the last frost destroyed. Kept for the interface and for tests.
+var frost_loss := 0.0
+var frost_farms := 0
+## The simulation, for its day counter. See `_bind_calendar`.
+var _sim: Simulation = null
+var _calendar_warned := false
+
 
 func setup(job_board: JobBoard, store_index: Stores, world_node: World) -> void:
 	jobs = job_board
 	stores = store_index
 	world = world_node
+	_bind_calendar()
+
+
+## Find the day counter the rest of the simulation runs on.
+##
+## Production is handed the job board, the stores and the world at setup, and
+## the calendar is the one thing it needs that nobody passes it. It is *read*
+## from `Simulation` every time rather than counted here off `delta`, and that
+## is the point: a private counter would be silently wrong the moment a save
+## was loaded, because loading builds a fresh `Production` beside a
+## `Simulation.day` restored to whatever day the player left off on. The season
+## would then have been a different season from the one on the clock, in the
+## sky and on the ground — which is exactly the decorative-calendar bug this
+## work exists to fix.
+##
+## The simulation is the world's sibling: both are added to the game node —
+## or, while a save is being staged, to the staging node — in the same breath
+## (`Game._build_world_and_sim`, `Game.restore_from`, `Game.new_world`), and
+## `Simulation.setup` calls this before its own first tick. Reaching for it
+## through the tree is not pretty; it is what could be done without editing a
+## file this change does not own.
+func _bind_calendar() -> void:
+	if _sim != null or world == null:
+		return
+	var parent := world.get_parent()
+	if parent == null:
+		return
+	for sibling in parent.get_children():
+		if sibling is Simulation:
+			_sim = sibling
+			return
+
+
+## The calendar day. Falls back to the opening day — an eternal spring, which
+## is how the game behaved before there were seasons — but says so loudly,
+## once, because a silently seasonless march is the failure mode here.
+func calendar_day() -> float:
+	if _sim == null:
+		_bind_calendar()
+	if _sim != null:
+		return _sim.day
+	if not _calendar_warned:
+		_calendar_warned = true
+		push_error("Production cannot see the simulation's calendar: "
+				+ "the year will not turn and nothing will ever be harvested "
+				+ "late.")
+	return Clock.START_TIME_OF_DAY
 
 
 func set_cart(cart: Cart) -> void:
@@ -52,6 +131,7 @@ func tick(delta: float, buildings: Array[Building]) -> void:
 		return
 	Perf.begin("sim.production")
 	_clock += delta
+	_turn_the_year(buildings)
 
 	var reviewed := 0
 	var examined := 0
@@ -71,7 +151,106 @@ func tick(delta: float, buildings: Array[Building]) -> void:
 	Perf.end("sim.production")
 
 
+# ---------------------------------------------------------------------------
+# The year turns (design/NORTH_STAR.md — "Seasonal farming")
+# ---------------------------------------------------------------------------
+
+## Everything seasonal happens here: once, on the tick the season changes, over
+## the building list once.
+##
+## Not per frame and not per farm. The per-frame budget for "ask every field
+## what month it is" is zero — this project has just spent a great deal of
+## effort taking a 1,400-actor frame from 442 ms to 59 ms — and the season is
+## the slowest-moving quantity in the simulation. The only per-tick cost left
+## is one integer divide and one compare.
+func _turn_the_year(buildings: Array[Building]) -> void:
+	var day := calendar_day()
+	var season := Clock.season_index_at(day)
+	var year := Clock.year_at(day)
+	if season == _season and year == _season_year:
+		return
+	var first_turn := _season < 0
+	_season = season
+	_season_year = year
+	# Asked of the calendar rather than restated as `season != WINTER`. It was
+	# written that way first, and the result was that turning the growing season
+	# off in `Clock` changed nothing in the simulation: two definitions of the
+	# same rule, one of which nothing read.
+	_growing = Clock.is_growing_at(day)
+	_hard_frost = not _growing and Clock.frost_is_hard_at(day)
+
+	# A load lands here too, on its first tick, with `_season` still -1, and it
+	# has to apply the state: a march saved in a hard winter is frozen, and a
+	# fresh `Production` works that out again from the day counter.
+	#
+	# Whether it should *say so* depends on when the frost fell. A march played
+	# across the boundary — including one loaded in autumn and then played on
+	# into winter, which is the ordinary case — is living through the event and
+	# must be told. A march resuming a save taken days into a winter is not:
+	# that frost fell before the save, and announcing it again told the player
+	# they had just lost a harvest every time they reloaded, with a fabricated
+	# figure against it. One day's grace separates the two, and a save cannot
+	# land inside it by accident — the whole window is a single in-game day.
+	#
+	# A *mild* winter never sweeps at all, so the crop it was letting stand
+	# still stands.
+	var announce := not first_turn or _growing \
+			or Clock.days_since_frost(day) < 1.0
+	var lost := 0.0
+	var farms := 0
+	var where := Vector3.ZERO
+	for b in buildings:
+		if not b.def.is_farm():
+			continue
+		b.dormant = not _growing
+		if not _hard_frost:
+			continue
+		var taken := b.lose_standing_crop()
+		if taken > 0.0:
+			lost += taken
+			farms += 1
+			where = b.global_position
+	# A turn that is not announcing is not reporting either. These two are what
+	# the interface would put in front of the player, and a frost that fell
+	# before the save the player just resumed is not news they can act on.
+	frost_loss = lost if announce else 0.0
+	frost_farms = farms if announce else 0
+	if farms > 0 and announce:
+		frost_fell.emit(lost, farms, where)
+
+
+## Tell one farm what month it is.
+##
+## The sweep above catches every farm standing when the year turned; this
+## catches the ones raised afterwards. Without it a farm built the week after
+## the frost would sow itself at FARM_INITIAL_GROWTH, come on all winter and be
+## harvested in the snow — the one rule this whole feature exists to enforce,
+## dodged by building a day late. It costs a bool compare per farm review.
+func _sync_season(b: Building) -> void:
+	if b.dormant == (not _growing):
+		return
+	b.dormant = not _growing
+	if not _hard_frost:
+		return
+	# What a late-caught farm loses counts. Dropping the return value here meant
+	# the frost quietly destroyed food that was never added to `frost_loss` and
+	# never announced, so the settlement's own account of the winter was short
+	# by however much had been sown after the year turned.
+	var lost := b.lose_standing_crop()
+	if lost <= 0.0:
+		return
+	frost_loss += lost
+	frost_farms += 1
+	frost_fell.emit(lost, 1, b.global_position)
+
+
 func _review(b: Building) -> void:
+	# Before the construction branch, not after it. A farm sows its plots as it
+	# is raised, and a site still going up is still a farm with wheat in the
+	# ground — one finished during a winter would otherwise stand ripe until
+	# whichever came first, spring or somebody noticing.
+	if b.def.is_farm():
+		_sync_season(b)
 	if b.under_construction:
 		_post_construction(b)
 		return

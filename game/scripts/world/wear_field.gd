@@ -647,8 +647,18 @@ func flush_texture(force: bool = false) -> void:
 	for idx in _dirty_texels:
 		# R is the continuous surface level, normalised to 0..1, so each stage
 		# of the road occupies an equal band in the shader.
+		#
+		# G is the same number *before* the commissioned surface is taken into
+		# account: footfall alone, on the same 0..1-over-five-stages scale. R
+		# cannot answer "how much is this walked on" because the max() in it
+		# destroys that information wherever the player has paid for a surface
+		# — a paved road nobody uses reads identically to a paved road the
+		# whole march crosses. The footfall overlay needs the honest number,
+		# and one more byte written in a loop that already writes two is the
+		# cheapest place in the project to get it. Nothing simulated reads it.
 		var natural := minf(Config.RoadLevel.DIRT, Config.road_level_continuous(wear[idx]))
 		_pixels[idx * 4] = int(maxf(natural, locked[idx]) * (255.0 / 5.0))
+		_pixels[idx * 4 + 1] = int(natural * (255.0 / 5.0))
 		_pixels[idx * 4 + 2] = int(locked[idx] * (255.0 / 5.0))
 		_is_dirty_texel[idx] = 0
 	Perf.count("wear.texels_flushed", _dirty_texels.size())
@@ -672,7 +682,10 @@ func tile_texture(tile: Vector2i) -> ImageTexture:
 			var index := wy * res + wx
 			var dest := (y * size + x) * 4
 			var natural := minf(Config.RoadLevel.DIRT, Config.road_level_continuous(wear[index]))
+			# G is footfall alone; see flush_texture for why it is kept apart
+			# from the commissioned surface in R.
 			pixels[dest] = int(maxf(natural, locked[index]) * 51.0)
+			pixels[dest + 1] = int(natural * 51.0)
 			pixels[dest + 2] = int(locked[index] * 51.0)
 	var image := Image.create_from_data(size, size, false, Image.FORMAT_RGBA8, pixels)
 	var tex := ImageTexture.create_from_image(image)
@@ -705,6 +718,7 @@ func _flush_tiles() -> void:
 				var dest := (local.y * size + local.x) * 4
 				var natural := minf(Config.RoadLevel.DIRT, Config.road_level_continuous(wear[index]))
 				_tiles[tile].pixels[dest] = int(maxf(natural, locked[index]) * 51.0)
+				_tiles[tile].pixels[dest + 1] = int(natural * 51.0)
 				_tiles[tile].pixels[dest + 2] = int(locked[index] * 51.0)
 				dirty[tile] = true
 		_is_dirty_texel[index] = 0

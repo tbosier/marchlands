@@ -66,6 +66,18 @@ var dev: DevOverlay
 var dev_mode := false
 var show_nav_overlay := false
 
+## The footfall overlay (P). See _toggle_footfall_overlay.
+var show_footfall := false
+var _footfall_legend: Control
+var _ui_layer: CanvasLayer
+
+## The idle hint. Held in one place because the footfall key has to appear in
+## it — a control nobody is ever told about is a control nobody presses — and
+## because what the line falls back to now depends on whether the overlay is
+## up. `_idle_hint` picks between them.
+const BASE_HINT := "WASD pan · wheel zoom · middle-drag rotate · P footfall · click to select"
+const FOOTFALL_HINT := "Footfall — brighter is busier · a pale edge is ground about to become the next surface · P to hide"
+
 ## How far from the cursor the clear-ground tool reaches, in metres.
 const CLEAR_BRUSH := 9.0
 
@@ -90,13 +102,14 @@ func _ready() -> void:
 	add_child(camera)
 	camera.bind_terrain(world.heightmap)
 
-	var layer := CanvasLayer.new()
-	layer.name = "ui"
-	add_child(layer)
+	_ui_layer = CanvasLayer.new()
+	_ui_layer.name = "ui"
+	add_child(_ui_layer)
 	hud = HUD.new()
 	hud.name = "hud"
-	layer.add_child(hud)
+	_ui_layer.add_child(hud)
 	hud.setup(sim, clock)
+	hud.set_hint(BASE_HINT)
 	hud.build_requested.connect(_on_build_requested)
 	hud.build_cancelled.connect(_cancel_placement)
 	hud.speed_requested.connect(func(i): clock.set_speed(i))
@@ -248,7 +261,7 @@ func _ready() -> void:
 
 	dev = DevOverlay.new()
 	dev.name = "dev_overlay"
-	layer.add_child(dev)
+	_ui_layer.add_child(dev)
 	dev.setup(sim, clock, world, camera)
 	if sim.campaign != null: dev.bind_campaign(sim.campaign)
 
@@ -454,6 +467,12 @@ func _adopt_world(staged: SaveGame.RestoreState) -> String:
 	hud.setup(sim, clock)
 	dev.setup(sim, clock, world, camera)
 	if sim.campaign != null: dev.bind_campaign(sim.campaign)
+	# The terrain the overlay was painted on has just been freed, and its
+	# replacement was built with the uniform at its default. The overlay is not
+	# in the save — it is a way of looking, not part of the march — so it is
+	# the live toggle that gets reasserted here, not a restored one.
+	_set_footfall_overlay(show_footfall)
+	hud.set_hint(_idle_hint())
 
 	# The camera is only moved when where it was looking makes no sense any
 	# more — a save loaded over a session the player had panned somewhere else
@@ -719,6 +738,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				hud.set_tray_open(not hud.tray_is_open())
 			KEY_C:
 				_toggle_clear_tool()
+			KEY_P:
+				_toggle_footfall_overlay()
 			KEY_DELETE:
 				if selected_building:
 					_on_demolish_requested(selected_building)
@@ -846,7 +867,215 @@ func _exit_clear_tool() -> void:
 	if mode == Mode.CLEAR:
 		mode = Mode.SELECT
 	hud.set_clear_tool_active(false)
-	hud.set_hint("WASD pan · wheel zoom · middle-drag rotate · click to select")
+	hud.set_hint(_idle_hint())
+
+
+# ---------------------------------------------------------------------------
+# The footfall overlay (design doc 2.1, 7.1)
+#
+# The wear field is the thing this game does that no other kingdom builder
+# does, and until now the player could not see it working. They saw a track
+# appear, weeks of march-time after the traffic that made it, and never saw
+# the traffic: not where pressure was building, not which of their routes was
+# costing them, not what moving the granary forty metres would do. The
+# simulation was legible only in hindsight.
+#
+# P draws it. What is on screen while it is up is *footfall*, not roads — the
+# surface a player has paid for is drawn as the flat thing it is, so the ramp
+# answers only "where do my people actually walk", which is the question a
+# player can act on. The rest of the presentation argument is in
+# terrain.gdshader, with the colours.
+#
+# It is very nearly free. Every number it draws is already in the wear texture
+# that flush_texture uploads for the road's own sake, so raising the overlay
+# walks the terrain's chunks once and writes one uniform each — 65 chunks on
+# the opening map and about 1,025 on the 6 km one, though on the opening map
+# those 65 land on a single shared material object. Lowering it writes them
+# back to zero and the shader skips its block. Neither adds geometry, an
+# upload, or any per-frame CPU work at all. The one standing cost is the extra
+# byte flush_texture now writes per *changed* texel, in a loop that was
+# already writing two. Walking the wear field on the CPU to build an overlay
+# mesh, which is the obvious way to do this, would be 9.4 million texels a
+# frame on that same world; that is why this is drawn in the terrain shader
+# and nowhere else.
+#
+# Timings, from a throwaway headless A/B rather than anything the repo keeps:
+# 51 us to raise on the opening map, 25 us to lower, and 22 ns per changed
+# texel for the green channel (a worst-case whole-field flush went 51.9 ms to
+# 55.1 ms). Treat them as the order of magnitude they were taken for.
+#
+# What it cannot show: ground the wear field refuses to record. A farmer
+# crossing his own crops leaves no wear by design (WearField.set_protected),
+# so a route that runs through a field stops dead at the field's edge here.
+# That is the simulation being shown honestly, not the overlay failing, but it
+# is the one place a player could read the map as saying nobody walks there.
+# ---------------------------------------------------------------------------
+
+const TERRAIN_SHADER := "res://shaders/terrain.gdshader"
+
+## The legend's swatches. These are the shader's own ramp, in sRGB — the shader
+## holds the same colours converted to linear, and the comment there says so.
+## Two copies of a palette is a thing that drifts, but the alternative is the
+## interface reading colours back out of a compiled shader, and a legend that
+## does not match the map is the same bug with more machinery behind it. The
+## bar is an approximation in one respect and always will be: the shader gets
+## from one colour to the next with overlapping smoothsteps, and a gradient
+## with four stops is a slightly different curve through the same four colours.
+const FOOTFALL_RAMP: Array[Color] = [
+	Color(0.10588, 0.16471, 0.41961),  # #1b2a6b  barely trodden
+	Color(0.48235, 0.24706, 0.65882),  # #7b3fa8
+	Color(0.81569, 0.31373, 0.47843),  # #d0507a
+	Color(0.94902, 0.65882, 0.23529),  # #f2a83c  a dirt track
+]
+## Where each ramp colour lands, matching the shader's own crossfades.
+const FOOTFALL_STOPS: Array[float] = [0.0, 0.42, 0.76, 1.0]
+const FOOTFALL_EDGE := Color(0.81176, 0.93725, 1.0)   # #cfefff
+const FOOTFALL_BUILT := Color(0.54118, 0.56471, 0.60) # #8a9099
+
+
+func _toggle_footfall_overlay() -> void:
+	_set_footfall_overlay(not show_footfall)
+	hud.set_hint(_idle_hint())
+
+
+## What the hint line says when nothing else is claiming it.
+func _idle_hint() -> String:
+	return FOOTFALL_HINT if show_footfall else BASE_HINT
+
+
+func _set_footfall_overlay(enabled: bool) -> void:
+	show_footfall = enabled
+	if world != null and is_instance_valid(world.terrain):
+		apply_footfall_overlay(world.terrain, enabled)
+	# Built on the first press rather than at startup: a player who never asks
+	# for the overlay never pays for its nodes, and nothing here is needed to
+	# run the game headlessly.
+	if enabled and _footfall_legend == null and _ui_layer != null:
+		_footfall_legend = build_footfall_legend()
+		_ui_layer.add_child(_footfall_legend)
+	if _footfall_legend != null:
+		_footfall_legend.visible = enabled
+
+
+## Set the overlay uniform on every terrain material under `terrain`.
+##
+## Static, and handed the node rather than reaching for `world.terrain` itself,
+## so the headless tests can drive exactly what the keypress drives without a
+## world, a camera or a display around it. Returns how many chunk materials
+## were written, which is not a count of distinct material objects: every
+## coarse chunk and the backdrop share one, so the opening map's 65 writes are
+## 65 writes to the same material.
+##
+## It walks the chunks' `material_override` rather than the terrain's own
+## fields because the terrain hands its close chunks private duplicates of the
+## shared material as the camera moves. Setting only the shared one left every
+## detailed tile — which is all the ground near the player, and so all the
+## ground they were looking at — drawing the world as if the overlay were off.
+## The shader identity check is what keeps the water and the fog, which are
+## also ShaderMaterials under this node, out of it.
+static func apply_footfall_overlay(terrain: Node, enabled: bool) -> int:
+	if terrain == null:
+		return 0
+	var shader: Shader = load(TERRAIN_SHADER)
+	var value := 1.0 if enabled else 0.0
+	var changed := 0
+	for child in terrain.get_children():
+		var geometry := child as GeometryInstance3D
+		if geometry == null:
+			continue
+		var material := geometry.material_override as ShaderMaterial
+		if material == null or material.shader != shader:
+			continue
+		material.set_shader_parameter("wear_overlay", value)
+		changed += 1
+	return changed
+
+
+## The legend.
+##
+## A heat ramp without one is a picture, not a reading: the player can see that
+## somewhere is busier than somewhere else and cannot tell whether the bright
+## stretch is a fortnight from being a footpath or has been a cart track since
+## spring. Three rows, because the map says three things.
+static func build_footfall_legend() -> Control:
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.078, 0.074, 0.070, 0.92)
+	style.border_color = Color(0.30, 0.29, 0.26, 0.9)
+	style.set_border_width_all(1)
+	style.content_margin_left = 10
+	style.content_margin_right = 12
+	style.content_margin_top = 8
+	style.content_margin_bottom = 9
+
+	var panel := PanelContainer.new()
+	panel.name = "footfall_legend"
+	panel.add_theme_stylebox_override("panel", style)
+	panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	panel.offset_left = 12
+	# Clear of the build tray at its open height, so the legend never has to
+	# move and never ends up underneath it.
+	panel.offset_bottom = -(HUD.BAR_OPEN_H + 12.0)
+	panel.offset_top = panel.offset_bottom
+	panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var column := VBoxContainer.new()
+	column.add_theme_constant_override("separation", 4)
+	panel.add_child(column)
+	column.add_child(_legend_label("FOOTFALL", HUD.F_MICRO, HUD.INK_DIM))
+
+	var gradient := Gradient.new()
+	gradient.offsets = PackedFloat32Array(FOOTFALL_STOPS)
+	gradient.colors = PackedColorArray(FOOTFALL_RAMP)
+	var ramp := GradientTexture1D.new()
+	ramp.gradient = gradient
+	ramp.width = 216
+	var bar := TextureRect.new()
+	bar.texture = ramp
+	bar.stretch_mode = TextureRect.STRETCH_SCALE
+	bar.custom_minimum_size = Vector2(216, 9)
+	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	column.add_child(bar)
+
+	# The ramp is linear in *stage*, so each third of the bar is one surface
+	# being approached. The labels sit under the third they belong to.
+	var scale_row := HBoxContainer.new()
+	scale_row.add_theme_constant_override("separation", 0)
+	for caption in ["worn", "path", "track"]:
+		var tick := _legend_label(caption, HUD.F_MICRO, HUD.INK_FAINT)
+		tick.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		tick.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		scale_row.add_child(tick)
+	column.add_child(scale_row)
+
+	column.add_child(_legend_key(FOOTFALL_EDGE, "almost the next surface"))
+	column.add_child(_legend_key(FOOTFALL_BUILT, "road you commissioned"))
+	column.add_child(_legend_label("Move what they walk to and the pressure "
+			+ "moves with them.", HUD.F_MICRO, HUD.INK_FAINT))
+	return panel
+
+
+static func _legend_label(text: String, size: int, ink: Color) -> Label:
+	var label := Label.new()
+	label.text = text
+	label.add_theme_font_size_override("font_size", size)
+	label.add_theme_color_override("font_color", ink)
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return label
+
+
+static func _legend_key(swatch: Color, text: String) -> Control:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	var chip := ColorRect.new()
+	chip.color = swatch
+	chip.custom_minimum_size = Vector2(11, 11)
+	chip.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(chip)
+	row.add_child(_legend_label(text, HUD.F_MICRO, HUD.INK_DIM))
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return row
 
 
 func _order_clear_at(screen_pos: Vector2) -> void:
@@ -912,6 +1141,9 @@ func _cancel_placement() -> void:
 		_ghost = null
 	hud.set_active_build("")
 	hud.hide_cursor_tooltip()
+	# set_active_build puts the interface's own idle hint back, which does not
+	# know about the keys this script owns or about the overlay being up.
+	hud.set_hint(_idle_hint())
 
 
 func _update_ghost() -> void:
@@ -1674,7 +1906,7 @@ func _cancel_bridge() -> void:
 	if mode == Mode.BRIDGE:
 		mode = Mode.SELECT
 		hud.clear_selection()
-		hud.set_hint("WASD pan · wheel zoom · middle-drag rotate · click to select")
+		hud.set_hint(_idle_hint())
 
 
 func _bridge_hit(screen_position: Vector2) -> Dictionary:

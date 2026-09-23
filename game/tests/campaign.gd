@@ -95,6 +95,20 @@ func _generation_and_persistence() -> void:
 	bad = saved.duplicate(true)
 	bad.impacts.append({"wait": 0.5, "id": 99999, "faction": 1})
 	malformed.append(bad)
+	# The fields expansion added. `validate` runs on untrusted data and has to
+	# turn each of these away with a string rather than throwing on the way in.
+	bad = saved.duplicate(true)
+	bad.workers[0].farm_id = bad.buildings[0].id if bad.buildings[0].type_id != "farm" else 999999
+	malformed.append(bad)
+	bad = saved.duplicate(true)
+	bad.workers[0].farm_id = "the north field"
+	malformed.append(bad)
+	bad = saved.duplicate(true)
+	bad.build_in = -1.0
+	malformed.append(bad)
+	bad = saved.duplicate(true)
+	bad.grow_in = INF
+	malformed.append(bad)
 	var atomic := true
 	for data in malformed:
 		atomic = atomic and campaign.restore(data) != "" and campaign.capture() == saved
@@ -779,11 +793,516 @@ func _companies_at_scale() -> void:
 	await process_frame
 
 
+## The rival town's own growth. Everything in this block runs long on purpose:
+## the town holds its first review on day three, a second farm is a week's work
+## and a personality only tells itself apart once it has had a hundred days to
+## build. A ten-day fixture here would pass with the whole feature deleted.
+## The rival's own clock, and the water everyone on the map drinks. Ticking the
+## whole settlement for the hundreds of in-game days these fixtures need is
+## minutes of the player's economy that nothing here reads, and the rival's
+## growth does not depend on it — but the rival's people do die of thirst, so the
+## water system is not optional. Checked against full `sim.tick` over sixty days
+## of an aggressive neighbour: the same 13 buildings, 31 residents, 16 guards, 15
+## growers and 5 farms, in half the wall time. `_settled_days` below is the full
+## simulation, for the one fixture that saves and loads a real game.
+func _rival_days(game: SeededGame, days: int) -> void:
+	var step := Config.MAX_SIM_STEP
+	var per_day := roundi(Config.DAY_LENGTH / step)
+	for _d in days:
+		for _i in per_day:
+			if game.sim.water != null:
+				game.sim.water.tick(step)
+			game.sim.campaign.tick(step)
+			game.sim.day += step / Config.DAY_LENGTH
+			game.clock.elapsed_days += step / Config.DAY_LENGTH
+		await process_frame
+
+
+func _settled_days(game: SeededGame, days: int) -> void:
+	var step := Config.MAX_SIM_STEP
+	var per_day := roundi(Config.DAY_LENGTH / step)
+	for _d in days:
+		for _i in per_day:
+			game.sim.tick(step)
+			game.clock.elapsed_days += step / Config.DAY_LENGTH
+		await process_frame
+
+
+## `founding` is the set of building ids the town was seeded with, so `sited`
+## counts only what the town has raised for itself.
+func _town_state(campaign: FrontierCampaign, founding: Dictionary = {}) -> Dictionary:
+	var guards := 0
+	for u in campaign.units.values():
+		if u.faction == 1 and u.health > 0.0:
+			guards += 1
+	var sited := 0
+	for b in campaign.enemy_buildings.values():
+		if not founding.has(b.id):
+			sited += 1
+	var keep := campaign._enemy_type("keep")
+	return {"buildings": campaign.enemy_buildings.size(),
+		"people": campaign.town_population, "growers": campaign._workers.size(),
+		"guards": guards, "farms": campaign._farms.size(),
+		"iron": keep.inventory[Config.Res.IRON] if keep != null else -1.0,
+		"sited": sited}
+
+
+func _expansion() -> void:
+	var game := _new_game(42)
+	var campaign: FrontierCampaign = game.sim.campaign
+	campaign.set_personality("peaceful")
+	var founded := _town_state(campaign)
+	# Day twelve first, and on purpose. At HEAD every rival garrison in the game
+	# was dead by about day ten: guards drink at the town well 43 m out, and
+	# `_refill` reaches 24 m from a store's door, so a guard who had once gone to
+	# drink stood beside the well with an empty pack until he died — measured at
+	# HEAD, rations gone on day six and all three dead by day ten. Checked at
+	# twelve rather than at sixty because by sixty the town has five farms and a
+	# granary and there is food within reach of almost anywhere it might stand.
+	await _rival_days(game, 12)
+	var early := _town_state(campaign)
+	var packed := 0
+	for u in campaign.units.values():
+		if u.faction == 1 and u.health > 0.0 and u.rations > 1.0:
+			packed += 1
+	_check(early.guards == founded.guards and packed == founded.guards,
+			"the founding garrison is alive on day twelve and still carrying rations (%d of %d alive, %d with a pack)"
+			% [early.guards, founded.guards, packed])
+	await _rival_days(game, 48)
+	var grown := _town_state(campaign)
+	print("METRIC " + JSON.stringify({"phase": "rival_growth", "day": 60, "personality": "peaceful",
+		"state": grown}))
+	_check(grown.buildings > founded.buildings and grown.people > founded.people
+			and grown.farms > founded.farms,
+			"sixty days of neighbouring leaves the rival with more buildings, more people and more fields than it was founded with")
+	# Everything the town raised has to be a building the game already defines,
+	# and has to stand where the player's own placement rules would allow it.
+	var invented := ""
+	var overlapping := false
+	for b in campaign.enemy_buildings.values():
+		if b.type_id not in ["keep", "house", "farm", "granary", "well"]:
+			invented = b.type_id
+		for other in campaign.enemy_buildings.values():
+			if other != b and other.position.distance_to(b.position) < 20.0:
+				overlapping = true
+	_check(invented == "" and not overlapping,
+			"the town it grew is made of ordinary building types on ground that does not overlap")
+	_check(campaign._workers.size() <= campaign.town_population
+			and campaign._workers.size() <= FrontierCampaign.MAX_GROWERS,
+			"every grower in the fields is one of the town's own residents")
+	_check(grown.guards > 0,
+			"the garrison is still alive after sixty days rather than starved beside the well")
+	_check(FrontierCampaign.validate(campaign.capture()) == "",
+			"a town that has grown for sixty days still writes a save its own validator accepts")
+	# Burn a staffed farm down and watch where its growers go. They have to
+	# spread over the farms that are left, not all land on whichever one had the
+	# fewest hands when the first of them was looked at: re-homing read
+	# `farm.workers`, which the reconciliation does not write until afterwards,
+	# so three growers off one farm all chose the same destination and a
+	# three-slot farm came back holding six.
+	if campaign._farms.size() >= 2:
+		var doomed: Building = campaign._farms[0]
+		var displaced: int = doomed.workers.size()
+		campaign._destroy_enemy(doomed)
+		var over := 0
+		var placed := 0
+		for farm in campaign._farms:
+			placed += farm.workers.size()
+			if farm.workers.size() > farm.def.worker_slots:
+				over += 1
+		# Whatever room the surviving farms had is filled without any of them
+		# going over its slots, and whoever is left over is back to being a
+		# labourer rather than disappearing from the town's economy: `_workers`
+		# still holds him, no farm claims him, and the labour count says so.
+		var homeless: int = campaign._workers.size() - campaign._field_hands()
+		_check(displaced > 1 and over == 0 and placed == campaign._field_hands()
+				and campaign._field_hands() + homeless == campaign._workers.size(),
+				"the %d growers of a burned farm are taken on by the farms still standing (%d of them), none over its own slots, and the %d with nowhere to go count as labourers again"
+				% [displaced, campaign._field_hands(), homeless])
+		_check(campaign.capture() == campaign.capture()
+				and FrontierCampaign.validate(campaign.capture()) == "",
+				"and the town writes a valid, stable save straight after losing a farm")
+	game.free()
+	await process_frame
+
+
+## Materials. The town buys its buildings out of the keep at the ordinary
+## `BuildingDefs` price, so a town held at nothing cannot build however many
+## people it has and however hungry it is.
+func _expansion_needs_materials() -> void:
+	var game := _new_game(42)
+	var campaign: FrontierCampaign = game.sim.campaign
+	campaign.set_personality("peaceful")
+	var keep := campaign._enemy_type("keep")
+	var step := Config.MAX_SIM_STEP
+	var per_day := roundi(Config.DAY_LENGTH / step)
+	for _d in 40:
+		for _i in per_day:
+			game.sim.water.tick(step)
+			game.sim.campaign.tick(step)
+			# Robbed every tick, so nothing accumulates between reviews.
+			keep.inventory[Config.Res.TIMBER] = 0.0
+			keep.inventory[Config.Res.STONE] = 0.0
+			game.sim.day += step / Config.DAY_LENGTH
+			game.clock.elapsed_days += step / Config.DAY_LENGTH
+		await process_frame
+	var poor := _town_state(campaign)
+	_check(poor.buildings == 6,
+			"forty days with no timber or stone in the keep raise no buildings at all")
+	_check(poor.people >= 8,
+			"the town that could not build is a living one, not a dead one: the materials are what it lacked")
+	# Watch a single building go up and check the keep is actually debited for
+	# it. Without this the fixture proves only that the town needs materials in
+	# hand, not that raising something spends them: delete the `keep.remove`
+	# line in `_expand` and everything above still passes.
+	var seen: Dictionary = {}
+	for b in campaign.enemy_buildings.values():
+		seen[b.id] = true
+	var paid := ""
+	var step2 := Config.MAX_SIM_STEP
+	for _d in 30:
+		for _i in per_day:
+			var before_stock := {}
+			for res in [Config.Res.TIMBER, Config.Res.STONE]:
+				before_stock[res] = keep.inventory[res]
+			game.sim.water.tick(step2)
+			campaign.tick(step2)
+			game.sim.day += step2 / Config.DAY_LENGTH
+			game.clock.elapsed_days += step2 / Config.DAY_LENGTH
+			for b in campaign.enemy_buildings.values():
+				if seen.has(b.id):
+					continue
+				seen[b.id] = true
+				if paid != "":
+					continue
+				var cost: Dictionary = b.def.cost
+				var short := ""
+				for res in cost:
+					var spent: float = float(before_stock[res]) - keep.inventory[res]
+					if absf(spent - float(cost[res])) > 0.2:
+						short = "%s cost %s, keep fell %.2f" % [b.type_id, str(cost), spent]
+				paid = short if short != "" else "yes"
+		await process_frame
+	var supplied := _town_state(campaign)
+	print("METRIC " + JSON.stringify({"phase": "rival_materials", "robbed": poor, "supplied": supplied}))
+	_check(supplied.buildings > poor.buildings,
+			"the same town builds once its people are left the materials they cut")
+	_check(paid == "yes",
+			"and the keep is debited the building's own BuildingDefs price as it goes up (%s)" % paid)
+	game.free()
+	await process_frame
+
+
+## People and food. A resident costs food out of the keep and needs a roof, and
+## a town with nobody left in it is not a spawner that refills itself.
+func _expansion_needs_people_and_food() -> void:
+	var game := _new_game(42)
+	var campaign: FrontierCampaign = game.sim.campaign
+	campaign.set_personality("peaceful")
+	var keep := campaign._enemy_type("keep")
+	var started := campaign.town_population
+	var step := Config.MAX_SIM_STEP
+	var per_day := roundi(Config.DAY_LENGTH / step)
+	for _d in 30:
+		for _i in per_day:
+			game.sim.water.tick(step)
+			game.sim.campaign.tick(step)
+			keep.inventory[Config.Res.FOOD] = 0.0
+			game.sim.day += step / Config.DAY_LENGTH
+			game.clock.elapsed_days += step / Config.DAY_LENGTH
+		await process_frame
+	_check(campaign.town_population <= started,
+			"thirty days of an empty granary add nobody to the rival's population")
+	# Food back, and this time a town with nobody left in it. It stays empty:
+	# growth is people raising children, not a counter refilling itself.
+	campaign.town_population = 0
+	keep.inventory[Config.Res.FOOD] = 300.0
+	await _rival_days(game, 20)
+	_check(campaign.town_population == 0,
+			"a rival town with no residents left and a full granary stays empty")
+	game.free()
+	await process_frame
+
+
+## Three neighbours, one seed, one hundred and twenty days. The rows printed
+## here are the measurement the balance claims rest on.
+func _expansion_personalities() -> void:
+	var results := {}
+	for personality in FrontierCampaign.PERSONALITIES:
+		var game := _new_game(42)
+		var campaign: FrontierCampaign = game.sim.campaign
+		campaign.set_personality(personality)
+		var founding := {}
+		for b in campaign.enemy_buildings.values():
+			founding[b.id] = true
+		var elapsed := 0
+		for day in [30, 60, 120]:
+			await _rival_days(game, day - elapsed)
+			elapsed = day
+			var state := _town_state(campaign, founding)
+			state.personality = personality
+			state.day = day
+			state.phase = "rival_personality"
+			print("METRIC " + JSON.stringify(state))
+			if day == 120:
+				results[personality] = state
+		_check(FrontierCampaign.validate(campaign.capture()) == "",
+				"a %s neighbour at day 120 still writes a valid save" % personality)
+		game.free()
+		await process_frame
+	var aggressive: Dictionary = results.aggressive
+	var peaceful: Dictionary = results.peaceful
+	var loner: Dictionary = results.loner
+	_check(aggressive.guards > peaceful.guards and peaceful.guards >= loner.guards,
+			"at day 120 the aggressive neighbour is holding more men under arms than the peaceful one, and the loner fewest (%d/%d/%d)"
+			% [aggressive.guards, peaceful.guards, loner.guards])
+	_check(peaceful.buildings > loner.buildings and peaceful.people > loner.people,
+			"the loner has built and settled less than the peaceful town on the same ground (%d buildings/%d people against %d/%d)"
+			% [loner.buildings, loner.people, peaceful.buildings, peaceful.people])
+	_check(aggressive.sited >= 6 and peaceful.sited > aggressive.sited and loner.sited <= 3,
+			"each temperament raised a different amount of town of its own: %d buildings for the aggressive neighbour, %d for the peaceful one, %d for the loner"
+			% [aggressive.sited, peaceful.sited, loner.sited])
+	_check(peaceful.iron > 32.0 and loner.iron <= 32.0 and aggressive.iron <= 32.0,
+			"only the peaceful neighbour digs more iron than the thirty-two it was founded with, so only a peaceful neighbour is worth trading with twice")
+
+
+## Growth is state like any other state: a save taken mid-expansion and reloaded
+## must develop into the same town, building for building.
+##
+## The fields the save now carries are named explicitly below, because a round
+## trip cannot catch a field `capture` never writes: drop it and both sides of
+## the comparison lose it together. Three mutations of this fixture — dropping
+## the build clock, dropping each grower's farm, dropping the reconciliation on
+## load — passed a comparison that only replayed the save against itself.
+##
+## `seed()` before each replay because Godot's global generator is not in the
+## save. That is a gap in `savegame.gd` and predates this work: measured at HEAD,
+## a rival reloaded without it drifts — its growers' hydration first, and from
+## there which of them is walking and which is standing in a field, ending in a
+## keep holding 77 food on one run and 215 on the other.
+##
+## What this then establishes, exactly: a save reloaded and replayed develops
+## identically to the same save reloaded and replayed again, to the digit. It is
+## NOT the stronger claim that a reloaded game matches one that was never
+## interrupted. It does not, and that predates this work too — `restore` rebuilds
+## each grower with `Citizen.setup(..., _rng, ...)`, which redraws body
+## attributes that `capture` never wrote down, so a reloaded grower can walk at a
+## slightly different speed than the one he replaced. Live-versus-reloaded was
+## measured and diverges at HEAD as well. The fields growth itself added are
+## covered by naming them below rather than by leaning on the replay.
+func _expansion_survives_loading() -> void:
+	var game := _new_game(42)
+	var campaign: FrontierCampaign = game.sim.campaign
+	campaign.set_personality("peaceful")
+	await _settled_days(game, 25)
+	var snapshot := SaveGame.capture(game)
+	_check(SaveGame.validate(snapshot, game.registry) == "",
+			"a save taken while the rival is expanding is a valid save")
+	var written: Dictionary = snapshot.campaign
+	_check(written.has("build_in") and written.has("grow_in")
+			and is_equal_approx(written.build_in, campaign._build_in)
+			and is_equal_approx(written.grow_in, campaign._grow_in),
+			"the save names both of the town's review clocks and writes the values the town is actually holding")
+	var named := 0
+	for worker in written.workers:
+		if int(worker.get("farm_id", -1)) >= 0:
+			named += 1
+	_check(named == written.workers.size() and written.workers.size() > 3,
+			"the save names the farm each of its %d growers works — more growers than a town could hold before it expanded" % written.workers.size())
+	var error := game.restore_from(snapshot)
+	campaign = game.sim.campaign
+	_check(error == "" and campaign.capture() == written,
+			"the growth a mid-expansion save carries comes back exactly as it was written: " + error)
+	var standing := 0
+	for farm in campaign._farms:
+		standing += farm.workers.size()
+	_check(standing == campaign._workers.size() and campaign._harvest_rate() > 0.0,
+			"every grower is standing in a field after loading and the fields are worked, rather than the farms coming back empty")
+	seed(42)
+	await _settled_days(game, 25)
+	var uninterrupted: Dictionary = game.sim.campaign.capture()
+	_check(uninterrupted.buildings.size() > written.buildings.size(),
+			"the twenty-five days replayed either side of the save actually contained construction (%d buildings became %d)"
+			% [written.buildings.size(), uninterrupted.buildings.size()])
+	error = game.restore_from(snapshot)
+	seed(42)
+	await _settled_days(game, 25)
+	var reloaded: Dictionary = game.sim.campaign.capture()
+	_check(error == "" and reloaded == uninterrupted,
+			"a reloaded town builds the same buildings in the same places, staffs them with the same people and holds the same stores, to the digit: " + error)
+	game.free()
+	await process_frame
+
+
+## Nothing above may hand the player a live readout. What the rival has is what
+## a scout last saw it have, dated to the day of the visit.
+func _expansion_is_only_seen_by_scouting() -> void:
+	var game := _new_game(42)
+	var campaign: FrontierCampaign = game.sim.campaign
+	var scouting: Scouting = game.sim.scouting
+	campaign.set_personality("peaceful")
+	await _rival_days(game, 12)
+	scouting._reveal(campaign.rival_position, 120.0)
+	scouting._observe_city()
+	var visit: Dictionary = scouting.city_report()
+	_check(not visit.is_empty() and visit.has("last_seen_day"),
+			"a scout who reaches the town brings back a dated report")
+	# The visibility pass has to actually run through the unobserved stretch,
+	# once a day, or this proves nothing: `_rival_days` does not call it, and a
+	# report that is never asked to refresh trivially does not refresh. It is
+	# `refresh_visibility` -> `_observe_city` finding the town out of sight that
+	# has to leave the dated report alone.
+	var step := Config.MAX_SIM_STEP
+	var per_day := roundi(Config.DAY_LENGTH / step)
+	var refreshes := 0
+	for _d in 45:
+		for _i in per_day:
+			game.sim.water.tick(step)
+			campaign.tick(step)
+			game.sim.day += step / Config.DAY_LENGTH
+			game.clock.elapsed_days += step / Config.DAY_LENGTH
+		scouting.refresh_visibility()
+		refreshes += 1
+		await process_frame
+	var later: Dictionary = scouting.city_report()
+	_check(later == visit and refreshes == 45 and not scouting.visibility_at(campaign.rival_position),
+			"forty-five days of building, with the fog refreshed on every one of them and the town out of sight, do not edit the report the scout brought home")
+	var briefing: Dictionary = campaign.info()
+	var leaked := ""
+	for key in briefing:
+		if key not in ["units", "rations", "can_recruit", "recruit_cost", "civilians",
+				"population", "rival_name", "status"]:
+			leaked = key
+	# Naming the allowed keys is not enough: a live rival count returned under
+	# "population" would have passed. Each allowed number is pinned to the thing
+	# it is supposed to be — ours — and checked to differ from the rival's.
+	_check(leaked == "" and briefing.rival_name == visit.name
+			and briefing.population == game.sim.population_members().size()
+			and briefing.civilians == game.sim.citizens.size()
+			and briefing.units == campaign.friendly_ids().size()
+			and briefing.population != campaign.town_population,
+			"the frontier panel counts our own people and soldiers and the name on the last report, and carries no number the rival holds now (ours %d, theirs %d)"
+			% [briefing.population, campaign.town_population])
+	scouting._reveal(campaign.rival_position, 120.0)
+	scouting._observe_city()
+	var second: Dictionary = scouting.city_report()
+	_check(second != visit and second.last_seen_day > visit.last_seen_day,
+			"sending someone back replaces the old report with what is there now")
+	game.free()
+	await process_frame
+
+
+## Pressure, not a scripted loss. A garrison grown past RAID_GARRISON comes for
+## the supply yard of a settlement that raised no army at all; a garrison the
+## size the rival is founded with does not.
+func _expansion_pressure() -> void:
+	var game := _new_game(42)
+	var sim := game.sim
+	var campaign: FrontierCampaign = sim.campaign
+	campaign.set_personality("aggressive")
+	var relay := _build(game, "supply_hut", game.world.centre() + Vector3(-90, 0, 60))
+	if relay == null:
+		game.free()
+		return
+	sim.day = 10.0
+	campaign._assign_guards()
+	var raiding := 0
+	for u in campaign.units.values():
+		if u.faction == 1 and u.target_kind == "building":
+			raiding += 1
+	_check(campaign.friendly_ids().is_empty() and raiding == 0 and not campaign.at_war,
+			"a founding garrison does not raid a settlement that has raised no army")
+	while campaign.units.size() - campaign.friendly_ids().size() < FrontierCampaign.RAID_GARRISON:
+		campaign._spawn_unit(1, campaign.rival_position + Vector3(0, 0, -20))
+	campaign._assign_guards()
+	var grown_raiding := 0
+	for u in campaign.units.values():
+		if u.faction == 1 and u.target_kind == "building" and u.target_id == relay.id:
+			grown_raiding += 1
+	_check(grown_raiding > 0 and campaign.at_war,
+			"a garrison grown to %d comes for the supply yard even though we have no soldiers at all"
+			% FrontierCampaign.RAID_GARRISON)
+	game.free()
+	await process_frame
+
+
+## And the answer. A settlement that fielded an army can still end a rival that
+## has been growing for six weeks, and a conquered town builds nothing further.
+func _expansion_can_be_answered() -> void:
+	var game := _new_game(42)
+	var campaign: FrontierCampaign = game.sim.campaign
+	campaign.set_personality("aggressive")
+	await _rival_days(game, 45)
+	var before := _town_state(campaign)
+	_check(before.buildings > 6,
+			"the rival being answered is one that had six weeks to grow (%d buildings, %d people, %d guards)"
+			% [before.buildings, before.people, before.guards])
+	var keep := campaign._enemy_type("keep")
+	var army: Array[int] = []
+	for i in 20:
+		var soldier := campaign._spawn_unit(0,
+				campaign._door(keep) + Vector3(float(i % 5) * 3.0 - 6.0, 0, 8.0 + float(i / 5) * 3.0))
+		soldier.rations = FrontierCampaign.PACK_DAYS
+		army.append(soldier.id)
+	campaign.command(army, keep.position, {"kind": "building", "id": keep.id})
+	for _i in 8000:
+		campaign.tick(0.25)
+		if campaign.conquered:
+			break
+	_check(campaign.conquered,
+			"twenty supplied soldiers of ours reach the keep of a grown rival and bring it down")
+	var after := campaign.enemy_buildings.size()
+	# Doubly guaranteed, and worth saying which guard does the work: `conquered`
+	# stops `_tick_town` at its first line, and the keep that held every scrap of
+	# the town's food and materials is the building that was just burned down, so
+	# there is nothing left to build with either. Removing the `conquered` guard
+	# on its own changes nothing — recorded as such in the mutation table rather
+	# than dressed up as a check that caught it.
+	await _rival_days(game, 30)
+	_check(campaign.enemy_buildings.size() == after and campaign._keep == null
+			and campaign.conquered,
+			"a conquered town raises nothing in the month that follows: its keep is gone, and with it every store it would have built from")
+	game.free()
+	await process_frame
+
+
+## `--campaign-only=<section>` runs one block. The expansion sections simulate
+## hundreds of in-game days each, and every check in them was mutation-tested
+## one section at a time; without this the table behind that would have meant a
+## dozen runs of the whole suite. An unknown name is a failure and not a quiet
+## pass, because a suite that reports "0 failures" over checks that never ran is
+## exactly the trap this file has fallen into before.
+const SECTIONS := ["core", "growth", "personalities", "saving", "knowledge", "pressure"]
+
+
 func _run() -> void:
-	await _generation_and_persistence()
-	await _foundation_save()
-	await _companies()
-	await _companies_at_scale()
-	await _military()
+	var only := ""
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--campaign-only="):
+			only = arg.trim_prefix("--campaign-only=")
+	if only != "" and only not in SECTIONS:
+		_check(false, "unknown campaign section '%s'" % only)
+		print("Campaign regression failures: %d" % _failures)
+		quit(1)
+		return
+	if only in ["", "core"]:
+		await _generation_and_persistence()
+		await _foundation_save()
+		await _companies()
+		await _companies_at_scale()
+		await _military()
+	if only in ["", "growth"]:
+		await _expansion()
+		await _expansion_needs_materials()
+		await _expansion_needs_people_and_food()
+	if only in ["", "personalities"]:
+		await _expansion_personalities()
+	if only in ["", "saving"]:
+		await _expansion_survives_loading()
+	if only in ["", "knowledge"]:
+		await _expansion_is_only_seen_by_scouting()
+	if only in ["", "pressure"]:
+		await _expansion_pressure()
+		await _expansion_can_be_answered()
 	print("Campaign regression failures: %d" % _failures)
 	quit(1 if _failures else 0)

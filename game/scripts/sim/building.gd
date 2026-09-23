@@ -112,6 +112,15 @@ var fields: Array[Vector3] = []
 ## Every plot the farm could work if it were fully staffed.
 var _all_plots: Array[Vector3] = []
 var crop_growth := 0.0
+## True while the frost is on this ground: nothing standing in the field comes
+## on any further, whoever asks.
+##
+## Deliberately *not* saved. It is a pure function of the calendar, and
+## `Production` re-derives it from the simulation's day counter — which is
+## saved — on the first tick after a load. Persisting it would have meant a new
+## save field, and `save_validation.gd` rejects a version mismatch outright
+## with no migration path, so every existing file would have stopped loading.
+var dormant := false
 
 var _height := 4.0
 var _visual: Node3D
@@ -1117,7 +1126,24 @@ func _make_field_layer(registry: AssetRegistry, asset: String,
 ## Crops visibly grow. Only the grain scales — the ploughed soil beneath it
 ## stays put, so a young field reads as a tilled field rather than a stain.
 func set_crop_growth(t: float) -> void:
-	crop_growth = clampf(t, 0.0, 1.0)
+	var target := clampf(t, 0.0, 1.0)
+	# The frost is enforced in the setter rather than at the one caller that
+	# advances growth, because that caller is not the only one: a farm sows
+	# FARM_INITIAL_GROWTH the moment its plots are laid out, and a farm raised
+	# in the middle of winter has no business standing in half-ripe wheat.
+	# Decreases always go through — that is harvesting, and the frost itself.
+	#
+	# Two consequences worth knowing before marking anything else dormant. A
+	# farm whose plots are laid out during a winter has its opening sowing
+	# refused here and stands as bare earth until spring: correct, but the
+	# player is told nothing about why that field is a week behind. And the
+	# refusal is silent, so any caller that assumed its value took simply would
+	# not have. Nothing outside `Simulation.buildings` is ever marked dormant
+	# today — the rival town's farms are held by `frontier_campaign.gd`, are
+	# never swept, and set their own growth — so no such caller exists yet.
+	if dormant and target > crop_growth:
+		target = crop_growth
+	crop_growth = target
 	if _field_mm == null:
 		return
 	var height := lerpf(0.06, 1.0, crop_growth)
@@ -1213,6 +1239,74 @@ func craft() -> float:
 	var made: float = Config.CRAFT_BATCH
 	inventory[def.produces] += made
 	return made
+
+
+## What the crop still in the ground is worth, in food, if every load of it
+## were carried in.
+##
+## Not one load times the trip count. A field is worth FARM_HARVEST_TRIPS loads
+## at full growth, each load takes 1/FARM_HARVEST_TRIPS of the growth away with
+## it (see `Simulation._tick_harvest`), and `Config.harvest_load` sizes a load
+## by the growth *remaining* — so the yield is the sum of a shrinking series.
+## Naively multiplying overstated a ripe field by about a third, which is a
+## poor number to be putting in front of a player who has just lost it.
+##
+## What it is NOT: a prediction of what this particular march would have got
+## in. Harvest jobs stop being posted below FARM_HARVEST_AT (see
+## `Production._post_gathering`), so the tail of the series is only reachable
+## because the field goes on growing back above that floor while it is being
+## worked. Under the frost it does not, so a settlement that had left the whole
+## field standing could never have carried all of this in during the days it
+## had left. This is the yield in the ground, not the yield in the cart.
+## Measured against the ground, not the staffing. `fields` is the subset of
+## plots somebody is working, and gating on it valued a fully ripe field at
+## nothing the moment its hands were drafted away — while the yield a harvester
+## actually lifts depends on `crop_growth` alone (`Simulation._tick_harvest`
+## takes `harvest_load(farm.crop_growth)` and never looks at the plot count).
+## So an unstaffed field is worth exactly what a staffed one is worth, and
+## reporting zero for it understated the frost by a whole harvest.
+func standing_crop_food() -> float:
+	if _all_plots.is_empty() or crop_growth <= 0.0:
+		return 0.0
+	var total := 0.0
+	var remaining := crop_growth
+	var step := 1.0 / float(Config.FARM_HARVEST_TRIPS)
+	# Bounded rather than `while remaining > 0` so no rounding can spin here,
+	# and stopped on half a step rather than on zero: at the current sixteen
+	# trips the step is dyadic and the subtraction lands exactly on 0.0, but at
+	# ten or twelve it would leave a residue of about 1e-16, which is greater
+	# than zero and would buy one more whole load — 7.2 food of rounding error
+	# in the figure this exists to report.
+	for _i in Config.FARM_HARVEST_TRIPS + 1:
+		if remaining <= step * 0.5:
+			break
+		total += Config.harvest_load(remaining)
+		remaining -= step
+	return total
+
+
+## The frost takes the standing crop. Returns what it was worth, because that
+## is the number worth saying out loud — "the frost took 180 food" tells a
+## player what happened; "crop growth is now zero" does not.
+##
+## The ground is always cleared, even when the loss is worth nothing to report.
+## Those are two different questions and conflating them left the headline rule
+## with a free bypass: `standing_crop_food` values only the plots somebody is
+## actually working, so a farm whose hands had been drafted away valued its
+## ripe field at zero, never had `crop_growth` cleared, and walked a full crop
+## through the winter to be harvested the moment the hands came back. Pulling
+## the farmhands off in late autumn was a complete answer to the frost.
+##
+## It also made saving and loading destructive: the workforce is rebuilt on
+## load, so the reloaded farm had its plots back, the first sweep after the
+## load now valued the crop at a full field, and resuming a saved march cost
+## the player a harvest that quitting had preserved.
+func lose_standing_crop() -> float:
+	if crop_growth <= 0.0:
+		return 0.0
+	var lost := standing_crop_food()
+	set_crop_growth(0.0)
+	return lost
 
 
 func all_plots() -> Array[Vector3]:

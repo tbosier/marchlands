@@ -23,6 +23,79 @@ const MAX_COMPANIES := 512
 ## the blocks of neighbouring companies so they read as separate bodies.
 const FILE_SPACING := 2.0
 const COMPANY_GAP := 4.0
+## Expansion. The rival town is a settlement, not a spawner: it eats the food
+## its growers carry home, houses the people it feeds, and pays a building's
+## real `BuildingDefs` cost out of its own keep before anything is raised. Every
+## number below is a placeholder in the sense GAME_DESIGN.md means — measured,
+## not derived — and the measurements are in the campaign test.
+##
+## Labour is abstracted the same way the rival's farming already is: a resident
+## who is not a grower is a labourer, and labourers turn into timber and stone
+## in the keep at a fixed daily rate. Modelling rival woodcutters would mean
+## rival jobs, rival hauling and rival pathing for a town the player mostly
+## never sees, at a per-frame cost this project has just spent a lot of effort
+## removing.
+##
+## What that abstraction does not do, stated plainly: no tree or outcrop is
+## depleted for the timber and stone it makes, so unlike the player the rival
+## cannot log a hillside bare, and a hungry town keeps cutting — `_tick_labour`
+## reads the head count, not whether `_eat` actually found the meal. The town is
+## still held to its own stores for everything it spends; it is the supply of
+## raw material that is a rate rather than a place on the map.
+const LABOUR_TIMBER := 1.3   ## per labourer per day
+const LABOUR_STONE := 0.7
+const LABOUR_IRON := 0.35    ## peaceful towns only; what makes their trade renewable
+## Kept deliberately low. The keep holds 400 of everything together, so every
+## unit of material on the shelf is a unit of food the town cannot bank, and a
+## town that cannot bank food starves its garrison the first bad week. These
+## are a little over the price of the dearest thing the town builds.
+const TIMBER_CEILING := 70.0
+const STONE_CEILING := 50.0
+const IRON_CEILING := 60.0
+## A resident costs food to raise, and the town keeps a buffer beyond that so a
+## settlement that is only just feeding itself does not add another mouth.
+const SETTLE_FOOD := 12.0
+const FOOD_RESERVE := 20.0
+## Daily harvest the worked fields must yield per mouth before the town takes on
+## another one, and the test `_wanted` makes to decide it needs another field.
+## Above one because a grower spends part of every day walking and part of it at
+## the well, and because a guard's four-day pack comes out of the same stores.
+##
+## It is a rate rather than the stock in the keep so that the two questions —
+## can we feed another mouth, do we need another field — are the same question
+## asked once. Honest about its weight: mutation-tested, and removing it from
+## `_settle` changes none of the three towns at day 120, because `_can_spare`
+## and `_population_cap` both bite first. It is the farm decision that this
+## number is actually load-bearing for, and it becomes load-bearing for
+## settlement too the moment MAX_TOWN_POPULATION is raised.
+const HARVEST_MARGIN := 1.8
+## A grower's load, and the smallest harvest he will break off a trip for.
+const LOAD := 8.0
+const LOAD_MIN := 4.0
+const GROW_INTERVAL := Config.DAY_LENGTH
+const BUILD_INTERVAL := Config.DAY_LENGTH * 0.5
+## The town reviews nothing for its first three days: the player gets a few
+## mornings before the neighbour is a moving target.
+const FIRST_REVIEW := Config.DAY_LENGTH * 3.0
+## A failed siting scan is the expensive branch — up to 320 `can_place` probes —
+## so a town with nowhere left to build backs off instead of repeating it every
+## half day for the rest of the game.
+const BUILD_BACKOFF := Config.DAY_LENGTH * 3.0
+## Labourers the town will not strip to staff another farm. Without it a second
+## farm takes every spare resident and the town stops producing materials.
+const LABOUR_RESERVE := 3
+const MAX_FARMS := 5
+const MAX_GROWERS := 15
+const MAX_RIVAL_BUILDINGS := 24
+const MAX_TOWN_POPULATION := 48
+## Was a flat six. The cap now scales with the town that feeds it, and the
+## constant is only the ceiling a hand-edited save is held to.
+const MAX_GUARDS := 16
+## An aggressive garrison this size raids supply and military buildings even
+## from a settlement that has raised no army. Below it the old rule holds: a
+## rival does not pick on the defenceless. Reaching it takes a town that has
+## really grown — see the day-30/60/120 table in the campaign test.
+const RAID_GARRISON := 8
 var sim: Simulation
 var world: World
 var registry: AssetRegistry
@@ -42,6 +115,24 @@ var _recruit_at := 0.0
 var _workers: Array[Citizen] = []
 var _worker_leg: Dictionary = {}
 var _worker_wait: Dictionary = {}
+var _worker_farm: Dictionary = {} # grower id -> the farm building he works
+## The town's two review clocks, counted down by the delta actually simulated
+## rather than read off an absolute `_time`, exactly as `_review` is. A review
+## is a thing the town does over an interval of lived time, so a tick of zero
+## seconds must not bring one on — and `_tick_town` is called with a zero delta
+## by the conscription fixtures, which have every right to expect that a tick
+## in which no time passes changes nothing.
+var _grow_in := 0.0
+var _build_in := 0.0
+## `_tick_town` runs every frame, so the keep and the farms it needs are held
+## rather than found: `_enemy_type` walks the whole town, and with the town now
+## able to reach two dozen buildings that walk is exactly the per-frame scan
+## this file is not allowed to reintroduce. `_index_town` refreshes both, and
+## the only three things that change the town are `_create_building`,
+## `_destroy_enemy` and `_reset`.
+var _keep: Building
+var _farms: Array[Building] = []
+var _granaries: Array[Building] = []
 var _impacts: Array = []
 var _ruins: Array = []
 var _civilian_ids: Dictionary = {} # military id -> the person's permanent civilian id
@@ -140,23 +231,36 @@ func generate_rival() -> void:
 	if farm != null:
 		farm.inventory[Config.Res.FOOD] = 30.0
 		for i in 3:
-			var worker := Citizen.new()
-			add_child(worker)
-			worker.setup(_allocate(),registry,_rng)
-			worker._body.collision_layer = 0
+			var worker := _add_grower(farm)
 			worker.position = _door(keep) + Vector3(i,0,0)
 			worker._wear_anchor = worker.position
-			worker.profession = "Ashcombe grower"
-			_workers.append(worker)
-			_worker_leg[worker.id] = 0
-			_worker_wait[worker.id] = 0.0
-			farm.workers.append(worker.id)
 		farm.create_fields(world.heightmap,world.nav,registry)
 		farm.sync_fields_to_workers()
 		farm.set_crop_growth(0.7)
 		_protect_farm(farm, true, true)
 	for i in 3: _spawn_unit(1, at + Vector3(i*3-3,0,-16))
 	_recruit_at = Config.DAY_LENGTH * 4.0
+	_build_in = FIRST_REVIEW
+	_grow_in = FIRST_REVIEW
+
+
+## One more resident put to work on `farm`. The caller syncs the field and its
+## protection afterwards, because staffing several farms at once should redraw
+## each of them once rather than once per hand.
+func _add_grower(farm: Building) -> Citizen:
+	var worker := Citizen.new()
+	add_child(worker)
+	worker.setup(_allocate(),registry,_rng)
+	worker._body.collision_layer = 0
+	worker.position = _door(farm)
+	worker._wear_anchor = worker.position
+	worker.profession = "Ashcombe grower"
+	_workers.append(worker)
+	_worker_leg[worker.id] = 0
+	_worker_wait[worker.id] = 0.0
+	_worker_farm[worker.id] = farm.id
+	farm.workers.append(worker.id)
+	return worker
 
 func _allocate() -> int:
 	var value := _next_id
@@ -194,7 +298,24 @@ func _create_building(type_id: String, p: Vector3, id: int = -1, restoring: bool
 		sim.resync_nav_after_flatten(b.position, b.footprint.x*0.5 + 1.5,
 			b.footprint.y*0.5 + 1.5)
 	enemy_buildings[b.id] = b
+	_index_town()
 	return b
+
+
+## The cached view of the town `_tick_town` reads every frame. Farms are held in
+## id order rather than dictionary order so nothing about the town's behaviour
+## depends on the sequence buildings happened to be created or loaded in.
+func _index_town() -> void:
+	_keep = null
+	_farms.clear()
+	_granaries.clear()
+	for b: Building in enemy_buildings.values():
+		if b.type_id == "keep": _keep = b
+		elif b.def.is_farm(): _farms.append(b)
+		elif b.type_id == "granary": _granaries.append(b)
+	var by_id := func(a: Building, b: Building) -> bool: return a.id < b.id
+	_farms.sort_custom(by_id)
+	_granaries.sort_custom(by_id)
 
 func _spawn_unit(faction: int, p: Vector3, id: int = -1,
 		body_asset: String = "citizen_male_base", civilian_id: int = -1) -> Soldier:
@@ -1101,6 +1222,19 @@ func _assign_guards() -> void:
 	for u in roster:
 		if u.faction == 0: friendly.append(u)
 		elif u.faction == 1: rival.append(u)
+	# The raid list was rebuilt from sim.buildings inside the per-guard loop. It
+	# is the same list for every guard, and the garrison is no longer capped at
+	# six, so it is gathered once — sixteen guards against a settlement's worth
+	# of buildings is the shape of walk this file has already had to delete.
+	var plunder: Array = []
+	if personality == "aggressive" and not conquered and sim.day > 5:
+		# A rival still does not pick on a settlement with no army — unless its
+		# own garrison has grown past RAID_GARRISON, which takes a town that has
+		# fed, housed and armed that many men. That is the clock: ignore the
+		# neighbour long enough and the neighbour comes for the supply yard.
+		if not friendly.is_empty() or rival.size() >= RAID_GARRISON:
+			for b in sim.buildings:
+				if b.type_id in ["supply_hut","fort","barracks"]: plunder.append(b)
 	for u in roster:
 		if u.faction == 0:
 			if _target(u) != null or not at_war: continue
@@ -1118,53 +1252,62 @@ func _assign_guards() -> void:
 		if nearest != null:
 			at_war = true
 			u.target_id=nearest.id; u.target_kind="unit"; u.task_label="defending town"
-		elif personality == "aggressive" and not conquered and sim.day > 5 and not friendly.is_empty():
+		elif not plunder.is_empty():
 			var candidate: Building
 			var closest := INF
-			for b in sim.buildings:
-				if b.type_id in ["supply_hut","fort","barracks"] and u.position.distance_to(b.position)<closest:
-					candidate=b; closest=u.position.distance_to(b.position)
+			for b: Building in plunder:
+				var reach: float = u.position.distance_to(b.position)
+				if reach < closest:
+					candidate=b; closest=reach
 			if candidate != null:
 				at_war=true; u.target_id=candidate.id; u.target_kind="building"; u.task_label="raiding supplies"
 		else:
 			u.target_id=-1; u.target_kind=""
+			# Unchanged from before the town expanded. Every rival garrison in
+			# the game used to be dead of hunger by about day ten — measured at
+			# HEAD: rations gone on day six, all three down by day ten, with 136
+			# food sitting in the keep they stood 43 m away from. The cause was
+			# not this line. It was the harvest loss in `_tick_growers`: a grower
+			# waiting at the farm destroyed every tick of its output, so the farm
+			# stood at 0.0 permanently and was never a store a guard could draw
+			# on, while the keep was outside `_refill`'s 24 m. With that fixed the
+			# farms hold a load again and the garrison lives. Sending a hungry
+			# guard to the keep's door as well was tried and is deliberately not
+			# here: removing it moved neither the day-twelve nor the day-sixty
+			# garrison, so it was a behaviour nothing could show.
 			if u.position.distance_to(rival_position)>45: u.order_move(rival_position+Vector3(0,0,-18))
 
 func _tick_town(delta: float) -> void:
 	if conquered: return
-	var keep := _enemy_type("keep")
-	var farm := _enemy_type("farm")
+	var keep := _keep
 	if keep == null: return
-	keep.inventory[Config.Res.FOOD] = maxf(0,keep.inventory[Config.Res.FOOD]-town_population*delta/Config.DAY_LENGTH)
-	if farm != null:
-		var available_workers := 0
-		for worker in _workers:
-			if sim.water == null or not sim.water.handles(worker): available_workers += 1
-		farm.add(Config.Res.FOOD,delta/Config.DAY_LENGTH*6.0*mini(available_workers, farm.field_count()))
-		for worker in _workers:
-			if sim.water != null and sim.water.handles(worker): continue
-			var leg: int = _worker_leg.get(worker.id,0)
-			var destination := _door(farm) if leg == 0 else _door(keep)
-			worker.set_goal(destination)
-			worker.advance(delta,world)
-			if not worker.has_arrived(): continue
-			if leg == 0:
-				var amount := farm.remove(Config.Res.FOOD,minf(8,farm.available(Config.Res.FOOD)))
-				if amount < 0.1: continue
-				worker.pick_up(Config.Res.FOOD,amount,registry)
-				_worker_leg[worker.id]=1
-			else:
-				var amount := minf(worker.carrying_amount,keep.space_for(Config.Res.FOOD))
-				keep.add(Config.Res.FOOD,amount)
-				worker.carrying_amount -= amount
-				if worker.carrying_amount<=0.01:
-					worker.drop(); _worker_leg[worker.id]=0
-			worker.clear_goal()
-	if _time >= _recruit_at and at_war:
+	_eat(town_population*delta/Config.DAY_LENGTH)
+	_tick_growers(keep, delta)
+	_tick_labour(keep, delta)
+	# Both reviews are cheap unless they fire, and neither fires more than twice
+	# a day. Nothing in the tick above walks the town.
+	_grow_in -= delta
+	if _grow_in <= 0.0:
+		_grow_in = GROW_INTERVAL * 2.0 if personality == "loner" else GROW_INTERVAL
+		_settle()
+	_build_in -= delta
+	if _build_in <= 0.0:
+		_build_in = BUILD_INTERVAL
+		_expand(keep)
+	if _time >= _recruit_at and (at_war
+			or (personality == "aggressive" and sim.day > 5.0)):
 		_recruit_at=_time+Config.DAY_LENGTH*(2.0 if personality=="aggressive" else 4.0)
 		var guards := units.size()-friendly_ids().size()
-		if guards<6 and town_population > 0 and not _workers.is_empty() and keep.available(Config.Res.FOOD)>=12:
-			keep.remove(Config.Res.FOOD,12)
+		# At war a town does what it must, and the conscription fixtures hold it
+		# to that: it will strip its own fields bare. At peace an aggressive
+		# neighbour arms only where the fields have slack for another mouth —
+		# because a guard is still a mouth, and a guard is a grower who has left
+		# the field. Without this it conscripted itself to death: eight
+		# residents became four soldiers, the harvest halved twice, and the town
+		# that had been arming was three people and no garrison by day thirty.
+		if (at_war or _fields_feed_another()) \
+				and guards<_guard_cap() and town_population > 0 and not _workers.is_empty() and _can_spare(12.0):
+			_eat(12.0)
 			var worker: Citizen = _workers.back()
 			var identity := SaveGame._capture_citizen(worker)
 			var recruit := _spawn_unit(1, worker.position, worker.id, worker.asset_id)
@@ -1172,15 +1315,422 @@ func _tick_town(delta: float) -> void:
 			recruit.apply_damage(100.0-worker.service_health)
 			recruit.position = worker.position
 			recruit._wear_anchor = recruit.position
+			var farm: Building = enemy_buildings.get(_worker_farm.get(worker.id,-1))
 			_workers.erase(worker)
 			_worker_leg.erase(worker.id)
 			_worker_wait.erase(worker.id)
+			_worker_farm.erase(worker.id)
 			town_population = maxi(0, town_population - 1)
 			if farm != null:
 				farm.workers.erase(worker.id)
 				farm.sync_fields_to_workers()
 				_protect_farm(farm, true, false)
 			worker.queue_free()
+
+
+## The town eats out of the keep and then out of its granaries. The granary the
+## rival is founded with used to be scenery — nothing put food in it and nothing
+## took food out — and that mattered once the town grew: the keep holds 400 of
+## everything together, so a town banking a season's food filled it and could
+## no longer stack the timber for the next house. An aggressive neighbour froze
+## at ten buildings on 308 food it had nowhere to put.
+func _eat(amount: float) -> void:
+	var left := amount
+	if _keep != null: left -= _keep.remove(Config.Res.FOOD, left)
+	for b in _granaries:
+		if left <= 0.0: return
+		left -= b.remove(Config.Res.FOOD, left)
+
+
+## Food the town can actually reach, keep and granaries together.
+func _town_food() -> float:
+	var total := 0.0
+	if _keep != null: total += _keep.available(Config.Res.FOOD)
+	for b in _granaries: total += b.available(Config.Res.FOOD)
+	return total
+
+
+## Where a loaded grower takes his basket: the keep while it has room for a
+## load, otherwise the first granary that has.
+func _deposit() -> Building:
+	if _keep == null: return null
+	if _keep.space_for(Config.Res.FOOD) >= LOAD: return _keep
+	for b in _granaries:
+		if b.space_for(Config.Res.FOOD) >= LOAD: return b
+	return _keep
+
+
+## Growers carry food from the farm they are employed at, not from whichever
+## farm happens to be first in the town. Walking `_workers` once to count hands
+## per farm costs one pass over at most MAX_GROWERS people; the farms themselves
+## come from the cached index.
+func _tick_growers(keep: Building, delta: float) -> void:
+	if _farms.is_empty(): return
+	var deposit: Building = _deposit()
+	if deposit == null: deposit = keep
+	var hands := {}
+	for worker in _workers:
+		if sim.water != null and sim.water.handles(worker): continue
+		var at: int = _worker_farm.get(worker.id,-1)
+		hands[at] = int(hands.get(at,0)) + 1
+	for farm in _farms:
+		var staffed: int = int(hands.get(farm.id,0))
+		if staffed > 0:
+			farm.add(Config.Res.FOOD,delta/Config.DAY_LENGTH*6.0*mini(staffed, farm.field_count()))
+	for worker in _workers:
+		if sim.water != null and sim.water.handles(worker): continue
+		var farm: Building = enemy_buildings.get(_worker_farm.get(worker.id,-1))
+		if farm == null: continue
+		var leg: int = _worker_leg.get(worker.id,0)
+		var destination := _door(farm) if leg == 0 else _door(deposit)
+		worker.set_goal(destination)
+		worker.advance(delta,world)
+		if not worker.has_arrived(): continue
+		if leg == 0:
+			# Wait for a load worth carrying, and only then take it. The old
+			# order was `remove` first and abandon the result if it came to less
+			# than a tenth — which threw that tenth away, because `remove` has
+			# already taken it off the farm. At the half-second step the game
+			# actually runs at, a farm makes 0.05 a tick, so every tick a grower
+			# stood waiting destroyed the whole of that tick's harvest. It only
+			# looked sound because the one fixture that measured it drove
+			# `_tick_town` a second at a time, where the tick's output is
+			# exactly the tenth the test was written against.
+			if farm.available(Config.Res.FOOD) < LOAD_MIN: continue
+			var amount := farm.remove(Config.Res.FOOD,minf(LOAD,farm.available(Config.Res.FOOD)))
+			worker.pick_up(Config.Res.FOOD,amount,registry)
+			_worker_leg[worker.id]=1
+		else:
+			var amount := minf(worker.carrying_amount,deposit.space_for(Config.Res.FOOD))
+			deposit.add(Config.Res.FOOD,amount)
+			worker.carrying_amount -= amount
+			if worker.carrying_amount<=0.01:
+				worker.drop(); _worker_leg[worker.id]=0
+		worker.clear_goal()
+
+
+## Residents who are not growers cut timber and stone into the keep. Ceilings
+## exist because the keep holds 400 of everything together: a town that stacked
+## materials without limit would crowd out the food it lives on, and materials
+## past the price of the next building buy nothing anyway.
+func _tick_labour(keep: Building, delta: float) -> void:
+	var labourers := town_population - _field_hands()
+	if labourers <= 0: return
+	var day := delta / Config.DAY_LENGTH * float(labourers)
+	_gather(keep, Config.Res.TIMBER, LABOUR_TIMBER * day, TIMBER_CEILING)
+	_gather(keep, Config.Res.STONE, LABOUR_STONE * day, STONE_CEILING)
+	# Only a town that trades has any reason to dig iron. Any neighbour that is
+	# not at war will sell — `trade_access_reason` turns on war, defeat and
+	# conquest, not on temperament, and `trade_routes.gd` only narrows a loner to
+	# one caravan at a time. What a peaceful town alone does is dig MORE: the 32
+	# iron seeded at founding is otherwise the last iron the others ever have, so
+	# a peaceful neighbour is the only one worth going back to.
+	if personality == "peaceful":
+		_gather(keep, Config.Res.IRON, LABOUR_IRON * day, IRON_CEILING)
+
+
+## Growers who actually have a farm to walk to. A grower whose farm burned down
+## when every other farm was already full keeps his place in `_workers` but has
+## nowhere to work, and counting him as a grower made him vanish from the town's
+## economy entirely — no field to harvest and not counted as a labourer either.
+## He is a resident with no job, which is a labourer.
+func _field_hands() -> int:
+	var hands := 0
+	for worker in _workers:
+		if enemy_buildings.has(int(_worker_farm.get(worker.id, -1))): hands += 1
+	return hands
+
+
+func _gather(keep: Building, res: int, amount: float, ceiling: float) -> void:
+	var room := minf(amount, ceiling - keep.inventory[res])
+	if room > 0.0: keep.add(res, room)
+
+
+## Food the town can commit without eating into what the people already there
+## will want. Everything that costs the town food asks this first, so a hungry
+## settlement neither breeds nor arms — which is what stopped an aggressive
+## rival from conscripting its own growers until its guards starved.
+func _can_spare(cost: float) -> bool:
+	return _town_food() >= FOOD_RESERVE + float(town_population) + cost
+
+
+## How many soldiers the town will keep under arms. Every one of them was a
+## grower, so a garrison is paid for in food production, not conjured.
+##
+## Six is the floor because six is the garrison the rival has always been able
+## to raise; a town the size it is founded at behaves exactly as it used to.
+## What growth buys is the headroom above that, and how much of it a town buys
+## is the clearest thing that separates the three temperaments at day 120.
+func _guard_cap() -> int:
+	match personality:
+		"aggressive": return clampi(6 + town_population / 2, 6, MAX_GUARDS)
+		"loner": return clampi(6 + town_population / 8, 6, 8)
+		_: return clampi(6 + town_population / 6, 6, 11)
+
+
+## What the worked fields yield in a day. A farm's `fields` are already clamped
+## to the hands standing in them, so the plots are the whole answer.
+func _harvest_rate() -> float:
+	var rate := 0.0
+	for farm in _farms: rate += 6.0 * float(farm.field_count())
+	return rate
+
+
+## Everyone the town feeds: residents, plus the garrison whose packs are filled
+## from the same stores.
+func _mouths() -> int:
+	var fed := town_population
+	for u in units.values():
+		if u.faction == 1 and u.health > 0.0: fed += 1
+	return fed
+
+
+## Whether the fields as they stand could feed one more person.
+func _fields_feed_another() -> bool:
+	return _harvest_rate() >= float(_mouths() + 1) * HARVEST_MARGIN
+
+
+func _housing() -> int:
+	var rooms := 0
+	for b: Building in enemy_buildings.values(): rooms += b.def.houses
+	return rooms
+
+
+func _population_cap() -> int:
+	match personality:
+		"aggressive": return mini(MAX_TOWN_POPULATION, 36)
+		"loner": return mini(MAX_TOWN_POPULATION, 16)
+		_: return MAX_TOWN_POPULATION
+
+
+func _building_cap() -> int:
+	match personality:
+		"aggressive": return mini(MAX_RIVAL_BUILDINGS, 20)
+		"loner": return mini(MAX_RIVAL_BUILDINGS, 11)
+		_: return MAX_RIVAL_BUILDINGS
+
+
+## One more resident, if the town has a roof for him and food to spare beyond
+## what the people already there will eat. A town with nobody left in it stays
+## empty: growth is people having children, not a settlement respawning.
+## `_fields_feed_another` here is the complement of the farm want below, so the
+## two cannot disagree about whether the town is short. Measured, it is currently
+## slack: remove it and nothing about any of the three towns at day 120 changes,
+## because `_can_spare` and `_population_cap` both bite first. It is kept because
+## it is the same rule stated once, and it becomes the binding one the moment
+## MAX_TOWN_POPULATION is raised — the mutation table records it as unguarded
+## rather than pretending a check covers it.
+func _settle() -> void:
+	if town_population <= 0 or town_population >= _population_cap(): return
+	if town_population >= _housing() or not _fields_feed_another(): return
+	if not _can_spare(SETTLE_FOOD): return
+	_eat(SETTLE_FOOD)
+	town_population += 1
+	_staff_farms()
+
+
+## Free plots on existing farms, filled from the town's own spare residents.
+## LABOUR_RESERVE hands are never taken, so a town always keeps someone cutting
+## timber; without that a second farm ate the workforce and the town, now fed,
+## could never build a third.
+func _staff_farms() -> void:
+	var changed := {}
+	while _workers.size() < MAX_GROWERS \
+			and _workers.size() + LABOUR_RESERVE < town_population:
+		var farm := _least_staffed()
+		if farm == null: break
+		_add_grower(farm)
+		changed[farm] = true
+	for farm: Building in changed:
+		farm.sync_fields_to_workers()
+		_protect_farm(farm, true, false)
+
+
+func _least_staffed() -> Building:
+	return _least_staffed_of({})
+
+
+## The farm with the fewest hands that still has a slot and a plot for one more.
+##
+## `pending` lets `_reconcile_farms` ask about rosters it is still assembling
+## rather than about `farm.workers`, which it does not write until afterwards.
+## Without that, re-homing the three growers off a burned farm sent all three to
+## the same surviving one — each of them read the same stale count — leaving a
+## three-slot farm holding six and another farm empty. `_staff_farms` needs no
+## such thing: `_add_grower` appends to `farm.workers` as it goes.
+func _least_staffed_of(pending: Dictionary) -> Building:
+	var best: Building
+	var fewest := 0
+	for farm in _farms:
+		var held: int = pending[farm.id].size() if pending.has(farm.id) else farm.workers.size()
+		if held >= farm.def.worker_slots or held >= farm.all_plots().size(): continue
+		if best == null or held < fewest:
+			best = farm
+			fewest = held
+	return best
+
+
+## Put every grower on a farm that still stands and give each farm the roster it
+## actually has. This is also the repair pass: `WaterSystem` drowns a rival
+## grower and strikes him off `_enemy_type("farm")`, which is the first farm in
+## the town and not necessarily his, so the town reconciles rather than trusting
+## that bookkeeping. Runs on the build review, over at most MAX_GROWERS people.
+func _reconcile_farms() -> void:
+	var rosters := {}
+	for farm in _farms: rosters[farm.id] = PackedInt32Array()
+	# Two passes. Everyone who still has a farm keeps it first, and only then are
+	# the ones who have lost theirs offered what is genuinely left. Placing them
+	# as the list was walked handed a displaced grower a slot that a grower
+	# further down the list already held, and a three-slot farm came back with
+	# four — the room looked free only because its own people had not been
+	# counted yet.
+	var orphans: Array = []
+	for worker in _workers:
+		var id: int = _worker_farm.get(worker.id, -1)
+		if rosters.has(id): rosters[id].append(worker.id)
+		else: orphans.append(worker)
+	for worker in orphans:
+		var farm := _least_staffed_of(rosters)
+		if farm == null:
+			_worker_farm.erase(worker.id)
+			continue
+		_worker_farm[worker.id] = farm.id
+		rosters[farm.id].append(worker.id)
+	for farm in _farms:
+		var roster: PackedInt32Array = rosters[farm.id]
+		roster.sort()
+		if farm.workers.size() == roster.size():
+			var same := true
+			for i in roster.size():
+				if farm.workers[i] != roster[i]: same = false
+			if same: continue
+		farm.workers.assign(roster)
+		farm.sync_fields_to_workers()
+		_protect_farm(farm, true, false)
+
+
+## What the town wants next, best first — food, then roofs, then somewhere dry
+## for the surplus, then water, which is the order a settlement needs things in.
+## A list rather than one answer because
+## the first want is often the one there is no ground for — a farm needs soil,
+## and an aggressive town's ground lies toward a river it cannot build past. A
+## single answer meant one unsiteable want froze the whole settlement: it asked
+## for a farm every review for a hundred days and never raised a house.
+func _wanted() -> Array[String]:
+	var houses := 0
+	var granaries := 0
+	var wells := 0
+	for b: Building in enemy_buildings.values():
+		match b.type_id:
+			"house": houses += 1
+			"granary": granaries += 1
+			"well": wells += 1
+	var wants: Array[String] = []
+	# A farm exactly when the fields the town already works cannot feed one more
+	# mouth, and every plot it owns already has someone standing in it. This is
+	# the complement of the test `_settle` makes, which is what breaks the
+	# deadlock: population was gated on food, food on farms and farms on
+	# population, so a town that could not feed itself could never farm its way
+	# out of it.
+	# A farm that came up with no plots at all is not a farm, and the town must
+	# not answer being hungry by raising another one beside it. On ground where
+	# `create_fields` finds nothing viable, `_least_staffed` skips the farm (no
+	# plots, so no room) and the harvest never rises, so without this the town
+	# asks for a farm every review until it hits MAX_FARMS.
+	#
+	# That ground is real and it is not this file's doing: measured at HEAD, on
+	# a 1536 m and a 3072 m world the founding farm `generate_rival` itself
+	# places comes up with zero plots, the same before this work as after. The
+	# rival has never grown anything on those maps. Expansion cannot fix that —
+	# it lives in `create_fields`/`_has_farmland` — but it can decline to raise
+	# five more barren farms on top of it, which is what it did before this
+	# guard: five farms, no fields, a starved garrison and a town still eight
+	# people strong on day thirty.
+	var barren := 0
+	for farm in _farms:
+		if farm.all_plots().is_empty(): barren += 1
+	if _farms.size() < MAX_FARMS and barren == 0 and _least_staffed() == null \
+			and not _fields_feed_another():
+		wants.append("farm")
+	if town_population + 2 > _housing(): wants.append("house")
+	# Somewhere dry for the surplus once the keep cannot hold it, and then a
+	# well. An aggressive town wants neither until it has run out of roofs to
+	# raise: its stone goes on housing more people to arm.
+	if granaries * 4 < houses: wants.append("granary")
+	if personality != "aggressive" and wells * 10 < town_population:
+		wants.append("well")
+	return wants
+
+
+## Where the next building is sited from: outward from the keep, further out as
+## the town fills, in a direction the campaign's own generator picks.
+##
+## It used to lean — an aggressive town siting toward us, a loner away. That is
+## gone, because it could not be shown. `_site` searches rings around this
+## anchor and takes the first ground the player's own placement rules accept, and
+## with a 25 m spacing rule and a river it cannot build past, where there is room
+## beats where the town would rather be. Measured over the eight buildings an
+## aggressive town raises by day 120, as the mean bearing of a new building from
+## its own keep toward our settlement (1.0 being straight at us): 0.70 on seed
+## 42, 0.56 on seed 20260911 and 0.17 on seed 1776 — where the peaceful town on
+## that same seed managed 0.28. A temperament that shows up on two seeds out of
+## three is not a temperament, so the personalities tell themselves apart by what
+## they build and how hard they arm, which they do on every seed.
+func _growth_anchor() -> Vector3:
+	var angle := _rng.randf() * TAU
+	return rival_position + Vector3(cos(angle), 0, sin(angle)) \
+			* (26.0 + float(enemy_buildings.size()) * 5.0)
+
+
+## One building, paid for out of the keep and stood on ground `_site` accepts.
+## That is `sim.can_place` with its last argument false — the rival is held to
+## the player's slope, water, footprint and spacing rules, but not to the
+## resource-obstruction rule, so it will raise a house on ground the player
+## would first have to clear the trees from, and `_create_building` then clears
+## them. That is `_site`'s long-standing behaviour and the comment there says
+## why; it is recorded here because "the rules the player is held to" would be
+## too strong a claim for what is actually checked. Nothing here is on a timer:
+## without the cost in store, or without a site, the review does nothing and
+## comes back later.
+func _expand(keep: Building) -> void:
+	_reconcile_farms()
+	# Replacing a grower the town lost — drowned, or conscripted — belongs here
+	# and not only on the back of a successful `_settle`. Hung off settling, a
+	# town that had gone short of food could never put anyone back in the
+	# fields, because settling is the first thing hunger stops: one drowning
+	# took a third of the harvest away permanently.
+	_staff_farms()
+	_advance_crops()
+	if enemy_buildings.size() >= _building_cap(): return
+	for type_id in _wanted():
+		var def := BuildingDefs.get_def(type_id)
+		var affordable := true
+		for res in def.cost:
+			if keep.inventory[res] + 0.0001 < float(def.cost[res]): affordable = false
+		if not affordable: continue
+		var at := _site(_growth_anchor(), type_id)
+		if at == Vector3.INF: continue
+		for res in def.cost: keep.remove(res, float(def.cost[res]))
+		var b := _create_building(type_id, at)
+		if b.def.is_farm():
+			b.create_fields(world.heightmap, world.nav, registry)
+			b.set_crop_growth(0.0)
+			_protect_farm(b, true, true)
+			_staff_farms()
+		return
+	# Nothing wanted was both paid for and siteable. A siting scan is the
+	# expensive branch in this file, so a town with nowhere to put what it wants
+	# waits rather than repeating it twice a day for the rest of the game.
+	_build_in = BUILD_BACKOFF
+
+
+## New fields come up bare and fill in, so a farm raised last week reads as one
+## on a scout's report rather than as a mature field that appeared overnight.
+## 0.7 is where `generate_rival` puts the founding farm, so nothing outgrows it.
+func _advance_crops() -> void:
+	for farm in _farms:
+		if farm.crop_growth < 0.7:
+			farm.set_crop_growth(minf(0.7, farm.crop_growth + 0.06))
 
 func _destroy_enemy(b: Building) -> void:
 	if not enemy_buildings.has(b.id):
@@ -1195,6 +1745,12 @@ func _destroy_enemy(b: Building) -> void:
 	_ruins.append(ruin)
 	_make_ruin(ruin)
 	enemy_buildings.erase(b.id)
+	_index_town()
+	# Growers of a burned farm are re-homed here rather than on the next build
+	# review, so `_worker_farm` never names a building that is gone. `capture`
+	# writes that table out, and a save whose growers point at rubble would come
+	# back reconciled and no longer equal to what was written.
+	if b.def.is_farm(): _reconcile_farms()
 	for unit in units.values():
 		if unit.faction == 0 and unit.target_kind == "building" and unit.target_id == b.id:
 			unit.target_id = -1
@@ -1248,6 +1804,7 @@ func capture() -> Dictionary:
 			"name": c.given_name, "age": c.age,
 			"hydration":c.hydration,"water_sickness":c.water_sickness,"water_bucket":c.water_bucket,"service_health":c.service_health,
 			"leg": int(_worker_leg.get(c.id, 0)), "asset_id": c.asset_id,
+			"farm_id": int(_worker_farm.get(c.id, -1)),
 			"goal": c._goal, "moving": c.has_goal()})
 	var impacts: Array = []
 	for event in _impacts:
@@ -1266,7 +1823,8 @@ func capture() -> Dictionary:
 	return {"personality": personality, "rival_name": rival_name, "town_population": town_population,
 		"rival_position": rival_position, "at_war": at_war, "defeated": defeated,
 		"conquered": conquered, "next_id": _next_id, "time": _time, "review": _review,
-		"recruit_at": _recruit_at, "rng_state": _rng.state, "buildings": buildings,
+		"recruit_at": _recruit_at, "build_in": _build_in, "grow_in": _grow_in,
+		"rng_state": _rng.state, "buildings": buildings,
 		"units": army, "workers": workers, "ruins": _ruins.duplicate(true), "impacts": impacts,
 		"companies": roster, "next_company_ordinal": _next_company_ordinal,
 		"security": {"cooldown": _contact_cooldown, "visible_ids": _visible_contacts.duplicate(),
@@ -1288,6 +1846,9 @@ func _reset() -> void:
 	_workers.clear()
 	_worker_leg.clear()
 	_worker_wait.clear()
+	_worker_farm.clear()
+	_farms.clear()
+	_keep = null
 	_ruins.clear()
 	_impacts.clear()
 	_visible_contacts.clear()
@@ -1304,6 +1865,8 @@ func _reset() -> void:
 	_time = 0.0
 	_review = 0.0
 	_recruit_at = 0.0
+	_build_in = 0.0
+	_grow_in = 0.0
 	at_war = false
 	defeated = false
 	conquered = false
@@ -1332,6 +1895,12 @@ func restore(data: Variant) -> String:
 	_time = data.time
 	_review = data.get("review", 0.0)
 	_recruit_at = data.recruit_at
+	# Optional, like every field added after save version 1. A save written
+	# before the rival expanded has no review clocks; zero means the first tick
+	# after loading holds the town's first review, which is what an old save
+	# joining a game with an expanding neighbour should do.
+	_build_in = data.get("build_in", 0.0)
+	_grow_in = data.get("grow_in", 0.0)
 	var security: Dictionary = data.get("security", {})
 	_contact_cooldown = security.get("cooldown", 0.0)
 	_visible_contacts.assign(security.get("visible_ids", []))
@@ -1404,20 +1973,26 @@ func restore(data: Variant) -> String:
 			c.pick_up(Config.Res.FOOD, entry.carried, registry)
 		_workers.append(c)
 		_worker_leg[c.id] = entry.leg
-	var farm := _enemy_type("farm")
-	if farm != null:
-		for c in _workers:
-			farm.workers.append(c.id)
-		var saved_farm: Dictionary = {}
-		for entry in data.buildings:
-			if entry.id == farm.id:
-				saved_farm = entry
+		# A save written before the town had a second farm names no farm for its
+		# growers; `_reconcile_farms` below puts those on the one farm such a
+		# save could have had, which is where they already were.
+		var farm_id: int = entry.get("farm_id", -1)
+		if enemy_buildings.has(farm_id): _worker_farm[c.id] = farm_id
+	var saved_fields := {}
+	for entry in data.buildings:
+		saved_fields[entry.id] = entry
+	for farm in _farms:
+		var saved_farm: Dictionary = saved_fields.get(farm.id, {})
 		if saved_farm.has("plots"):
 			farm.adopt_plots(saved_farm.plots, world.heightmap, world.nav, registry)
 		else:
 			farm.create_fields(world.heightmap, world.nav, registry)
 		farm.set_crop_growth(saved_farm.get("crop_growth", 0.7))
-		_protect_farm(farm, true, false)
+	# Rosters, field extents and plot protection all follow from who works
+	# where, so one reconciliation settles every farm instead of the founding
+	# one. It is also what makes a `restore` of a save with unassigned growers
+	# capture back the same way twice.
+	_reconcile_farms()
 	_ruins = data.ruins.duplicate(true)
 	for ruin in _ruins:
 		_make_ruin(ruin)
@@ -1456,6 +2031,12 @@ static func validate(data: Variant, friendly_buildings: Variant = null, world_si
 		return "invalid military identifier"
 	if not _number(data.time, 0, 1e12) or not _number(data.recruit_at, 0, 1e12):
 		return "invalid campaign time"
+	# Optional: a save from before the rival expanded carries neither clock.
+	# Both are intervals still to run, so neither can exceed the longest one the
+	# town ever sets — a hand-edited save cannot postpone expansion for a year.
+	if not _number(data.get("build_in", 0.0), 0.0, FIRST_REVIEW) \
+			or not _number(data.get("grow_in", 0.0), 0.0, FIRST_REVIEW):
+		return "invalid town review schedule"
 	if data.has("security"):
 		var security: Variant = data.security
 		if not security is Dictionary or security.size() != 4 \
@@ -1564,7 +2145,9 @@ static func validate(data: Variant, friendly_buildings: Variant = null, world_si
 				if u.has(key) and (not u.civilian.has(key) or u[key] != u.civilian[key]):
 					return "serving citizen identity disagrees with unit"
 			civilian_ids[u.civilian.id] = true
-	if guards > 6:
+	# Was a flat six. A town that grew earns a bigger garrison, and the ceiling
+	# an edited save is held to is the largest any personality will ever keep.
+	if guards > MAX_GUARDS:
 		return "army exceeds recruitment limits"
 	for u in data.units:
 		if u.target_kind == "unit":
@@ -1607,7 +2190,7 @@ static func validate(data: Variant, friendly_buildings: Variant = null, world_si
 			if not id is int or not armies.has(id) or armies[id].faction != 0 or enlisted.has(id):
 				return "company roster holds a missing, hostile or twice-enlisted soldier"
 			enlisted[id] = true
-	if data.workers.size() > 3:
+	if data.workers.size() > MAX_GROWERS:
 		return "too many rival workers"
 	if data.workers.size() > data.get("town_population", 8):
 		return "rival workforce exceeds civilian population"
@@ -1628,6 +2211,12 @@ static func validate(data: Variant, friendly_buildings: Variant = null, world_si
 			return "invalid rival worker identity"
 		if not _position(c.get("goal", Vector3.ZERO), world_size) or not c.get("moving", false) is bool:
 			return "invalid rival worker route"
+		# Optional, and -1 means "not placed yet": a grower whose farm burned
+		# down between reviews has no farm, and restoring re-homes him.
+		var farm_id: Variant = c.get("farm_id", -1)
+		if not farm_id is int or (farm_id != -1 and (not buildings.has(farm_id)
+				or buildings[farm_id].type_id != "farm")):
+			return "rival worker employed at no such farm"
 		var water_error := WaterSystem.validate_person(c)
 		if water_error != "": return water_error
 		ids[c.id] = true

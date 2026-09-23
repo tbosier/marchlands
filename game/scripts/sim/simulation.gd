@@ -96,6 +96,17 @@ func setup(world_node: World, asset_registry: AssetRegistry,
 	stores.setup_navigation(world.nav, entrance_of)
 	production.setup(jobs, stores, world)
 	production.research = research
+	# A frost destroys a whole year's standing crop and, until this was wired,
+	# said nothing: the fields simply went bare and the granary stopped filling.
+	# Production cannot reach the alert channel itself, so the signal is relayed
+	# here the same way population's is. The count matters as much as the food —
+	# losing one late-sown field is a mistake, losing every field is the winter
+	# arriving before the harvest did, and those want different reactions.
+	production.frost_fell.connect(func(lost: float, farms: int, where: Vector3):
+		if lost <= 0.0:
+			return
+		alert.emit("Frost has taken %d of food from %s." % [roundi(lost),
+				"a field" if farms <= 1 else "%d fields" % farms], where))
 	population.setup(stores, jobs, seed_value)
 	population.alert.connect(func(text, pos): alert.emit(text, pos))
 

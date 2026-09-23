@@ -36,6 +36,20 @@ const MAX_BUILD_SLOPE := 0.42  # rise/run; steeper ground rejects buildings
 const DAY_LENGTH := 180.0
 const DAYS_PER_SEASON := 12
 
+## How many opening winters spare the standing crop.
+##
+## The frost — everything still in the ground when winter arrives is destroyed
+## and never reaches a granary — is the sharpest rule in the game and the one a
+## first-time player has no way to anticipate. So the first winter teaches it
+## instead of enforcing it: the fields stop, the farmhands come free for
+## hauling and building, the world turns white, and nothing is lost. The second
+## winter takes whatever is still standing.
+##
+## Set to 0 for a march that bites from the first year. Raising it past 1 is
+## not recommended: a rule the game keeps threatening and never applies stops
+## being read as a rule at all.
+const MILD_WINTERS := 1
+
 ## Time controls. Simulation still advances in bounded steps at fast rates.
 const SPEEDS: Array[float] = [0.0, 1.0, 2.0, 4.0, 16.0, 32.0, 64.0]
 const SPEED_LABELS: Array[String] = [
