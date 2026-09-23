@@ -191,6 +191,8 @@ func _run() -> void:
 		["nonfinite build duration", ["buildings", 0, "build_seconds"], INF],
 		["negative larder", ["buildings", 0, "larder"], -1.0],
 		["invalid crop growth", ["buildings", 0, "crop_growth"], 2.0],
+		["invalid tilth", ["buildings", 0, "tilth"], 1.5],
+		["negative tilth", ["buildings", 0, "tilth"], -0.1],
 		["wrong inventory type", ["buildings", 0, "inventory"], [1, 2, 3, 4, 5]],
 		["short inventory", ["buildings", 0, "inventory"], PackedFloat32Array([1.0])],
 		["negative inventory", ["buildings", 0, "inventory", 0], -1.0],
@@ -333,7 +335,7 @@ func _valid_round_trips(game: Node, base: Dictionary) -> void:
 		legacy.erase(key)
 	legacy.nodes.erase("marked")
 	for b in legacy.buildings:
-		for key in ["larder", "crop_growth", "plots", "build_cost", "build_seconds",
+		for key in ["larder", "crop_growth", "tilth", "plots", "build_cost", "build_seconds",
 				"market_stock_target", "health", "fire"]:
 			b.erase(key)
 	for c in legacy.citizens:

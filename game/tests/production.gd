@@ -1006,6 +1006,755 @@ func _a_full_year(world_seed: int) -> void:
 	_done("_a_full_year")
 
 
+# ---------------------------------------------------------------------------
+# Winter labour (design/NORTH_STAR.md — "Seasonal farming")
+# ---------------------------------------------------------------------------
+
+## Put every farm's ground at `value`.
+##
+## This is how the "before" arm of every experiment below is built, and it is
+## deliberately not "cancel the jobs as they are posted". That was the first
+## version and it was contaminated: `_abandon` on a citizen who had already
+## claimed a tillage order sends them home, drops their route and perturbs the
+## rest of the economy, so the suppressed arm diverged from the ploughing arm for
+## reasons that had nothing to do with ploughing — measured, it moved the
+## suppressed arm's own open-job count when nothing but `TILLAGE_PRIORITY`
+## changed. A baseline that moves when the feature is tuned is not a baseline.
+##
+## Standing the ground at 1.0 instead makes `Production._post_tillage` decline to
+## post at all, so not one tillage job is ever created and not one citizen is
+## ever interrupted. Both arms then run the identical `_advance_day` path. The
+## ground is put back to 0.0 before the year turns, so the suppressed arm sows
+## nothing — which is the state of the game before any of this existed.
+func _set_tilth(sim: Simulation, value: float) -> void:
+	for b in sim.buildings:
+		if b.def.is_farm():
+			b.tilth = value
+
+
+## Run one winter, day by day, and report what the settlement did with it.
+##
+## The march is stood at the first morning of a winter in year 2, so the frost
+## bites, with granaries that carried the harvest in — forty days of food. That
+## last part is deliberate and it is not padding: a starving march measures
+## starvation, not labour, and the seed-corn rule means it could not sow anyway.
+##
+## Sampled in the middle of the day, not at midnight. `_advance_day` returns to
+## the same hour it started at, and at midnight the whole settlement is asleep
+## and every one of them holds no job — an idleness count taken there would have
+## read "everybody idle" in every arm, in every season, for ever.
+func _one_winter(world_seed: int, plough: bool) -> Dictionary:
+	var game := _new_game(world_seed)
+	var sim := game.sim
+	var centre := game.world.centre()
+	_build(game, "farm", centre + Vector3(-36, 0, 48))
+	_build(game, "farm", centre + Vector3(44, 0, 48))
+	_build(game, "granary", centre + Vector3(40, 0, 4))
+	_build(game, "house", centre + Vector3(-42, 0, 8))
+	for pair in [["logging_camp", ResourceNodes.Kind.TREE],
+			["quarry", ResourceNodes.Kind.STONE]]:
+		var node := game.world.nodes.find_nearest(pair[1], centre, 350.0, false)
+		if node != null:
+			_build(game, pair[0], node.position)
+
+	var year := float(Clock.days_per_year())
+	var winter_day := year + float(Config.DAYS_PER_SEASON * Clock.WINTER)
+	_set_calendar(game, winter_day + 0.45)
+	sim.tick(0.1)
+	# A march that carried its harvest in: enough to eat through the winter and
+	# leave seed at the end of it, and *no more than half* of each granary.
+	#
+	# Both halves of that matter. Too little and the experiment measures
+	# starvation rather than labour, and the seed-corn rule means it could not
+	# sow anyway. Too much and it measures nothing at all: filled to forty days,
+	# every store was saturated, `Production._post_gathering` refuses to post a
+	# reaper for a farm with no room for the load (`space_for`), and the spring
+	# the whole feature exists to bring forward had nowhere to put a harvest.
+	# Measured that way both arms came out of the spring poorer than they went
+	# in, and the ploughed one was poorer by exactly its seed bill.
+	#
+	# Filled through `add`, so nothing is stuffed past a capacity and the storage
+	# invariants still mean something.
+	for b in sim.buildings:
+		if b.def.is_storage():
+			b.add(Config.Res.FOOD, minf(b.capacity() * 0.5,
+					14.0 * sim.citizens.size() * Config.HUNGER_PER_DAY))
+	sim.stores.refresh_totals(sim.citizens, sim.buildings)
+
+	var idle_high := 0
+	var idle_low := 1 << 30
+	var open_low := 1 << 30
+	var open_high := 0
+	var ploughing_days := 0
+	var hands_on_ground := 0
+	var idle_total := 0
+	var work_days := 0
+	var tilth_high := 0.0
+
+	# One day short of the season. `_advance_day` runs a whole day, so a full
+	# twelve from the first morning of winter would carry the march over the
+	# turn into spring and take the measurement of the sowing with it — which it
+	# did, and both arms then reported the same field because the reading was
+	# taken after the event it was meant to catch.
+	for d in Config.DAYS_PER_SEASON - 1:
+		if not plough:
+			_set_tilth(sim, 1.0)
+		await _advance_day(game)
+		var idle := 0
+		var ploughing := 0
+		for c in sim.citizens:
+			if c.immigrant:
+				continue
+			if c.job == null:
+				idle += 1
+			elif c.job.kind == JobBoard.Kind.TILL:
+				ploughing += 1
+		idle_high = maxi(idle_high, idle)
+		idle_low = mini(idle_low, idle)
+		open_low = mini(open_low, sim.jobs.open_jobs())
+		open_high = maxi(open_high, sim.jobs.open_jobs())
+		hands_on_ground += ploughing
+		idle_total += idle
+		if sim.jobs.open_jobs() > 0 or ploughing > 0:
+			work_days += 1
+		if ploughing > 0:
+			ploughing_days += 1
+		# Only in the arm where it means anything. In the suppressed arm the
+		# ground is held at 1.0 by the fixture, and reporting that as a
+		# measurement would have been the test reading back its own setup.
+		if plough:
+			for b in sim.buildings:
+				if b.def.is_farm():
+					tilth_high = maxf(tilth_high, b.tilth)
+
+	# The turn into spring, and then far enough into it for the sowing to be
+	# worth something in a granary rather than only in the ground.
+	if not plough:
+		# Back to bare ground, so the suppressed arm sows nothing at the turn.
+		_set_tilth(sim, 0.0)
+	sim.stores.refresh_totals(sim.citizens, sim.buildings)
+	var before_sowing := sim.total_resource(Config.Res.FOOD)
+	var winter_food := before_sowing
+	_set_calendar(game, year * 2.0 + 0.45)
+	sim.tick(0.1)
+	var sown := 0.0
+	for b in sim.buildings:
+		if b.def.is_farm():
+			sown = maxf(sown, b.crop_growth)
+	sim.stores.refresh_totals(sim.citizens, sim.buildings)
+	var seed_spent := before_sowing - sim.total_resource(Config.Res.FOOD)
+	# A full spring, not a week of it. The winter's work buys an earlier start to
+	# the harvest, and what that is worth can only be read once the season it
+	# belongs to has run: over eight days the seed bill was still in front of
+	# the grain it bought.
+	var first_harvest := -1
+	for d in Config.DAYS_PER_SEASON:
+		await _advance_day(game)
+		if first_harvest < 0:
+			for job in sim.jobs.all_jobs():
+				if job.kind == JobBoard.Kind.HARVEST:
+					first_harvest = d
+					break
+	sim.stores.refresh_totals(sim.citizens, sim.buildings)
+	_invariants(game, "winter:%s" % ["ploughed" if plough else "idle"])
+	var result := {
+		"population": sim.citizens.size(),
+		"idle_high": idle_high, "idle_low": idle_low,
+		"open_low": open_low, "open_high": open_high,
+		"ploughing_days": ploughing_days, "hands_on_ground": hands_on_ground,
+		"idle_total": idle_total, "work_days": work_days,
+		"winter_days": Config.DAYS_PER_SEASON - 1,
+		"tilth_high": tilth_high, "sown": sown, "seed_spent": seed_spent,
+		"winter_food": winter_food,
+		"first_harvest_day": first_harvest,
+		"spring_food": sim.total_resource(Config.Res.FOOD),
+	}
+	game.free()
+	_done("_one_winter")
+	return result
+
+
+## Winter cannot be reaped, and a sown field is not a ripe one.
+##
+## The frost's rule is that everything still in the ground when winter arrives
+## is destroyed and never reaches a granary. Winter fieldwork is only allowed to
+## exist if it cannot be a way round that, so this measures the two things that
+## would make it one: food arriving in the settlement during the frozen season,
+## and a field that can be reaped the moment the year turns.
+func _winter_work_is_never_a_harvest(game: SeededGame) -> void:
+	_clear_jobs(game.sim)
+	var sim := game.sim
+	var farm := _staffed_farm(game, game.world.centre() + Vector3(-50, 0, -34))
+	if farm == null:
+		_check(false, "the winter-harvest check has a farm")
+		return
+	var year := float(Clock.days_per_year())
+	_set_calendar(game, year + float(Config.DAYS_PER_SEASON * Clock.WINTER) + 2.0)
+	_turn(game)
+	_check(farm.dormant and farm.crop_growth == 0.0,
+			"the frost has left this field bare to work on")
+
+	# A whole winter's ploughing, as if the hands had done it.
+	farm.tilth = 1.0
+	farm.inventory[Config.Res.FOOD] = 0.0
+	_clear_jobs(sim)
+	sim.production._post_gathering(farm)
+	sim.production._post_tillage(farm)
+	_check(sim.jobs.count_for(JobBoard.Kind.HARVEST, farm.id, Config.Res.FOOD) == 0
+			and sim.jobs.count_for(JobBoard.Kind.TILL, farm.id, -1) == 0
+			and farm.crop_growth == 0.0
+			and farm.inventory[Config.Res.FOOD] == 0.0,
+			"fully broken ground posts no reaper, no further ploughing, and "
+			+ "holds no grain")
+
+	# Spring. The march has food, so there is seed to sow with.
+	sim.keep.inventory[Config.Res.FOOD] = 40.0 * sim.citizens.size()
+	sim.stores.refresh_totals(sim.citizens, sim.buildings)
+	var before := sim.total_resource(Config.Res.FOOD)
+	_set_calendar(game, year * 2.0)
+	_turn(game)
+	_check(not farm.dormant and farm.tilth == 0.0
+			and is_equal_approx(farm.crop_growth, Config.TILLAGE_SOWING),
+			"the winter's ploughing is sown on the first tick of spring "
+			+ "(growth %.3f)" % farm.crop_growth)
+	# Totals are a cache over the buildings and the seed came straight out of
+	# them, so ask for them again before reading. A check taken off the stale
+	# figure would have read "no seed spent" whatever the rule did.
+	sim.stores.refresh_totals(sim.citizens, sim.buildings)
+	var seed_spent := before - sim.total_resource(Config.Res.FOOD)
+	_check(is_equal_approx(seed_spent, Config.TILLAGE_SEED_FOOD),
+			"and the seed corn it swallowed came out of the granaries "
+			+ "(%.1f food)" % seed_spent)
+	_clear_jobs(sim)
+	sim.production._post_gathering(farm)
+	_check(sim.jobs.count_for(JobBoard.Kind.HARVEST, farm.id, Config.Res.FOOD) == 0,
+			"a field that came through the winter prepared is ready, not ripe: "
+			+ "nobody can reap it on the first morning of spring")
+	# And it is ready: a couple of days of real growth and it is reapable, which
+	# is the whole of what the winter bought.
+	sim.population.grow_crops(sim.buildings, 2.0)
+	_clear_jobs(sim)
+	sim.production._post_gathering(farm)
+	_check(sim.jobs.count_for(JobBoard.Kind.HARVEST, farm.id, Config.Res.FOOD) == 1,
+			"two days of spring and the prepared field is worth reaping")
+	_clear_jobs(sim)
+	sim.demolish(farm)
+	_done("_winter_work_is_never_a_harvest")
+
+
+## Broken ground with nothing to sow in it grows nothing.
+##
+## The seed-corn rule, measured on its own. A march that ate its way through the
+## winter can plough all it likes and comes out of it with bare earth, which is
+## what stops winter labour from being a rescue for the march the frost beat.
+func _broken_ground_needs_seed(game: SeededGame) -> void:
+	_clear_jobs(game.sim)
+	var sim := game.sim
+	var farm := _staffed_farm(game, game.world.centre() + Vector3(52, 0, 36))
+	if farm == null:
+		_check(false, "the seed-corn check has a farm")
+		return
+	var year := float(Clock.days_per_year())
+
+	# Year 2's winter, ploughed, with the granaries empty.
+	_set_calendar(game, year + float(Config.DAYS_PER_SEASON * Clock.WINTER) + 1.0)
+	_turn(game)
+	for b in sim.buildings:
+		b.inventory[Config.Res.FOOD] = 0.0
+		b.larder = 0.0
+	sim.stores.refresh_totals(sim.citizens, sim.buildings)
+	farm.tilth = 1.0
+	_set_calendar(game, year * 2.0)
+	_turn(game)
+	_check(farm.crop_growth == 0.0 and farm.tilth == 0.0,
+			"a march with nothing to sow comes out of the winter with bare "
+			+ "earth (growth %.3f)" % farm.crop_growth)
+
+	# The same farm, the same winter's work, one year on, with grain in hand.
+	_set_calendar(game, year * 2.0 + float(Config.DAYS_PER_SEASON * Clock.WINTER) + 1.0)
+	_turn(game)
+	sim.keep.inventory[Config.Res.FOOD] = 40.0 * sim.citizens.size()
+	sim.stores.refresh_totals(sim.citizens, sim.buildings)
+	farm.tilth = 1.0
+	_set_calendar(game, year * 3.0)
+	_turn(game)
+	_check(is_equal_approx(farm.crop_growth, Config.TILLAGE_SOWING),
+			"and the same work sows the same field when there is seed for it "
+			+ "(growth %.3f)" % farm.crop_growth)
+
+	# Half the winter's work is worth half the sowing and half the seed: the
+	# payoff is the labour, not a threshold somebody crossed.
+	_set_calendar(game, year * 3.0 + float(Config.DAYS_PER_SEASON * Clock.WINTER) + 1.0)
+	_turn(game)
+	sim.keep.inventory[Config.Res.FOOD] = 40.0 * sim.citizens.size()
+	sim.stores.refresh_totals(sim.citizens, sim.buildings)
+	farm.tilth = 0.5
+	var before := sim.total_resource(Config.Res.FOOD)
+	_set_calendar(game, year * 4.0)
+	_turn(game)
+	sim.stores.refresh_totals(sim.citizens, sim.buildings)
+	var half_seed := before - sim.total_resource(Config.Res.FOOD)
+	_check(is_equal_approx(farm.crop_growth, Config.TILLAGE_SOWING * 0.5)
+			and is_equal_approx(half_seed, Config.TILLAGE_SEED_FOOD * 0.5),
+			"half a winter's ploughing sows half the field for half the seed "
+			+ "(growth %.3f, seed %.1f)" % [farm.crop_growth, half_seed])
+	_clear_jobs(sim)
+	sim.demolish(farm)
+	_done("_broken_ground_needs_seed")
+
+
+## Real work outbids winter work, everywhere in a settlement.
+##
+## The board scores priority against travel, so "lower priority" is not on its
+## own an answer — a cheap job far away loses to an expensive one underfoot. The
+## distances here are the ones that matter: a tillage job at the worker's feet
+## against a haul and a building site right across a march.
+func _real_work_outbids_winter_work(game: SeededGame) -> void:
+	_clear_jobs(game.sim)
+	var sim := game.sim
+	var farm := _staffed_farm(game, game.world.centre() + Vector3(-58, 0, 26))
+	if farm == null:
+		_check(false, "the priority check has a farm")
+		return
+	_set_calendar(game, float(Clock.days_per_year())
+			+ float(Config.DAYS_PER_SEASON * Clock.WINTER) + 3.0)
+	_turn(game)
+	_clear_jobs(sim)
+	sim.production._post_tillage(farm)
+	var tillage: JobBoard.Job = null
+	for job in sim.jobs.all_jobs():
+		if job.kind == JobBoard.Kind.TILL:
+			tillage = job
+	if tillage == null:
+		_check(false, "winter posts ground to break")
+		return
+	var hand := sim.citizens[0]
+	hand.workplace_id = -1
+	hand.position = tillage.position
+	hand.global_position = tillage.position
+
+	# A haul and a building site, both a long way off.
+	var far := tillage.position + Vector3(120, 0, 0)
+	var haul := sim.jobs.post(JobBoard.Kind.HAUL, far, 50.0)
+	haul.res = Config.Res.TIMBER
+	haul.amount = 1.0
+	haul.source_id = sim.keep.id
+	haul.dest_id = sim.keep.id
+	sim.jobs.index(haul)
+	var picked := sim.jobs.best_for(hand.id, hand.global_position,
+			JobBoard.Accept.ANY, -1)
+	_check(picked == haul,
+			"a haul 120 m away still outbids ploughing at a worker's feet")
+	sim.jobs.release(picked)
+	sim.jobs.cancel(haul)
+
+	var site := sim.jobs.post(JobBoard.Kind.BUILD,
+			tillage.position + Vector3(190, 0, 0), 68.0)
+	site.dest_id = sim.keep.id
+	site.res = -1
+	sim.jobs.index(site)
+	picked = sim.jobs.best_for(hand.id, hand.global_position,
+			JobBoard.Accept.ANY, -1)
+	_check(picked == site,
+			"and so does a building site 190 m away")
+	sim.jobs.release(picked)
+	sim.jobs.cancel(site)
+
+	# The check above is only worth anything if the tillage job was a real
+	# candidate all along. With nothing else on the board it must be taken —
+	# otherwise the two results above would have been satisfied by a filter
+	# that never offered it in the first place.
+	picked = sim.jobs.best_for(hand.id, hand.global_position,
+			JobBoard.Accept.ANY, -1)
+	_check(picked == tillage,
+			"with nothing else going, the same hand takes the ploughing")
+	sim.jobs.release(picked)
+	_clear_jobs(sim)
+	sim.demolish(farm)
+	_done("_real_work_outbids_winter_work")
+
+
+## Ploughing exists in winter and nowhere else, and only on ground worth it.
+func _tillage_belongs_to_winter(game: SeededGame) -> void:
+	_clear_jobs(game.sim)
+	var sim := game.sim
+	var farm := _staffed_farm(game, game.world.centre() + Vector3(30, 0, -56))
+	if farm == null:
+		_check(false, "the season check has a farm")
+		return
+	var year := float(Clock.days_per_year())
+	var posted := {}
+	for season in [Clock.SPRING, Clock.SUMMER, Clock.AUTUMN, Clock.WINTER]:
+		_set_calendar(game, year + float(Config.DAYS_PER_SEASON * season) + 1.0)
+		_turn(game)
+		farm.crop_growth = 0.0
+		farm.tilth = 0.0
+		_clear_jobs(sim)
+		sim.production._post_tillage(farm)
+		posted[Clock.SEASONS[season]] = sim.jobs.count_for(
+				JobBoard.Kind.TILL, farm.id, -1)
+	_check(int(posted["Winter"]) > 0 and int(posted["Spring"]) == 0
+			and int(posted["Summer"]) == 0 and int(posted["Autumn"]) == 0,
+			"ground is broken in winter and in no other season: %s" % [posted])
+
+	# Still winter, but the field is standing — a mild year, or a harvest that
+	# ran late. Ploughing round a crop buys nothing, because the sowing only
+	# ever raises growth, and a job that cannot pay is the busywork this must
+	# not be.
+	#
+	# The figure is deliberately *small*. A gate written at
+	# `crop_growth >= TILLAGE_SOWING` passes a test that stands the field above
+	# the sowing and then charges a whole winter's seed bill for a field reaped
+	# down to 0.42 — measured, that cost the mild-winter arm of
+	# `_harvest_decides_the_winter` six food a year. A quarter-grown field is
+	# standing crop and is not ground to break.
+	_clear_jobs(sim)
+	for standing in [Config.TILLAGE_SOWING + 0.05, 0.25, 0.01]:
+		farm.crop_growth = standing
+		farm.tilth = 0.0
+		_clear_jobs(sim)
+		sim.production._post_tillage(farm)
+		_check(sim.jobs.count_for(JobBoard.Kind.TILL, farm.id, -1) == 0,
+				"a field standing at %.2f is not ground to break" % standing)
+
+	# And a farm whose hands have gone has no field to prepare.
+	# A ceiling across the whole march, not only per farm. `best_for` scores every
+	# open job for every job-seeking citizen, and winter is when almost everybody
+	# is job-seeking, so a cap that multiplies by the number of farms is not a
+	# cap. Filled here with orders belonging to other sites, so what is being
+	# tested is the settlement-wide tally and not this farm's own.
+	_clear_jobs(sim)
+	farm.crop_growth = 0.0
+	farm.tilth = 0.0
+	for i in Config.TILLAGE_JOBS_MAX:
+		var filler := sim.jobs.post(JobBoard.Kind.TILL, sim.keep.global_position,
+				Config.TILLAGE_PRIORITY)
+		filler.res = -1
+		filler.dest_id = sim.keep.id + 1000 + i
+		sim.jobs.index(filler)
+	sim.production._post_tillage(farm)
+	_check(sim.jobs.count_of_kind(JobBoard.Kind.TILL) == Config.TILLAGE_JOBS_MAX
+			and sim.jobs.count_for(JobBoard.Kind.TILL, farm.id, -1) == 0,
+			"a board already carrying %d orders takes no more ploughing"
+			% Config.TILLAGE_JOBS_MAX)
+	_clear_jobs(sim)
+	farm.crop_growth = 0.0
+	for worker in farm.workers.duplicate():
+		var held: Citizen = sim.citizens_by_id.get(worker)
+		if held != null:
+			held.workplace_id = -1
+	farm.workers.clear()
+	farm.sync_fields_to_workers()
+	sim.production._post_tillage(farm)
+	_check(farm.field_count() == 0
+			and sim.jobs.count_for(JobBoard.Kind.TILL, farm.id, -1) == 0,
+			"and ground that has gone back to grass is nobody's winter work")
+	_clear_jobs(sim)
+	sim.demolish(farm)
+	_done("_tillage_belongs_to_winter")
+
+
+## One spell of work moves the ground, and moves it on the farm it was posted
+## for — the whole loop, from claim to broken earth.
+func _a_spell_of_ploughing(game: SeededGame) -> void:
+	_clear_jobs(game.sim)
+	var sim := game.sim
+	var farm := _staffed_farm(game, game.world.centre() + Vector3(-30, 0, -50))
+	if farm == null:
+		_check(false, "the ploughing loop has a farm")
+		return
+	_set_calendar(game, float(Clock.days_per_year())
+			+ float(Config.DAYS_PER_SEASON * Clock.WINTER) + 4.0)
+	_turn(game)
+	_clear_jobs(sim)
+	sim.production._post_tillage(farm)
+	var hand := sim.citizens[0]
+	hand.workplace_id = -1
+	hand.job = sim.jobs.best_for(hand.id, hand.global_position,
+			JobBoard.Accept.ANY, -1)
+	if hand.job == null or hand.job.kind != JobBoard.Kind.TILL:
+		_check(false, "an idle hand can claim winter fieldwork")
+		return
+	_check(hand.job.describe() == "Break ground for spring",
+			"the job says what it is: %s" % hand.job.describe())
+
+	# Stand the worker on the plot the job chose and let the spell run out.
+	sim._tick_till(hand, 0.01)
+	var plot := hand.job.target
+	_check(plot != Vector3.INF and farm.fields.has(plot),
+			"the ploughman is sent to one of this farm's own plots")
+	hand.position = plot
+	hand.global_position = plot
+	hand.set_goal(plot)
+	sim._tick_till(hand, 0.01)
+	_check(hand.state == Citizen.State.WORKING
+			and hand.task_label == "breaking ground",
+			"arriving at the plot starts the spell")
+	var before := farm.tilth
+	# The settlement's whole larder, before and after a real spell of work. This
+	# is the check that stands between winter fieldwork and the frost: the rule
+	# is that nothing the frozen season produces reaches a granary, and the way
+	# that rule gets broken is a `_deposit` creeping into `_tick_till`. Measured
+	# on the state of the building, not on the absence of a line of code.
+	sim.stores.refresh_totals(sim.citizens, sim.buildings)
+	var larder_before := sim.total_resource(Config.Res.FOOD)
+	var farm_food_before := farm.inventory[Config.Res.FOOD]
+	sim._tick_till(hand, Config.TILLAGE_SECONDS + 1.0)
+	_check(is_equal_approx(farm.tilth - before, Config.TILLAGE_STEP)
+			and hand.job == null and hand.carrying_amount == 0.0,
+			"a finished spell breaks %.4f of the ground and carries nothing "
+			% (farm.tilth - before) + "home")
+	sim.stores.refresh_totals(sim.citizens, sim.buildings)
+	_check(is_equal_approx(sim.total_resource(Config.Res.FOOD), larder_before)
+			and is_equal_approx(farm.inventory[Config.Res.FOOD],
+					farm_food_before),
+			"and puts not one grain into the settlement: %.2f food before, "
+			% larder_before + "%.2f after"
+			% sim.total_resource(Config.Res.FOOD))
+
+	# Broken ground is not a crop. Nothing about the field has grown and the
+	# frost's rule is untouched.
+	_check(farm.crop_growth == 0.0 and farm.dormant,
+			"and the field is still frozen and still bare")
+
+	# The year turning takes the work with it, on both sides of the board: the
+	# ploughman caught by the spring is not left breaking ground in a field that
+	# has woken up, and the orders nobody ever got to do not sit there until next
+	# winter. They used to: nothing cancelled an unclaimed TILL job, so it kept
+	# counting against the following winter's `TILLAGE_HANDS` cap and cost a
+	# wasted claim-and-retire to whichever idle citizen bid for it in the spring.
+	sim.production._post_tillage(farm)
+	sim.production._post_tillage(farm)
+	hand.job = sim.jobs.best_for(hand.id, hand.global_position,
+			JobBoard.Accept.ANY, -1)
+	var claimed := hand.job
+	_check(claimed != null and claimed.kind == JobBoard.Kind.TILL
+			and sim.jobs.count_of_kind(JobBoard.Kind.TILL) == 2,
+			"two orders out, one of them claimed, before the year turns")
+	_set_calendar(game, float(Clock.days_per_year()) * 2.0)
+	_turn(game)
+	_check(sim.jobs.count_of_kind(JobBoard.Kind.TILL) == 1,
+			"spring clears the ploughing nobody claimed (%d left)"
+			% sim.jobs.count_of_kind(JobBoard.Kind.TILL))
+	sim._tick_till(hand, 0.01)
+	_check(claimed != null and hand.job == null and claimed.cancelled
+			and sim.jobs.count_of_kind(JobBoard.Kind.TILL) == 0,
+			"and the ploughman who held one puts it down himself")
+	_clear_jobs(sim)
+	sim.demolish(farm)
+	_done("_a_spell_of_ploughing")
+
+
+## What a file carries, and what it does not.
+##
+## A march saved in mid-winter keeps the ground it had broken: the file carries
+## `tilth`, and the first tick after the load (where `_turn_the_year` sees a
+## fresh season counter) does not wipe it.
+func _tilth_and_the_save_file() -> void:
+	var game := _new_game(42)
+	var sim := game.sim
+	var farm := _staffed_farm(game, game.world.centre() + Vector3(42, 0, -30))
+	if farm == null:
+		_check(false, "the tilth save check has a farm")
+		game.free()
+		return
+	var farm_id := farm.id
+	var year := float(Clock.days_per_year())
+	_set_calendar(game, year + float(Config.DAYS_PER_SEASON * Clock.WINTER) + 3.0)
+	sim.tick(0.1)
+	farm.tilth = 0.9
+
+	var winter_save := SaveGame.capture(game)
+	var error := game.restore_from(winter_save)
+	_check(error == "",
+			"a save taken over a march with broken ground still loads: " + error)
+	var reloaded: Building = game.sim.buildings_by_id.get(farm_id)
+	game.sim.tick(0.1)
+	if reloaded == null:
+		_check(false, "the farm survives the winter round trip")
+		game.free()
+		return
+	# Asked of the file as well as of the reloaded farm. "tilth came back as
+	# 0.9" alone would not separate a restore from a value that was never
+	# touched; the key has to be in the file.
+	var saved_entry := {}
+	for entry in winter_save.get("buildings", []):
+		if int(entry.get("id", -1)) == farm_id:
+			saved_entry = entry
+	_check(is_equal_approx(float(saved_entry.get("tilth", -1.0)), 0.9),
+			"the file carries the winter's ploughing")
+	_check(reloaded.dormant and is_equal_approx(reloaded.tilth, 0.9),
+			"and a march saved in winter comes back frozen with its ground "
+			+ "still broken, a tick after loading (tilth %.2f)" % reloaded.tilth)
+
+	# The read side on its own. A restore that names tilth restores it; one
+	# that does not (an older file) says unbroken, rather than keeping whatever
+	# this object happened to hold.
+	var entry := {"inventory": reloaded.inventory.duplicate(),
+			"crop_growth": reloaded.crop_growth, "larder": reloaded.larder,
+			"workers": reloaded.workers.duplicate(),
+			"residents": reloaded.residents.duplicate(),
+			"tilth": 0.7}
+	reloaded.apply_state(entry)
+	_check(is_equal_approx(reloaded.tilth, 0.7),
+			"apply_state restores the tilth a file names")
+	entry.erase("tilth")
+	reloaded.apply_state(entry)
+	_check(reloaded.tilth == 0.0,
+			"and a file that names none restores unbroken ground")
+	game.free()
+	_done("_tilth_and_the_save_file")
+
+
+## Each winter's work starts from bare ground — except on the tick after a load.
+##
+## Two rules in one fixture because they are one line of code, and that line has
+## to say both things at once. Tilth is spent by the spring that follows the
+## winter it was earned in and by no other, so the turn into winter clears it.
+## But a march *resuming* a winter save arrives at that same turn with its season
+## counter unset, and clearing there would destroy the very ploughing the file
+## had just restored. It is the mistake that ruled `crop_growth` out as a home
+## for this in the first place, and it was made again one branch away from it:
+## with `"tilth": b.tilth` added to `SaveGame._capture_building`, a winter save
+## restored 0.9 and was back to 0.0 one tick later, with the whole suite green.
+func _tilth_does_not_bank(game: SeededGame) -> void:
+	_clear_jobs(game.sim)
+	var sim := game.sim
+	var farm := _staffed_farm(game, game.world.centre() + Vector3(58, 0, -18))
+	if farm == null:
+		_check(false, "the tilth-reset check has a farm")
+		return
+	var year := float(Clock.days_per_year())
+
+	# Autumn of a year whose winter bites, carrying ploughing it cannot have.
+	_set_calendar(game, year * 2.0 + float(Config.DAYS_PER_SEASON * Clock.AUTUMN))
+	_turn(game)
+	farm.tilth = 0.8
+	_set_calendar(game, year * 2.0 + float(Config.DAYS_PER_SEASON * Clock.WINTER))
+	_turn(game)
+	_check(farm.tilth == 0.0,
+			"the turn into winter starts the season's work from bare ground "
+			+ "(tilth %.2f)" % farm.tilth)
+
+	# The same turn, reached the way a load reaches it: a season counter that
+	# has never been set, three days into a winter, with ploughing to keep.
+	farm.tilth = 0.65
+	_set_calendar(game, year * 2.0
+			+ float(Config.DAYS_PER_SEASON * Clock.WINTER) + 3.0)
+	sim.production._season = -1
+	sim.production._season_year = -1
+	_turn(game)
+	_check(is_equal_approx(farm.tilth, 0.65) and farm.dormant,
+			"and a march resuming a winter keeps the ploughing its file "
+			+ "carried (tilth %.2f)" % farm.tilth)
+	farm.tilth = 0.0
+	_clear_jobs(sim)
+	sim.demolish(farm)
+	_done("_tilth_does_not_bank")
+
+
+## Seed is never spent on a sowing the field would not notice.
+##
+## `sow_prepared_ground` refuses to plough a standing crop back in, and the seed
+## has to be refused with it. Taking the grain first and testing afterwards meant
+## a march paid a full winter's seed bill for a field it could not improve —
+## which is the same money-for-nothing the standing-crop gate now prevents at
+## the posting end, tested here at the spending end because both ends have to
+## hold: the gate reads the farm when the job is posted, and this reads it again
+## twelve days later when the year turns.
+func _seed_is_not_spent_for_nothing(game: SeededGame) -> void:
+	_clear_jobs(game.sim)
+	var sim := game.sim
+	var farm := _staffed_farm(game, game.world.centre() + Vector3(-22, 0, 58))
+	if farm == null:
+		_check(false, "the wasted-seed check has a farm")
+		return
+	var year := float(Clock.days_per_year())
+	_set_calendar(game, year + float(Config.DAYS_PER_SEASON * Clock.WINTER) + 2.0)
+	_turn(game)
+	sim.keep.inventory[Config.Res.FOOD] = 40.0 * sim.citizens.size()
+	sim.stores.refresh_totals(sim.citizens, sim.buildings)
+
+	# Part-broken ground under a part-reaped crop: the sowing it would lay down
+	# is worth less than what is already standing there.
+	farm.tilth = 0.4
+	farm.crop_growth = 0.30
+	var standing := farm.crop_growth
+	var before := sim.total_resource(Config.Res.FOOD)
+	_set_calendar(game, year * 2.0)
+	_turn(game)
+	sim.stores.refresh_totals(sim.citizens, sim.buildings)
+	var spent := before - sim.total_resource(Config.Res.FOOD)
+	_check(spent == 0.0 and farm.tilth == 0.0
+			and farm.crop_growth >= standing,
+			"ground worth less than the crop already on it costs no seed "
+			+ "(%.1f food spent, growth %.2f)" % [spent, farm.crop_growth])
+	# And it comes out of grain nobody has already promised. `Stores.consume`,
+	# which is how this was written first, goes through `Building.remove` and
+	# looks at `inventory` alone: it will strip a granary that has every last
+	# sack reserved for a hauler and leave an unpromised one further down the
+	# index untouched, and the hauler then lifts less than the job says it took.
+	# `Stores.try_spend` only ever takes a building's `available`.
+	_clear_jobs(sim)
+	farm.crop_growth = 0.0
+	farm.tilth = 1.0
+	var promised := 30.0
+	for b in sim.buildings:
+		if b.def.is_storage():
+			b.inventory[Config.Res.FOOD] = 0.0
+			b.reserved[Config.Res.FOOD] = 0.0
+	sim.keep.inventory[Config.Res.FOOD] = promised
+	sim.keep.reserved[Config.Res.FOOD] = promised
+	var spare := _build(game, "granary", game.world.centre() + Vector3(64, 0, 64))
+	if spare == null:
+		_check(false, "the reservation check has a second granary")
+		return
+	spare.inventory[Config.Res.FOOD] = 40.0 * sim.citizens.size()
+	sim.stores.refresh_totals(sim.citizens, sim.buildings)
+	_set_calendar(game, year * 2.0
+			+ float(Config.DAYS_PER_SEASON * Clock.WINTER) + 2.0)
+	_turn(game)
+	farm.crop_growth = 0.0
+	farm.tilth = 1.0
+	_set_calendar(game, year * 3.0)
+	_turn(game)
+	_check(is_equal_approx(farm.crop_growth, Config.TILLAGE_SOWING)
+			and is_equal_approx(sim.keep.inventory[Config.Res.FOOD], promised),
+			"and it is taken from unpromised grain, leaving the %.0f sacks a "
+			% promised + "hauler was sent for where they were (%.1f left, "
+			% sim.keep.inventory[Config.Res.FOOD] + "growth %.2f)"
+			% farm.crop_growth)
+	sim.keep.reserved[Config.Res.FOOD] = 0.0
+	_clear_jobs(sim)
+	sim.demolish(spare)
+	sim.demolish(farm)
+	_done("_seed_is_not_spent_for_nothing")
+
+
+## A sowing nobody is told about is work the player never sees the point of.
+##
+## `Production` cannot reach the alert channel, so `Simulation` relays
+## `ground_sown` exactly as it relays `frost_fell`. Until the relay existed a
+## march could spend a whole winter in its fields and the only cue was a green
+## field in the spring. The count is in the message because one field sown and
+## every field sown are different pieces of news.
+func _the_sowing_is_announced() -> void:
+	var game := _new_game(42)
+	var heard: Array = []
+	game.sim.alert.connect(func(text: String, _p: Vector3):
+		if "ploughing" in text: heard.append(text))
+	game.sim.production.ground_sown.emit(3, Vector3.ZERO)
+	game.sim.production.ground_sown.emit(1, Vector3.ZERO)
+	_check(heard.size() == 2, "a winter's ploughing coming up is announced")
+	_check(heard.size() > 0 and "3 fields" in heard[0],
+			"the announcement names how many fields went in: %s"
+			% ("" if heard.is_empty() else heard[0]))
+	_check(heard.size() > 1 and "a field" in heard[1],
+			"and one field reads as one field, not as a count")
+	game.free()
+	_done("_the_sowing_is_announced")
+
+
 ## A frost that nobody is told about is a bug, not a hardship.
 ##
 ## `Production` emits `frost_fell` and cannot reach the alert channel itself, so
@@ -1051,8 +1800,17 @@ func _run() -> void:
 	_a_farm_raised_in_the_mild_winter_keeps_its_crop(game)
 	_drafting_the_hands_does_not_save_the_crop(game)
 	_winter_frees_the_farmhands(game)
+	_winter_work_is_never_a_harvest(game)
+	_broken_ground_needs_seed(game)
+	_real_work_outbids_winter_work(game)
+	_tillage_belongs_to_winter(game)
+	_a_spell_of_ploughing(game)
+	_tilth_does_not_bank(game)
+	_seed_is_not_spent_for_nothing(game)
 	game.free()
 	_the_season_survives_a_save()
+	_tilth_and_the_save_file()
+	_the_sowing_is_announced()
 	_the_frost_is_announced()
 
 	await _a_full_year(42)
@@ -1108,6 +1866,82 @@ func _run() -> void:
 				% [spared.low, lost.low, spared.starving_days,
 				lost.starving_days])
 
+	# The observation that started this: a march in mid-winter with every hand
+	# idle and nothing on the board. Both arms are the same settlement on the
+	# same seed through the same winter; the only difference is whether anyone
+	# is allowed to break ground.
+	var ploughed: Dictionary = await _one_winter(42, true)
+	var untouched: Dictionary = await _one_winter(42, false)
+	print("METRIC winter, ploughed: %s" % ploughed)
+	print("METRIC winter, idle:     %s" % untouched)
+	# No "both arms ran" check here: it could not fail. `_one_winter` has no
+	# early return, so the dictionary is always populated, and a check that
+	# cannot fail is worse than no check — it reads like coverage. A fixture that
+	# died half way through is caught by `_all_ran` below, which is what that
+	# machinery is for.
+	if not ploughed.is_empty() and not untouched.is_empty():
+		# The state of things before this change, reproduced: with nobody
+		# allowed to break ground, a settlement in mid-winter has all but
+		# nothing on its board and most of the march is standing still.
+		_check(int(untouched.open_high) <= 2
+				and int(untouched.idle_high) >= int(untouched.population) * 3 / 4,
+				"suppressing winter fieldwork puts the march back where it was: "
+				+ "at most %d jobs open on any winter day and %d of %d people "
+				% [untouched.open_high, untouched.idle_high,
+				untouched.population] + "idle at the worst of it")
+		# And with it: work on nearly every day of the season, hands on the
+		# ground, and fewer people standing about at every reading.
+		_check(int(ploughed.hands_on_ground) > 0
+				and int(ploughed.ploughing_days)
+						>= int(ploughed.winter_days) / 2
+				and int(ploughed.work_days) > int(untouched.work_days),
+				"ploughing gives the winter work on %d of its %d days "
+				% [ploughed.ploughing_days, ploughed.winter_days]
+				+ "(%d worker-days on the ground; %d days with work against %d)"
+				% [ploughed.hands_on_ground, ploughed.work_days,
+				untouched.work_days])
+		_check(int(ploughed.open_high) > int(untouched.open_high)
+				and int(ploughed.idle_total) < int(untouched.idle_total)
+				and int(ploughed.idle_low) < int(untouched.idle_low),
+				"and takes people off the board's waiting list: %d open jobs "
+				% ploughed.open_high + "against %d, %d idle-days against %d, "
+				% [untouched.open_high, ploughed.idle_total,
+				untouched.idle_total] + "fewest idle %d against %d"
+				% [ploughed.idle_low, untouched.idle_low])
+		# The consequence, in spring. The sowing is the ploughing paid out; the
+		# seed is what it cost; the earlier first harvest is what it bought.
+		_check(is_equal_approx(float(ploughed.sown), Config.TILLAGE_SOWING)
+				and float(untouched.sown) == 0.0,
+				"the ploughed march wakes in spring with its fields sown "
+				+ "(%.2f growth against %.2f)"
+				% [ploughed.sown, untouched.sown])
+		_check(float(ploughed.seed_spent) > float(untouched.seed_spent)
+				+ Config.TILLAGE_SEED_FOOD,
+				"and pays for it in seed corn (%.1f food against %.1f)"
+				% [ploughed.seed_spent, untouched.seed_spent])
+		_check(int(ploughed.first_harvest_day)
+						< int(untouched.first_harvest_day)
+				and int(ploughed.first_harvest_day) >= 0,
+				"its first reaper goes out on spring day %d instead of %d"
+				% [ploughed.first_harvest_day, untouched.first_harvest_day])
+		# Differenced against each arm's own food at the end of winter, not
+		# against each other's. Two simulations of thirty people diverge over
+		# twelve days for reasons that have nothing to do with ploughing, and
+		# comparing the spring totals directly credited that divergence to the
+		# feature: the first version of this check reported "60 food better off"
+		# when 39 of it was already there before a grain of seed was spent.
+		# What the winter's work is worth is what each march *gained* over the
+		# same eight days of spring, seed bill included.
+		var ploughed_gain := float(ploughed.spring_food) \
+				- float(ploughed.winter_food)
+		var idle_gain := float(untouched.spring_food) \
+				- float(untouched.winter_food)
+		_check(ploughed_gain > idle_gain,
+				"and the first spring is worth %.0f food to it "
+				% ploughed_gain + "against %.0f to the march that left its "
+				% idle_gain + "fields alone — %.0f better off, seed bill and all"
+				% (ploughed_gain - idle_gain))
+
 	# Nothing above records a fixture that stopped half way through, so ask each
 	# one whether it got to the end. A runtime error inside a fixture aborts it
 	# silently and leaves the suite reporting on checks that never ran.
@@ -1121,6 +1955,11 @@ func _run() -> void:
 			"_a_farm_raised_in_the_mild_winter_keeps_its_crop",
 			"_drafting_the_hands_does_not_save_the_crop",
 			"_winter_frees_the_farmhands", "_the_season_survives_a_save",
+			"_winter_work_is_never_a_harvest", "_broken_ground_needs_seed",
+			"_real_work_outbids_winter_work", "_tillage_belongs_to_winter",
+			"_a_spell_of_ploughing", "_tilth_and_the_save_file",
+			"_the_sowing_is_announced", "_one_winter",
+			"_tilth_does_not_bank", "_seed_is_not_spent_for_nothing",
 			"_a_full_year"])
 
 	await process_frame

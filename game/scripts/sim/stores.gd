@@ -112,13 +112,6 @@ func refresh_totals(citizens: Array[Citizen],
 func total(res: int) -> float:
 	return _totals[res] + _carried[res] + _larder[res]
 
-
-## Food sitting in household larders — owned, eaten soon, not available to
-## spend on anything else.
-func in_larders(res: int) -> float:
-	return _larder[res]
-
-
 ## What can actually be spent right now — goods sitting in a building. A load
 ## on someone's back is real, but no clerk can requisition it, and counting it
 ## let road works be commissioned and then paid for with nothing.
@@ -127,11 +120,6 @@ func spendable(res: int) -> float:
 	for b in _by_resource[res]:
 		stock += b.available(res)
 	return stock
-
-
-func in_transit(res: int) -> float:
-	return _carried[res]
-
 
 func can_afford(cost: Dictionary) -> bool:
 	for res in cost:

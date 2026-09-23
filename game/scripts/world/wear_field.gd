@@ -25,9 +25,6 @@ var world_size := Config.WORLD_SIZE
 const TILE_TEXELS := 96
 var _tiles: Dictionary = {}
 
-const NEIGHBOURS_4: Array[Vector2i] = [
-	Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
-]
 const NEIGHBOURS_8: Array[Vector2i] = [
 	Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1),
 	Vector2i(1, 1), Vector2i(-1, 1), Vector2i(1, -1), Vector2i(-1, -1),
@@ -243,12 +240,6 @@ func _mark_texel(idx: int) -> void:
 
 # --- Queries ----------------------------------------------------------------
 
-func wear_at_texel(x: int, y: int) -> float:
-	if x < 0 or y < 0 or x >= res or y >= res:
-		return 0.0
-	return wear[y * res + x]
-
-
 func wear_at(wx: float, wz: float) -> float:
 	var x := clampi(int(wx / Config.WEAR_CELL), 0, res - 1)
 	var y := clampi(int(wz / Config.WEAR_CELL), 0, res - 1)
@@ -287,19 +278,6 @@ func level_from_wear(cx: int, cz: int) -> int:
 		for x in range(cx * Config.WEAR_SCALE, (cx + 1) * Config.WEAR_SCALE):
 			best = maxi(best, _level_at_index(y * res + x))
 	return best
-
-
-## Strongest wear anywhere under a nav cell. Nav costs use the best surface in
-## the cell so a path narrower than the cell still speeds travel up.
-func peak_wear_in_cell(cx: int, cz: int) -> float:
-	var best := 0.0
-	var bx := cx * Config.WEAR_SCALE
-	var by := cz * Config.WEAR_SCALE
-	for y in range(by, by + Config.WEAR_SCALE):
-		for x in range(bx, bx + Config.WEAR_SCALE):
-			best = maxf(best, wear[y * res + x])
-	return best
-
 
 func speed_multiplier_at(wx: float, wz: float) -> float:
 	return Config.ROAD_SPEED[road_level_at(wx, wz)]

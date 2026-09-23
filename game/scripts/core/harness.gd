@@ -650,7 +650,7 @@ func _fingerprint() -> Dictionary:
 			"build_progress": b.build_progress,
 			"build_cost": b.build_cost.duplicate(),
 			"build_seconds": b.build_seconds, "delivered": b.delivered.duplicate(),
-			"crop_growth": b.crop_growth, "workers": workers, "residents": residents,
+			"crop_growth": b.crop_growth, "tilth": b.tilth, "workers": workers, "residents": residents,
 			"plots": b.all_plots().duplicate(true), "fields": b.field_count(),
 		}
 

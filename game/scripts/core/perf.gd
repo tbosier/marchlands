@@ -25,7 +25,6 @@ static var _frame: Dictionary = {}         # name -> usec accumulated this frame
 static var _history: Dictionary = {}       # name -> Array[float] of frame usec
 static var _counters: Dictionary = {}      # name -> count this frame
 static var _counter_history: Dictionary = {}
-static var _frames := 0
 
 
 static func begin(span: String) -> void:
@@ -55,7 +54,6 @@ static func count(name: String, n: int = 1) -> void:
 static func flush_frame() -> void:
 	if not enabled:
 		return
-	_frames += 1
 	for name in _frame:
 		var series: Array = _history.get(name, [])
 		series.append(_frame[name])
@@ -135,7 +133,6 @@ static func reset() -> void:
 	_history.clear()
 	_counters.clear()
 	_counter_history.clear()
-	_frames = 0
 
 
 ## A one-line-per-span report, slowest first.

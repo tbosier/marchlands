@@ -423,6 +423,18 @@ func pick_ray(origin: Vector3, direction: Vector3,
 	return best
 
 
+## Whether any live stone or iron outcrop still stands in the nav cell under
+## `p`. Outcrops scattered in a cluster can share a 4 m cell, and the nav block
+## is one flag per cell, so mining out one must not clear it while another is
+## still standing there.
+func outcrop_stands_at(p: Vector3) -> bool:
+	for id in _by_cell.get(_world_to_cell(p), []):
+		var rec: NodeRec = records[id]
+		if rec.kind != Kind.TREE and not rec.depleted:
+			return true
+	return false
+
+
 ## Nearest live, unclaimed node of `kind` within `radius` metres of `from`.
 func find_nearest(kind: int, from: Vector3, radius: float,
 				  exclude_reserved: bool = true) -> NodeRec:
@@ -671,6 +683,10 @@ func apply_state(data: Dictionary) -> void:
 		var gone: bool = (bool(entry.get("depleted", false))
 				or (rec.kind == Kind.TREE and rec.amount <= 0.01))
 		_set_depleted(rec, gone)
+		# `_set_depleted` leaves an unchanged node's transform alone, so a part
+		# worked outcrop would come back full size until its next harvest.
+		if not gone and rec.kind != Kind.TREE and rec.max_amount > 0.0:
+			_set_scale(rec, lerpf(0.45, 1.0, rec.amount / rec.max_amount))
 
 	_marked.clear()
 	for id in data.get("marked", []):

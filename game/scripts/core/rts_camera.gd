@@ -101,20 +101,32 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _process(delta: float) -> void:
+	# A middle-button release over the interface is consumed there and never
+	# reaches `_unhandled_input`, which left the view rotating with no button
+	# held.
+	if _rotating and not Input.is_mouse_button_pressed(MOUSE_BUTTON_MIDDLE):
+		_rotating = false
+		Input.set_default_cursor_shape(Input.CURSOR_ARROW)
 	var move := Vector2.ZERO
-	if Input.is_action_pressed("pan_left"):
-		move.x -= 1.0
-	if Input.is_action_pressed("pan_right"):
-		move.x += 1.0
-	if Input.is_action_pressed("pan_forward"):
-		move.y -= 1.0
-	if Input.is_action_pressed("pan_back"):
-		move.y += 1.0
-
-	if Input.is_action_pressed("rotate_left"):
-		yaw += delta * 1.4
-	if Input.is_action_pressed("rotate_right"):
-		yaw -= delta * 1.4
+	# Keys held for something else are not camera keys: Ctrl+S saves rather
+	# than also nudging the view back, and letters typed into a text field (the
+	# World dialog's seed) are not WASD.
+	var typing_in := get_viewport().gui_get_focus_owner()
+	var keys_free := not (typing_in is LineEdit or typing_in is TextEdit) \
+			and not Input.is_key_pressed(KEY_CTRL) and not Input.is_key_pressed(KEY_META)
+	if keys_free:
+		if Input.is_action_pressed("pan_left"):
+			move.x -= 1.0
+		if Input.is_action_pressed("pan_right"):
+			move.x += 1.0
+		if Input.is_action_pressed("pan_forward"):
+			move.y -= 1.0
+		if Input.is_action_pressed("pan_back"):
+			move.y += 1.0
+		if Input.is_action_pressed("rotate_left"):
+			yaw += delta * 1.4
+		if Input.is_action_pressed("rotate_right"):
+			yaw -= delta * 1.4
 
 	if edge_pan_enabled and move == Vector2.ZERO:
 		move = _edge_pan_vector()
@@ -189,7 +201,3 @@ func screen_ray(screen_pos: Vector2) -> Dictionary:
 		"origin": _camera.project_ray_origin(screen_pos),
 		"direction": _camera.project_ray_normal(screen_pos),
 	}
-
-
-func zoom_fraction() -> float:
-	return clampf((distance - MIN_DIST) / (MAX_DIST - MIN_DIST), 0.0, 1.0)

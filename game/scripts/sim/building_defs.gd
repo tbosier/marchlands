@@ -13,9 +13,6 @@ extends RefCounted
 enum Role { SEAT, HOUSING, STORAGE, GATHER_WOOD, GATHER_STONE,
 		GATHER_IRON, WORKSHOP, FARM, GRANARY, MARKET, SUPPLY, BARRACKS, RANCH, SCOUT_LODGE, WELL }
 
-## Roles whose buildings exist to hold goods for the settlement at large.
-const STORAGE_ROLES := [Role.STORAGE, Role.GRANARY, Role.SEAT]
-
 
 class Def:
 	extends RefCounted
@@ -81,9 +78,6 @@ class Def:
 
 	func is_storage() -> bool:
 		return storage > 0.0 and not stores.is_empty()
-
-	func is_public_store() -> bool:
-		return STORAGE_ROLES.has(role)
 
 	func is_producer() -> bool:
 		return produces >= 0 and worker_slots > 0

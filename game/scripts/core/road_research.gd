@@ -110,13 +110,6 @@ func allows_road_upgrade(level: int) -> bool:
 		return false
 	return completed.has("paving" if level == Config.RoadLevel.PAVED else "roadworks")
 
-
-func road_upgrade_reason(level: int) -> String:
-	if allows_road_upgrade(level):
-		return ""
-	return "Research Paving first" if level == Config.RoadLevel.PAVED else "Research Roadworks first"
-
-
 func allows_building_upgrade(type_id: String) -> bool:
 	if type_id == "supply_hut":
 		return completed.has("fortification")
@@ -145,7 +138,10 @@ func restore(data: Variant) -> String:
 		completed.append(tech_id)
 	active = data.get("active", "")
 	remaining_days = float(data.get("remaining_days", 0.0))
-	ranching_known = data.get("ranching_known", completed.has("ranching"))
+	# The same default `validate` accepts: a file from before the flag that is
+	# researching or has researched ranching had already made the discovery.
+	ranching_known = data.get("ranching_known",
+			completed.has("ranching") or active == "ranching")
 	return ""
 
 

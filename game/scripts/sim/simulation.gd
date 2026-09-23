@@ -55,7 +55,6 @@ var cart: Cart = null
 var stat_population := 0
 var stat_homeless := 0
 var stat_idle := 0
-var stat_jobs_open := 0
 ## Work-rate multiplier from having tools in store, 1.0 to 1.0 + the bonus.
 var tools_bonus := 1.0
 
@@ -107,6 +106,9 @@ func setup(world_node: World, asset_registry: AssetRegistry,
 			return
 		alert.emit("Frost has taken %d of food from %s." % [roundi(lost),
 				"a field" if farms <= 1 else "%d fields" % farms], where))
+	production.ground_sown.connect(func(farms: int, where: Vector3):
+		alert.emit("The winter's ploughing is up: %s sown and away."
+				% ("a field" if farms <= 1 else "%d fields" % farms), where))
 	population.setup(stores, jobs, seed_value)
 	population.alert.connect(func(text, pos): alert.emit(text, pos))
 
@@ -115,7 +117,7 @@ func _on_node_depletion_changed(rec) -> void:
 	if rec.kind == ResourceNodes.Kind.TREE:
 		return
 	var c := world.world_to_cell(rec.position)
-	world.nav.set_blocked(c.x, c.y, not rec.depleted)
+	world.nav.set_blocked(c.x, c.y, world.nodes.outcrop_stands_at(rec.position))
 	jobs.clear_refusals()
 
 
@@ -464,6 +466,7 @@ func _tick_citizen(c: Citizen, delta: float) -> void:
 			else: _retire_job(c)
 		JobBoard.Kind.GATHER: _tick_gather(c, delta)
 		JobBoard.Kind.HARVEST: _tick_harvest(c, delta)
+		JobBoard.Kind.TILL: _tick_till(c, delta)
 		JobBoard.Kind.BUILD: _tick_build(c, delta)
 		JobBoard.Kind.FELL: _tick_fell(c, delta)
 		JobBoard.Kind.CRAFT: _tick_craft(c, delta)
@@ -722,10 +725,66 @@ func _tick_gather(c: Citizen, delta: float) -> void:
 	_go_idle(c)
 
 
+## Break ground on one plot of a frozen field, for the spring (design doc
+## NORTH_STAR — "Seasonal farming"; `Production._post_tillage`).
+##
+## Shaped like `_tick_harvest` and deliberately so — walk out to a plot, work a
+## spell, and the spell lands on the farm. The one difference is the one that
+## matters: nothing is carried and nothing is produced. Winter work puts no
+## food into the settlement at all, which is the rule that stops it from
+## softening the frost, and there is no `_deposit` here because there is
+## nothing to deposit.
+##
+## The plot comes from the job's own id rather than from `_rng`. Two reasons:
+## it spreads the hands across the field instead of stacking them on whichever
+## strip a roll picked, and it keeps the choice out of the random stream, which
+## the save fingerprint is taken over.
+func _tick_till(c: Citizen, delta: float) -> void:
+	var job := c.job
+	var farm: Building = buildings_by_id.get(job.dest_id)
+	# The work stops the moment its reason does: the year turned and the field
+	# woke, the hands came off the books and the ground went back to grass, or
+	# somebody else finished the last of it while this one was walking.
+	if farm == null or farm.field_count() == 0 or not farm.dormant \
+			or farm.tilth >= 1.0:
+		_retire_job(c)
+		return
+
+	if c.state != Citizen.State.WORKING:
+		# Chosen once and kept on the job. Re-deciding it every tick would walk the
+		# ploughman towards a different strip every frame.
+		if job.target == Vector3.INF:
+			job.target = farm.fields[job.id % farm.field_count()]
+		# Sleeping replaces the outbound route with the walk home, so the goal
+		# is restored before arrival is tested — exactly as gathering does.
+		c.set_goal(job.target)
+		c.advance(delta, world)
+		if not c.has_arrived():
+			return
+		c.begin_work(Config.TILLAGE_SECONDS / tools_bonus)
+		c.task_label = "breaking ground"
+		c.face_towards(farm.global_position)
+		return
+
+	if not c.work_tick(delta):
+		c.update_animation(delta, 0.0)
+		return
+	farm.break_ground(Config.TILLAGE_STEP)
+	jobs.complete(job)
+	_go_idle(c)
+
+
 func _tick_harvest(c: Citizen, delta: float) -> void:
 	var job := c.job
 	var farm: Building = buildings_by_id.get(job.dest_id)
 	if farm == null or farm.field_count() == 0:
+		_retire_job(c)
+		return
+	# Nothing left standing to cut: a hard frost took it, or the other reapers
+	# already did. `harvest_load` pays 60% of a load even at zero growth, so
+	# without this a frozen field still sent grain to the granary. Not
+	# `dormant`: a mild winter leaves its crop standing, and that is reaped.
+	if c.carrying_amount <= 0.0 and farm.crop_growth <= 0.0:
 		_retire_job(c)
 		return
 
@@ -1112,6 +1171,12 @@ func _tick_meal(c: Citizen, delta: float) -> void:
 			c.drop()
 		c.take_meal(day)
 		_end_meal(c)
+		return
+	# The route to the counter or the door failed. `has_arrived` never turns
+	# true on an unreachable goal and re-setting the same goal is a no-op, so
+	# without this the errand held them for good: no work, no sleep, no retry.
+	if c.unreachable:
+		_no_food(c, delta)
 		return
 	var home := _meal_home(c)
 	var has_home := home != null
@@ -1634,6 +1699,9 @@ func upgrade(b: Building) -> Dictionary:
 	# then moved. Both are inside this window.
 	resync_nav_after_flatten(b.global_position, plan.x * 0.5 + 1.5,
 			plan.y * 0.5 + 1.5)
+	# The footprint changed, so a job somebody refused as unreachable may not
+	# be any more — the same as after placing or pulling down a building.
+	jobs.clear_refusals()
 	_invalidate_entrances(b)
 	workforce.mark_all_dirty()
 	alert.emit("%s is being made into a %s" % [was, next.display_name],
@@ -1925,6 +1993,11 @@ func _advance_civilian_conditions(delta: float) -> void:
 			var home: Building = buildings_by_id.get(c.home_id)
 			detach_for_service(c)
 			if home != null: home.residents.erase(c.id)
+			# What they were carrying is recovered to the stores, as a stray
+			# load would be, rather than freed with them. `_retire_job` has
+			# already given back the room it had promised at the destination.
+			if c.carrying_amount > 0.0 and c.carrying_res >= 0:
+				_spill_into_stores(c.carrying_res, c.drop(), c.global_position)
 			alert.emit("%s died." % c.given_name,c.global_position)
 			c.queue_free()
 
@@ -2112,5 +2185,4 @@ func _update_stats() -> void:
 		if c.job == null and c.state != Citizen.State.SLEEPING \
 				and c.state != Citizen.State.EATING:
 			stat_idle += 1
-	stat_jobs_open = jobs.open_jobs()
 	stats_changed.emit()

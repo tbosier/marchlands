@@ -270,11 +270,6 @@ func has_arrived() -> bool:
 	return Vector2(global_position.x - _arrival_goal.x,
 				   global_position.z - _arrival_goal.z).length() <= Config.ARRIVE_RADIUS
 
-
-func distance_to_goal() -> float:
-	return global_position.distance_to(_goal)
-
-
 func walking_speed() -> float:
 	var carry_penalty := 1.0 - 0.14 * clampf(
 			(carrying_amount + water_bucket) / float(Config.CARRY_CAPACITY), 0.0, 1.0)

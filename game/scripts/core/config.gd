@@ -125,10 +125,6 @@ const WEAR_DECAY_PER_DAY := 0.10
 const WEAR_BRUSH_PEDESTRIAN := 1.3
 const WEAR_BRUSH_CART := 2.4
 
-## Cost, in resources, to have a route deliberately upgraded one level.
-const UPGRADE_COST_TIMBER := 8
-const UPGRADE_COST_STONE := 12
-
 # --- Pathfinding -----------------------------------------------------------
 
 ## How much dearer it is to cross worked ground than open grass. High enough
@@ -182,6 +178,100 @@ const FARM_HARVEST_TRIPS := 16
 const FARM_HARVEST_AT := 0.55
 const FARM_INITIAL_GROWTH := 0.45
 const START_CITIZENS := 20
+
+## Winter fieldwork (design/NORTH_STAR.md — "Seasonal farming").
+##
+## Winter stops the fields. It must not stop the settlement, and before these
+## existed it did: measured on a real march at day 92, twenty-two people stood
+## idle with nothing on the board at all, because every other job the economy
+## posts either makes more of a good the stores are already full of or carries
+## a good nobody is producing. Breaking the ground for the spring sowing is the
+## one piece of work that exists only while the fields are frozen.
+##
+## The priority is the load-bearing number here. It sits below every productive
+## job on the board — haul 50, gather 56, harvest 58, craft 60, fell 62, build
+## 68, construction haul 72 — so tillage can only ever take hands that had
+## nothing else to do. Winter work must never outbid a building site; the whole
+## objection to "give the idle something to do" is that it becomes busywork the
+## moment it competes with work that matters.
+##
+## Far below rather than just below, because the board scores priority against
+## travel (`JobBoard.best_for` charges 0.28 a metre). At 26 a haul had to be
+## within 86 m to outbid tillage at a worker's feet, which is inside the size of
+## an ordinary settlement; at 12 the margin is 136 m for the cheapest haul and
+## 200 m for a building site, which puts every job in a march beyond reach of
+## being undercut by ploughing.
+const TILLAGE_PRIORITY := 12.0
+
+## In-game seconds of work in one spell at a plot, before the tools bonus.
+##
+## Longer than reaping (which is CARRY_CAPACITY * WORK_TICKS_PER_UNIT * 0.8,
+## about 11 s) because breaking frozen ground is the heavier job. Kept well
+## under a third of a day on purpose: a spell interrupted by dinner or by
+## nightfall is abandoned along with the job, so a spell that routinely
+## outlasted a working stretch would never finish at all.
+const TILLAGE_SECONDS := 26.0
+
+## Spells of work that bring one farm's field from bare to fully broken.
+##
+## Sized against the season rather than picked. At forty, two farms and thirty
+## idle people finished the whole winter's ground in four days and the other
+## eight were as empty as they had been before any of this existed. At a hundred
+## and twenty the work lasts roughly the winter for a march with hands to spare,
+## and a march that is short of hands — or that starts late — comes out of it
+## with ground only part broken, which the spring sowing then pays out in
+## proportion. That is the shape this wants: the season's work is finite, and
+## whether a settlement finishes it is a real question about how many people it
+## has and what else it asked them to do.
+const TILLAGE_SPELLS := 120
+const TILLAGE_STEP := 1.0 / float(TILLAGE_SPELLS)
+
+## How many hands one farm's ground will take at once.
+##
+## Twice the farm's own three slots, deliberately. The point of winter work is
+## that it is open to anybody idle — the farmhands are not a separate caste and
+## the field does not care who turns it — and capping at the farm's staffing
+## would have left most of a march standing about anyway. It is capped at all
+## only so tillage cannot flood the board: every open job is scanned by every
+## job-seeking citizen (`JobBoard.best_for`), so an uncapped queue would be a
+## per-citizen cost paid by the whole settlement.
+const TILLAGE_HANDS := 6
+
+## And a ceiling on open ploughing across the whole march, because the per-farm
+## cap above multiplies by the number of farms in the one season when nearly
+## everybody is looking for work. Four farms' worth: enough that no realistic
+## settlement is rationed, small enough that `JobBoard.best_for` never walks a
+## winter-sized board.
+const TILLAGE_JOBS_MAX := 24
+
+## What ground fully broken over the winter is worth on the first morning of
+## spring: exactly the sowing a newly founded farm lays down, and not a grain
+## more. Must stay below FARM_HARVEST_AT — see `Building.sow_prepared_ground`.
+const TILLAGE_SOWING := FARM_INITIAL_GROWTH
+
+## Seed corn: food a farm's broken ground swallows when it is sown, at full
+## tilth, and the state of the granaries below which a march will not spend it.
+##
+## This pair is what keeps winter work from being a way out of the frost, and it
+## is not decoration — it was added because the existing frost fixtures caught
+## the feature without it. `_harvest_decides_the_winter` compares the same
+## neglected march through a hard winter and through a mild one; with the spring
+## sowing free, the hard-frost arm gained more from the winter than the mild arm
+## did (final food 67 against 65, where the baseline was 35 against 47), because
+## it was the arm whose fields the frost had left bare and therefore worth
+## preparing. A rule that rewards losing the harvest is the exact failure the
+## season exists to prevent.
+##
+## With seed, the march that ate its way through the winter has nothing to sow
+## and the ground it broke stands empty — which is both the historical answer
+## and the honest one. A march that brought its harvest in sows and gets its
+## early spring; a march scraping its granaries eats the seed instead.
+##
+## The floor is in days of eating rather than a flat quantity, because twenty
+## people and two hundred do not mean the same thing by "sixty food in store".
+const TILLAGE_SEED_FOOD := 24.0
+const TILLAGE_SEED_MIN_DAYS := 6.0
+
 const WORK_TICKS_PER_UNIT := 1.15   # in-game seconds to gather one unit
 const HUNGER_PER_DAY := 1.0         # food eaten per citizen per day
 

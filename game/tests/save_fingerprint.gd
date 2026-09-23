@@ -83,6 +83,7 @@ func _run() -> void:
 	warehouse.build_progress = 0.125
 	warehouse.delivered[Config.Res.TIMBER] = 0.375
 	farm.crop_growth = 0.375
+	farm.tilth = 0.625
 	farm.health = 175.125
 	farm.fire = 0.125
 	# Each amount is below the Float32 cache's rounding precision next to the
@@ -188,6 +189,10 @@ func _run() -> void:
 	_detects(before, "buildings.%d.crop_growth" % farm.id,
 			"detects lost crop growth")
 	farm.crop_growth = 0.375
+	farm.tilth = 0.0
+	_detects(before, "buildings.%d.tilth" % farm.id,
+			"detects lost winter ploughing")
+	farm.tilth = 0.625
 	for property in ["health", "fire", "market_stock_target"]:
 		var original: Variant = farm.get(property)
 		farm.set(property, 40 if property == "market_stock_target" else 0.0)

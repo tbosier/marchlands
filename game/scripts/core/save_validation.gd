@@ -314,7 +314,7 @@ static func _building(b: Variant, registry: AssetRegistry, world_size: float = C
 		return error
 	error = _fields(b, {"asset_id": TYPE_STRING, "build_cost": TYPE_DICTIONARY,
 		"build_seconds": TYPE_FLOAT, "larder": TYPE_FLOAT, "crop_growth": TYPE_FLOAT,
-		"plots": TYPE_ARRAY, "market_stock_target": TYPE_INT, "health": TYPE_FLOAT, "fire": TYPE_FLOAT}, "building", true)
+		"tilth": TYPE_FLOAT, "plots": TYPE_ARRAY, "market_stock_target": TYPE_INT, "health": TYPE_FLOAT, "fire": TYPE_FLOAT}, "building", true)
 	if error != "":
 		return error
 	if b.id < 1 or b.id > MAX_ENTITY_ID or not BuildingDefs.has(b.type_id):
@@ -339,6 +339,7 @@ static func _building(b: Variant, registry: AssetRegistry, world_size: float = C
 		return "building position is outside the world or nonfinite"
 	if b.build_progress < 0 or b.build_progress > 1 \
 			or b.get("crop_growth", 0.0) < 0 or b.get("crop_growth", 0.0) > 1 \
+			or b.get("tilth", 0.0) < 0 or b.get("tilth", 0.0) > 1 \
 			or b.get("larder", 0.0) < 0 or b.get("build_seconds", def.build_time) <= 0:
 		return "invalid construction, crop, or larder state"
 	if b.inventory.size() != Config.RES_COUNT:

@@ -122,6 +122,26 @@ var crop_growth := 0.0
 ## with no migration path, so every existing file would have stopped loading.
 var dormant := false
 
+## How far this farm's ground has been broken for the coming spring, 0..1.
+##
+## Winter work has to be remembered between the day it is done and the morning
+## it pays off, and it deliberately does NOT ride on `crop_growth`. That was
+## tried first and it cannot be made to work: `Production._turn_the_year` runs
+## `lose_standing_crop()` over every farm on the first tick after a load, so a
+## march saved in a hard winter would have come back with the whole winter's
+## ploughing destroyed. The sweep cannot be taught to spare it either — it has
+## no way to tell broken ground from a crop that dodged the frost by being sown
+## a day late, because `dormant` is not saved and every farm comes back awake.
+##
+## Restored by `apply_state` with a default of zero, so a file written before
+## winter work existed loads as unbroken ground and nothing has to migrate.
+##
+## Written by `SaveGame._capture_building`. `Production._turn_the_year`'s
+## start-of-winter reset is gated on `first_turn` so that a winter save keeps
+## the ploughing it carried; spring sowing clears it, so a spring save never
+## carries any to sow twice.
+var tilth := 0.0
+
 var _height := 4.0
 var _visual: Node3D
 var _blueprint: Node3D
@@ -327,33 +347,17 @@ func tick_fire(delta: float) -> bool:
 
 # --- Fire spread ------------------------------------------------------------
 
-## The clear ground between this building and another, measured footprint to
-## footprint rather than centre to centre.
+## The clear ground between two buildings, measured footprint to footprint
+## rather than centre to centre; overlapping footprints return 0.
 ##
 ## Centres say nothing about whether two walls are close enough for one thatch
-## to light the other. A grain warehouse is 16 m deep and a cottage 10.4 m, so
-## their centres stand 13.2 m apart with the two walls already touching, while
-## two cottages 13.2 m apart have 2.8 m of lane between them. (The figure here
-## used to read 12 m against a 16 m building, which is 1.2 m inside the walls
-## rather than against them; the point it was making is unchanged.) Overlapping
-## footprints return 0.
-##
-## Both footprints are the world-axis ones from `plan_footprint`, which is the
-## same ground `can_place` refuses to build on and `NavGrid` refuses to walk
-## through. For a quarter turn that is the building's real outline; at 45° it is
-## the box around it, so fire will cross a diagonal pair whose walls are further
-## apart than their boxes. Deliberately left agreeing with the rest of the game:
-## that ground is already treated as occupied everywhere else, a player cannot
-## put anything in it, and the error only ever makes fire reach further than the
-## walls suggest, never shorter.
-func footprint_gap(other: Building) -> float:
-	return footprint_gap_between(position, plan_footprint(),
-			other.position, other.plan_footprint())
-
-
-## The same measurement for a caller that already holds both world-axis
-## footprints — the spread scan does, and recomputing them per candidate put two
-## pairs of trigonometry in its innermost loop.
+## to light the other: a grain warehouse and a cottage 13.2 m apart already
+## touch, while two cottages at that distance have 2.8 m of lane between them.
+## The footprints are the world-axis ones from `plan_footprint`, the same ground
+## `can_place` and `NavGrid` treat as occupied; at 45° that is the box around
+## the building, which only ever makes fire reach further, never shorter.
+## Takes both footprints so the spread scan, which already holds them, keeps
+## trigonometry out of its innermost loop.
 static func footprint_gap_between(a: Vector3, a_plan: Vector2,
 		b: Vector3, b_plan: Vector2) -> float:
 	var dx: float = absf(a.x - b.x) - (a_plan.x + b_plan.x) * 0.5
@@ -768,6 +772,10 @@ func apply_state(entry: Dictionary) -> void:
 	build_cost = (entry.get("build_cost", build_cost) as Dictionary).duplicate()
 	build_seconds = float(entry.get("build_seconds", build_seconds))
 	crop_growth = float(entry.get("crop_growth", 0.0))
+	# Absent from every file written before winter work existed. The default is
+	# the honest one — a march whose file says nothing of ploughing has not
+	# ploughed.
+	tilth = float(entry.get("tilth", 0.0))
 	larder = float(entry.get("larder", 0.0))
 	market_stock_target = int(entry.get("market_stock_target", 80))
 	health = float(entry.get("health", max_health()))
@@ -868,12 +876,6 @@ func take_meal() -> bool:
 		return true
 	return false
 
-
-## Whether this household wants somebody to fetch food home.
-func larder_is_low() -> bool:
-	return def.houses > 0 and larder < larder_capacity() * 0.5
-
-
 func total_stored() -> float:
 	var total := 0.0
 	for v in inventory:
@@ -920,11 +922,6 @@ func plan_footprint() -> Vector2:
 	var sn: float = absf(sin(yaw))
 	return Vector2(footprint.x * c + footprint.y * sn,
 			footprint.x * sn + footprint.y * c)
-
-
-func has_worker_space() -> bool:
-	return workers.size() < def.worker_slots
-
 
 func has_house_space() -> bool:
 	return residents.size() < def.houses
@@ -1307,6 +1304,56 @@ func lose_standing_crop() -> float:
 	var lost := standing_crop_food()
 	set_crop_growth(0.0)
 	return lost
+
+
+## Break a little more of this farm's ground for the spring. Returns what was
+## actually gained, which is zero once the field is fully prepared.
+##
+## A separate quantity from `crop_growth`, not a back door into it. That setter
+## refuses every increase while the field is dormant — the rule that keeps a
+## farm raised in January from standing in half-ripe wheat — and this does not
+## go near it. Nothing grows in a frozen field. The ground is simply readier
+## than it was, and it stays readier until something sows it.
+func break_ground(step: float) -> float:
+	if not def.is_farm() or _all_plots.is_empty():
+		return 0.0
+	var target := clampf(tilth + maxf(0.0, step), 0.0, 1.0)
+	# `TILLAGE_STEP` summed 120 times lands a hair under 1.0, which would post
+	# a 121st spell for ground that is already finished.
+	if is_equal_approx(target, 1.0):
+		target = 1.0
+	var gained := target - tilth
+	tilth = target
+	return gained
+
+
+## Sow ground broken over the winter, and return the growth it was worth.
+##
+## Called once, on the tick the year turns into spring, after the field has
+## been woken — `set_crop_growth` would refuse this while `dormant` still
+## stood, and refuse it silently.
+##
+## The sowing is capped at what a newly founded farm lays down, and that cap is
+## below `Config.FARM_HARVEST_AT` on purpose. A field that came through the
+## winter prepared is *ready*, not *ripe*: `Production._post_gathering` will not
+## post a reaper for it until it has grown, so no amount of winter labour can
+## put a single grain in a granary on the first morning of spring. That is what
+## keeps this from being a way to buy back the crop the frost took.
+##
+## It only ever raises the crop. A mild winter leaves the standing field alone,
+## and can leave it standing at more than a sowing is worth; ploughing that
+## back in would have made winter work actively destructive in the one year it
+## is easiest to do.
+func sow_prepared_ground() -> float:
+	if not def.is_farm() or tilth <= 0.0:
+		tilth = 0.0
+		return 0.0
+	var sown := Config.TILLAGE_SOWING * tilth
+	tilth = 0.0
+	if sown <= crop_growth:
+		return 0.0
+	set_crop_growth(sown)
+	return sown
 
 
 func all_plots() -> Array[Vector3]:

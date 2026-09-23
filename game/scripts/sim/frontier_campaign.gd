@@ -114,7 +114,6 @@ var _review := 0.0
 var _recruit_at := 0.0
 var _workers: Array[Citizen] = []
 var _worker_leg: Dictionary = {}
-var _worker_wait: Dictionary = {}
 var _worker_farm: Dictionary = {} # grower id -> the farm building he works
 ## The town's two review clocks, counted down by the delta actually simulated
 ## rather than read off an absolute `_time`, exactly as `_review` is. A review
@@ -247,6 +246,21 @@ func generate_rival() -> void:
 ## One more resident put to work on `farm`. The caller syncs the field and its
 ## protection afterwards, because staffing several farms at once should redraw
 ## each of them once rather than once per hand.
+## Take a grower out of the town for good — conscripted, or dead — and off the
+## farm he actually worked, which is not necessarily the town's first one.
+func remove_grower(worker: Citizen) -> void:
+	var farm: Building = enemy_buildings.get(_worker_farm.get(worker.id, -1))
+	_workers.erase(worker)
+	_worker_leg.erase(worker.id)
+	_worker_farm.erase(worker.id)
+	town_population = maxi(0, town_population - 1)
+	if farm != null:
+		farm.workers.erase(worker.id)
+		farm.sync_fields_to_workers()
+		_protect_farm(farm, true, false)
+	worker.queue_free()
+
+
 func _add_grower(farm: Building) -> Citizen:
 	var worker := Citizen.new()
 	add_child(worker)
@@ -257,7 +271,6 @@ func _add_grower(farm: Building) -> Citizen:
 	worker.profession = "Ashcombe grower"
 	_workers.append(worker)
 	_worker_leg[worker.id] = 0
-	_worker_wait[worker.id] = 0.0
 	_worker_farm[worker.id] = farm.id
 	farm.workers.append(worker.id)
 	return worker
@@ -1201,6 +1214,7 @@ func _unregister_unit(unit: Soldier) -> void:
 	# The one choke point every death, discharge and conquest already passes
 	# through, so a company can never hold an id that `units` no longer does.
 	_leave_company(unit.id)
+	_guard_contacts.erase(unit.id)
 	unit.target_id = -1
 	unit.target_kind = ""
 	for other in units.values():
@@ -1315,17 +1329,7 @@ func _tick_town(delta: float) -> void:
 			recruit.apply_damage(100.0-worker.service_health)
 			recruit.position = worker.position
 			recruit._wear_anchor = recruit.position
-			var farm: Building = enemy_buildings.get(_worker_farm.get(worker.id,-1))
-			_workers.erase(worker)
-			_worker_leg.erase(worker.id)
-			_worker_wait.erase(worker.id)
-			_worker_farm.erase(worker.id)
-			town_population = maxi(0, town_population - 1)
-			if farm != null:
-				farm.workers.erase(worker.id)
-				farm.sync_fields_to_workers()
-				_protect_farm(farm, true, false)
-			worker.queue_free()
+			remove_grower(worker)
 
 
 ## The town eats out of the keep and then out of its granaries. The granary the
@@ -1845,9 +1849,9 @@ func _reset() -> void:
 	_civilian_ids.clear()
 	_workers.clear()
 	_worker_leg.clear()
-	_worker_wait.clear()
 	_worker_farm.clear()
 	_farms.clear()
+	_granaries.clear()
 	_keep = null
 	_ruins.clear()
 	_impacts.clear()

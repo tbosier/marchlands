@@ -203,9 +203,404 @@ func _clock_and_load() -> void:
 	await process_frame
 
 
+# ---------------------------------------------------------------------------
+# Developer tools
+#
+# The tools exist to reach situations ordinary play cannot, so nothing else in
+# the suite can reach them either. Three things are checked of each one: that it
+# does what its panel row says, that a save taken immediately afterwards
+# validates and loads back, and — collectively — that not one of them touches the
+# world while dev mode is off.
+# ---------------------------------------------------------------------------
+
+## Everything a developer command can reach, in one comparable value.
+##
+## The guard check compares this before and after firing every command. It is
+## wide on purpose: a fingerprint that counted only citizens would have been
+## satisfied while the frost, the fire, the war and the wound all fired.
+func _dev_fingerprint(game: SeededGame) -> Dictionary:
+	var sim := game.sim
+	var poison := 0.0
+	for well in sim.water.wells.values():
+		poison += float(well.poison)
+	var fire := 0.0
+	var sites := 0
+	for b in sim.buildings:
+		fire += b.fire
+		if b.under_construction:
+			sites += 1
+	var condition := 0.0
+	for u in sim.campaign.units.values():
+		condition += u.health + u.workability()
+	return {
+		"citizens": sim.citizens.size(),
+		"buildings": sim.buildings.size(),
+		"sites": sites,
+		"inventory": sim.keep.inventory.duplicate(),
+		"units": sim.campaign.units.size(),
+		"condition": condition,
+		"scouts": sim.scouting.scouts.size(),
+		"sabotage": sim.water.poison_jobs.size(),
+		"purges": sim.water.carriers.size(),
+		"at_war": sim.campaign.at_war,
+		"day": sim.day,
+		"elapsed": game.clock.elapsed_days,
+		"poison": poison,
+		"fire": fire,
+		"nav_overlay": game.show_nav_overlay,
+	}
+
+
+## A save taken right now must validate and load back into a playable march.
+##
+## Run after every tool, because two of them were wrong the first time in exactly
+## this way: `save_validation.gd` pins a ready scout's resident into Scouting's
+## trained list, and pins a sabotage kit to the mission's phase, and neither
+## produces a symptom until the file is written.
+func _dev_reload(game: SeededGame, label: String) -> void:
+	var saved := SaveGame.capture(game)
+	var invalid := SaveGame.validate(saved, game.registry)
+	_check(invalid == "", "the save after '%s' is valid: %s" % [label, invalid])
+	if invalid != "":
+		return
+	var error := game.restore_from(saved)
+	_check(error == "" and game.sim.keep != null,
+			"the save after '%s' loads back: %s" % [label, error])
+
+
+func _dev_rival_well(game: SeededGame) -> Building:
+	for b in game.sim.campaign.enemy_buildings.values():
+		if b.type_id == "well" and not b.under_construction:
+			return b
+	return null
+
+
+func _dev_own_well(game: SeededGame) -> Building:
+	for b in game.sim.buildings:
+		if b.type_id == "well" and not b.under_construction:
+			return b
+	return null
+
+
+## Set by each developer phase as its last act. A phase that dies half way
+## through reports nothing at all for the checks it never reached, and a suite
+## that only counts failures calls that a pass — this project has shipped
+## exactly that. `_run` asserts both phases got to the end.
+var _dev_phases_finished := 0
+
+
+func _developer_tools() -> void:
+	var game := _new_game(42)
+	game.dev_mode = true
+
+	_check(game._dev_command("nonexistent_tool") == "unknown",
+			"a command name nothing dispatches is reported rather than swallowed")
+	_check(game._dev_keys.size() == DevOverlay.TOOLS.size(),
+			"every listed developer tool is bound to a parseable key")
+	for row in DevOverlay.TOOLS:
+		var bound := false
+		for code in game._dev_keys:
+			if game._dev_keys[code][0] == row[0]:
+				bound = true
+		if not bound:
+			_check(false, "developer tool '%s' has no key" % row[0])
+
+	# --- a trained scout ---------------------------------------------------
+	var scouts: int = game.sim.scouting.scouts.size()
+	_check(game._dev_command("scout") == "", "the scout tool runs")
+	var rows: Array = game.sim.scouting.info().scouts
+	var fresh: Dictionary = rows[rows.size() - 1] if not rows.is_empty() else {}
+	_check(game.sim.scouting.scouts.size() == scouts + 1
+			and not fresh.get("training", true) and fresh.get("can_explore", false)
+			and fresh.get("trained", false) and game.selected_scout == fresh.get("id", -1),
+			"the scout tool leaves a trained, provisioned scout selected and ready")
+	# Unreachability, stated rather than assumed: this scout is standing at home
+	# and cannot be given the sabotage order, which is the whole reason the
+	# saboteur tool has to put one at the rival's well itself.
+	_check(not game.sim.water.poison_quote(int(fresh.get("id", -1))).can_poison,
+			"a scout at the lodge cannot be ordered to poison anything")
+	_dev_reload(game, "scout")
+
+	# --- a scout at the rival well with a kit ------------------------------
+	var rival_well := _dev_rival_well(game)
+	_check(rival_well != null, "the rival town has a well to sabotage")
+	_check(game._dev_command("saboteur") == "", "the saboteur tool runs")
+	var jobs: Array = game.sim.water.poison_jobs.keys()
+	_check(jobs.size() == 1, "the saboteur tool places exactly one sabotage mission")
+	if jobs.size() == 1 and rival_well != null:
+		var job: Dictionary = game.sim.water.poison_jobs[jobs[0]]
+		var saboteur: Scout = game.sim.scouting.scouts[job.scout_id]
+		var reach := saboteur.person.global_position.distance_to(rival_well.global_position)
+		_check(job.state == "approach" and job.kit == 1.0 and not job.reserved
+				and job.target_id == rival_well.id and reach < 60.0,
+				"the saboteur stands at the rival well with a kit already paid for")
+	_dev_reload(game, "saboteur")
+
+	# --- a friendly soldier, then a wound, then a kill ---------------------
+	var friendlies: int = game.sim.campaign.friendly_ids().size()
+	_check(game._dev_command("soldier") == "", "the soldier tool runs")
+	_check(game.sim.campaign.friendly_ids().size() == friendlies + 1
+			and game.selected_units.size() == 1,
+			"the soldier tool recruits one soldier and selects him")
+	_dev_reload(game, "soldier")
+	# restore_from clears the selection, so the soldier is picked up again.
+	var soldier_id: int = game.sim.campaign.friendly_ids().max()
+	game.selected_units.assign([soldier_id])
+	var soldier: Soldier = game.sim.campaign.units[soldier_id]
+	_check(soldier.can_strike() and is_equal_approx(soldier.workability(), 1.0),
+			"the recruited soldier starts whole")
+	_check(game._dev_command("wound") == "", "the wound tool runs")
+	# The panel opens on arm_r / maim, and `soldier_body.gd` severs a limb at 75
+	# of accumulated cut. One arm gone is workability 0.45 exactly, which is the
+	# rule the tool exists to make visible.
+	_check(not soldier.can_strike() and is_equal_approx(soldier.workability(), 0.45),
+			"the wound tool takes the sword arm off at the panel's default severity")
+	_dev_reload(game, "wound")
+	soldier_id = game.sim.campaign.friendly_ids().max()
+	soldier = game.sim.campaign.units[soldier_id]
+	_check(is_equal_approx(soldier.workability(), 0.45),
+			"a severed arm survives the save it was given in")
+	game.selected_units.assign([soldier_id])
+	# The dropdown is read at the moment the command fires, not when it moved.
+	game.dev._wound_location.select(DevOverlay.WOUND_LOCATIONS.find("leg_r"))
+	var mobility := soldier.mobility_scale()
+	_check(game._dev_command("wound") == ""
+			and soldier.mobility_scale() < mobility,
+			"the panel's location dropdown decides where the next wound lands")
+	game.dev._wound_location.select(DevOverlay.WOUND_LOCATIONS.find("arm_r"))
+	_dev_reload(game, "a second wound")
+
+	# The kill gets a soldier of its own. Wounding the same man twice can bleed
+	# him out, and a corpse the wound made would have satisfied the kill check
+	# without the kill tool doing anything at all.
+	_check(game._dev_command("soldier") == "", "the soldier tool runs a second time")
+	var doomed: int = game.selected_units[0] if not game.selected_units.is_empty() else -1
+	var victim: Soldier = game.sim.campaign.units.get(doomed)
+	_check(victim != null and victim.health > 0.0,
+			"the second recruit is alive before the kill")
+	_check(game._dev_command("kill") == "", "the kill tool runs")
+	_check(victim != null and victim.health <= 0.0 and game.selected_units.is_empty(),
+			"the kill tool kills the selection and drops it from the inspector")
+	game.sim.campaign.tick(0.1)
+	_check(not game.sim.campaign.units.has(doomed),
+			"the killed soldier leaves the roster through the campaign's own tick")
+	_dev_reload(game, "kill")
+
+	# --- a rival soldier, and war -----------------------------------------
+	game.sim.campaign.at_war = false
+	var enemies := 0
+	for u in game.sim.campaign.units.values():
+		if u.faction == 1:
+			enemies += 1
+	_check(game._dev_command("rival") == "", "the rival tool runs")
+	var arrived := 0
+	var at_gate := false
+	for u in game.sim.campaign.units.values():
+		if u.faction != 1:
+			continue
+		arrived += 1
+		if u.global_position.distance_to(game.sim.keep.global_position) < 60.0:
+			at_gate = true
+	_check(arrived == enemies + 1 and at_gate and game.sim.campaign.at_war,
+			"the rival tool puts one hostile soldier at the keep and starts the war")
+	_dev_reload(game, "rival")
+	game.sim.campaign.at_war = false
+	_check(game._dev_command("war") == "" and game.sim.campaign.at_war,
+			"the war tool declares war on its own")
+	_dev_reload(game, "war")
+
+	# --- poisoning one of our own wells -----------------------------------
+	var own_well := _dev_own_well(game)
+	_check(own_well != null, "the opening settlement has a well of its own")
+	if own_well != null:
+		# The purge is unreachable before the tool fires, which is the claim.
+		_check(game.sim.water.request_purge(own_well.id) != "",
+				"a clean well cannot be ordered purged")
+		game.selected_building = own_well
+		_check(game._dev_command("poison") == "", "the poison tool runs")
+		var info: Dictionary = game.sim.water.well_info(own_well.id)
+		_check(info.get("poisoned", false)
+				and is_equal_approx(info.poison_days, WaterSystem.POISON_DAYS),
+				"the poison tool contaminates our own well for the full four days")
+		_check(game.sim.water.request_purge(own_well.id) == "",
+				"a poisoned well can now be ordered purged, which nothing in play could reach")
+	_dev_reload(game, "poison")
+
+	# --- fire --------------------------------------------------------------
+	var houses: Array = game.sim.buildings.filter(func(b): return b.type_id == "house")
+	_check(not houses.is_empty(), "the opening settlement has a house to burn")
+	if not houses.is_empty():
+		var house: Building = houses[0]
+		game._clear_selection()
+		game.selected_building = house
+		_check(game._dev_command("ignite") == "", "the ignite tool runs")
+		# Strong enough to spread rather than gutter out: a blaze loses
+		# FIRE_DECAY per second to nothing in particular, and the spread rules
+		# are written against a firepot's 0.55.
+		_check(house.fire > Building.FIRE_DECAY * 10.0 and house.fire <= 1.0,
+				"the ignite tool leaves a blaze at firepot strength")
+	_dev_reload(game, "ignite")
+
+	# --- the calendar ------------------------------------------------------
+	var season := Clock.season_index_at(game.sim.day)
+	_check(game._dev_command("season") == "", "the season tool runs")
+	_check(Clock.season_index_at(game.sim.day) == (season + 1) % Clock.SEASONS.size()
+			and is_equal_approx(game.clock.elapsed_days, game.sim.day)
+			and is_equal_approx(game.sim.day_marker(), game.sim.day),
+			"the season jump moves the calendar, the clock and the billing marker together")
+	_dev_reload(game, "season")
+	_check(game._dev_command("frost") == "", "the frost tool runs")
+	var to_frost := Clock.days_to_frost(game.sim.day)
+	_check(to_frost > 0.0 and to_frost < 1.0
+			and Clock.frost_is_hard_at(game.sim.day + to_frost)
+			and Clock.season_index_at(game.sim.day) == Clock.AUTUMN,
+			"the frost jump lands in late autumn, hours before a frost that bites")
+	var stood_at := game.sim.day
+	_check(game._dev_command("frost") == "" and game.sim.day == stood_at,
+			"a second frost jump inside the window leaves the calendar alone")
+	_dev_reload(game, "frost")
+	# And the frost it jumped to actually falls on the crop.
+	var farm := _build(game, "farm", game.world.centre() + Vector3(0, 0, 60))
+	if farm != null:
+		farm.set_crop_growth(1.0)
+		# Clamped. The window is meant to be a fraction of a day; a jump that
+		# landed somewhere else entirely should make the check below fail in a
+		# second rather than quietly simulate the rest of the year.
+		var steps := mini(2700, int((Clock.days_to_frost(game.sim.day) + 0.05)
+				* Config.DAY_LENGTH / Config.MAX_SIM_STEP))
+		for _i in steps:
+			game.sim.tick(Config.MAX_SIM_STEP)
+			game.clock.elapsed_days += Config.MAX_SIM_STEP / Config.DAY_LENGTH
+		_check(Clock.season_index_at(game.sim.day) == Clock.WINTER
+				and farm.dormant and farm.crop_growth == 0.0,
+				"the frost the tool jumped to arrives and takes the standing crop")
+	_dev_reload(game, "frost aftermath")
+
+	# The new tools leave no stranded job, reservation or haul behind them. Run
+	# here rather than at the end of the phase: the two oldest tools break these
+	# invariants by design — 300 of everything overflows the keep's storage and
+	# ten settlers outrun the settlement's roofs — and always have.
+	_invariants(game, "dev tools")
+
+	# --- the pre-existing four, still working ------------------------------
+	var population := game.sim.citizens.size()
+	_check(game._dev_command("settlers") == "" and game.sim.citizens.size() == population + 10,
+			"the settler tool still conjures ten residents")
+	var stored := game.sim.keep.inventory.duplicate()
+	_check(game._dev_command("grant") == "", "the grant tool runs")
+	var granted := true
+	for res in Config.RES_COUNT:
+		if not is_equal_approx(game.sim.keep.inventory[res], stored[res] + 300.0):
+			granted = false
+	_check(granted, "the grant tool still adds 300 of every resource")
+	var site := _build(game, "house", game.world.centre() + Vector3(-60, 0, 40), false)
+	_check(site != null and site.under_construction, "an unfinished site is waiting")
+	_check(game._dev_command("finish") == "" and site != null and not site.under_construction,
+			"the finish tool still completes construction")
+	var overlay := game.show_nav_overlay
+	_check(game._dev_command("nav") == "" and game.show_nav_overlay != overlay,
+			"the navigation overlay still toggles")
+	_check(game._dev_command("wear") == "" and game._dev_command("perf") == "",
+			"the route and counter tools still dispatch")
+
+	# --- the keys themselves ----------------------------------------------
+	#
+	# Nothing else in the suite drives `_unhandled_input`, so without this the
+	# whole binding path — parsing the overlay's table, requiring the modifier,
+	# swallowing the rest of Alt — is untested and the commands are only ever
+	# reached by name.
+	var scouts_before: int = game.sim.scouting.scouts.size()
+	var key := InputEventKey.new()
+	key.keycode = KEY_T
+	key.pressed = true
+	game._unhandled_input(key)
+	_check(game.sim.scouting.scouts.size() == scouts_before,
+			"a bare letter never reaches a developer tool")
+	key.alt_pressed = true
+	game._unhandled_input(key)
+	_check(game.sim.scouting.scouts.size() == scouts_before + 1,
+			"the same letter with Alt held runs the tool the panel lists against it")
+	# Alt is the developer modifier, so Alt+C is not the clear-ground tool.
+	var clear_key := InputEventKey.new()
+	clear_key.keycode = KEY_C
+	clear_key.pressed = true
+	clear_key.alt_pressed = true
+	var mode_before: int = game.mode
+	game._unhandled_input(clear_key)
+	_check(game.mode == mode_before,
+			"Alt swallows the keys it does not bind rather than falling through to play")
+	clear_key.alt_pressed = false
+	game._unhandled_input(clear_key)
+	_check(game.mode == game.Mode.CLEAR,
+			"an unmodified gameplay key still reaches the game")
+	game._exit_clear_tool()
+	# And the buttons, which are the half of the panel a key press does not
+	# cover — and the half somebody reading the list is most likely to use.
+	var units_before: int = game.sim.campaign.units.size()
+	game.dev._tool_buttons["rival"].pressed.emit()
+	_check(game.sim.campaign.units.size() == units_before + 1,
+			"pressing a row in the panel runs the command that row names")
+	_dev_reload(game, "every tool")
+	game.free()
+	_dev_phases_finished += 1
+	await process_frame
+
+
+## The guard, on its own fixture, with a live target for every command.
+##
+## The order matters. Targets are set up with dev mode ON, then dev mode is
+## turned off and every command is fired at them: that is what makes "nothing
+## moved" a claim about the guard rather than a description of commands that had
+## nothing to do. Then the identical sequence is fired again with dev mode on and
+## the fingerprint must move — without that second half this check would pass
+## just as happily against a `_dev_command` that did nothing at all.
+func _developer_guard() -> void:
+	var game := _new_game(1776)
+	game.dev_mode = true
+	_check(game._dev_command("soldier") == "", "the guard fixture has a soldier to aim at")
+	var target: int = game.selected_units[0] if not game.selected_units.is_empty() else -1
+	var houses: Array = game.sim.buildings.filter(func(b): return b.type_id == "house")
+	var house: Building = houses[0] if not houses.is_empty() else null
+	game.selected_building = house
+	game.dev_mode = false
+
+	var before := _dev_fingerprint(game)
+	var refused := 0
+	for row in DevOverlay.TOOLS:
+		if game._dev_command(row[0]) == "off":
+			refused += 1
+	_check(refused == DevOverlay.TOOLS.size(),
+			"every developer command refuses to run with dev mode off")
+	_check(_dev_fingerprint(game) == before,
+			"no developer command changes anything with dev mode off")
+	_check(game.hud._base_hint.contains("Developer tools are off"),
+			"a refused command says why rather than failing silently")
+
+	game.dev_mode = true
+	game.selected_units.assign([target])
+	game.selected_building = house
+	var dispatched := 0
+	for row in DevOverlay.TOOLS:
+		var outcome: String = game._dev_command(row[0])
+		if outcome == "unknown":
+			_check(false, "developer tool '%s' is listed but nothing dispatches it" % row[0])
+		else:
+			dispatched += 1
+	_check(dispatched == DevOverlay.TOOLS.size() and _dev_fingerprint(game) != before,
+			"the same commands with dev mode on do move the world, so the guard check has teeth")
+	_dev_reload(game, "the whole table with dev mode on")
+	game.free()
+	_dev_phases_finished += 1
+	await process_frame
+
+
 func _run() -> void:
 	await _selection_and_placement()
 	await _roads_and_research()
 	await _clock_and_load()
+	await _developer_tools()
+	await _developer_guard()
+	_check(_dev_phases_finished == 2,
+			"both developer phases ran to the end rather than dying half way")
 	print("Game integration regression failures: %d" % _failures)
 	quit(1 if _failures else 0)

@@ -87,6 +87,10 @@ func _filter(node: Node3D, shown: bool) -> void:
 			bodies.append({"node": weakref(child), "layer": child.collision_layer})
 			child.collision_layer = 0
 		_hidden[id] = {"node": weakref(node), "visible": node.visible, "bodies": bodies}
+	elif node.visible:
+		# Fog set this false last time; only its owner can have turned it back
+		# on since, so that is what it should return to once seen again.
+		_hidden[id].visible = true
 	node.visible = false
 
 

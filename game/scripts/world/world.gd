@@ -527,12 +527,6 @@ func world_to_cell(p: Vector3) -> Vector2i:
 func in_bounds(c: Vector2i) -> bool:
 	return c.x >= 0 and c.y >= 0 and c.x < grid_size and c.y < grid_size
 
-
-func clamp_world(p: Vector3, margin: float = 0.0) -> Vector3:
-	return Vector3(clampf(p.x, margin, size_m - margin), p.y,
-			clampf(p.z, margin, size_m - margin))
-
-
 func install_bridge(id: int, a: Vector3, b: Vector3, width: float = 4.0) -> void:
 	nav.install_bridge(id, a, b, width)
 

@@ -287,13 +287,6 @@ func set_cultivated(cx: int, cz: int, value: bool) -> void:
 	_cultivated[cz * grid_size + cx] = 1 if value else 0
 	_refresh_cell(cx, cz)
 
-
-func is_cultivated(cx: int, cz: int) -> bool:
-	if cx < 0 or cz < 0 or cx >= grid_size or cz >= grid_size:
-		return false
-	return _cultivated[cz * grid_size + cx] != 0
-
-
 func is_solid(cx: int, cz: int) -> bool:
 	if cx < 0 or cz < 0 or cx >= grid_size or cz >= grid_size:
 		return true

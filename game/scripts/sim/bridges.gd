@@ -354,9 +354,12 @@ func overlaps_footprint(centre: Vector3, half_w: float, half_d: float) -> bool:
 func _actor_roots() -> Array:
 	var roots: Array = [world.citizens_root, sim.campaign, sim.husbandry, sim.cart]
 	# Trade is optional in isolated simulation tests and older staged games.
-	var trade: Variant = sim.get("trade")
-	if trade is Node:
-		roots.append(trade)
+	# Scouts and bucket carriers are reparented under their own systems while
+	# out, so they are only found by walking those too.
+	for optional in ["trade", "scouting", "water"]:
+		var root: Variant = sim.get(optional)
+		if root is Node:
+			roots.append(root)
 	return roots
 
 

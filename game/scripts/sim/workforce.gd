@@ -17,11 +17,6 @@ extends RefCounted
 var _dirty_work := true
 var _dirty_homes := true
 
-
-func mark_work_dirty() -> void:
-	_dirty_work = true
-
-
 func mark_homes_dirty() -> void:
 	_dirty_homes = true
 

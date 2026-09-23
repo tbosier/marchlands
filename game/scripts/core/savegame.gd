@@ -71,19 +71,6 @@ static func _sanitise(slot: String) -> String:
 		out += c if c.is_valid_identifier() or c.is_valid_int() else "_"
 	return "save" if out.is_empty() else out
 
-
-static func list_slots() -> Array[String]:
-	var out: Array[String] = []
-	var dir := DirAccess.open(DIR)
-	if dir == null:
-		return out
-	for file in dir.get_files():
-		if file.ends_with("." + EXTENSION):
-			out.append(file.trim_suffix("." + EXTENSION))
-	out.sort()
-	return out
-
-
 # ---------------------------------------------------------------------------
 # Writing
 # ---------------------------------------------------------------------------
@@ -238,6 +225,8 @@ static func _capture_building(b: Building) -> Dictionary:
 		# granary the moment it loaded.
 		"larder": b.larder,
 		"crop_growth": b.crop_growth,
+		# Winter's ploughing, waiting for the spring sowing.
+		"tilth": b.tilth,
 		"market_stock_target": b.market_stock_target,
 		"health": b.health,
 		"fire": b.fire,
@@ -374,7 +363,7 @@ static func restore(game: Node, data: Dictionary) -> String:
 	for rec in world.nodes.records:
 		if rec.kind != ResourceNodes.Kind.TREE:
 			var c := world.world_to_cell(rec.position)
-			world.nav.set_blocked(c.x, c.y, not rec.depleted)
+			world.nav.set_blocked(c.x, c.y, world.nodes.outcrop_stands_at(rec.position))
 
 	for entry in data.get("buildings", []):
 		if not _restore_building(sim, entry):

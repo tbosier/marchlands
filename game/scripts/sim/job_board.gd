@@ -19,7 +19,15 @@ extends RefCounted
 ##     allocating one closure per idle citizen per tick was, measurably, the
 ##     largest single source of garbage in the game.
 
-enum Kind { HAUL, GATHER, BUILD, HARVEST, FELL, CRAFT, TAME, TEND, BUTCHER, BRIDGE_HAUL, BRIDGE_BUILD, SALVAGE }
+## Appended to, never inserted into. Nothing writes a job kind to a save: the
+## board is rebuilt from nothing on load and `SaveGame` reconstructs exactly one
+## job, the haul a citizen was already carrying, by posting a fresh HAUL. So the
+## numbering is not a save format and a new kind cannot break an old file —
+## which was worth checking before adding one, because `save_validation.gd`
+## rejects a version mismatch outright and there is no migration path. Keeping
+## it append-only costs nothing and keeps that true for anything that starts
+## persisting jobs later.
+enum Kind { HAUL, GATHER, BUILD, HARVEST, FELL, CRAFT, TAME, TEND, BUTCHER, BRIDGE_HAUL, BRIDGE_BUILD, SALVAGE, TILL }
 
 ## Filters a citizen can apply when looking for work.
 enum Accept {
@@ -99,6 +107,8 @@ class Job:
 				return "Build timber bridge"
 			Kind.SALVAGE:
 				return "Recover %s from lost cart" % Res.display(res)
+			Kind.TILL:
+				return "Break ground for spring"
 		return "Work"
 
 
@@ -110,6 +120,11 @@ var _next_id := 1
 ## scanning. Keyed "<kind>:<dest_id>:<res>" and "<kind>:<source_id>".
 var _by_dest: Dictionary = {}
 var _by_source: Dictionary = {}
+## Live jobs of each kind, so a poster can ask "how much of this is the whole
+## settlement already carrying?" without walking the board. Winter tillage needs
+## it: a cap that is per-farm is not a cap at all once a march has ten farms,
+## and every open job is scored by every job-seeking citizen.
+var _by_kind := PackedInt32Array()
 var _cart_jobs := 0
 
 
@@ -133,6 +148,7 @@ func post(kind: int, position: Vector3, priority: float) -> Job:
 func index(job: Job) -> void:
 	_bump(_by_dest, _dest_key(job.kind, job.dest_id, job.res), 1)
 	_bump(_by_source, _source_key(job.kind, job.source_id), 1)
+	_count_kind(job.kind, 1)
 	if job.uses_cart:
 		_cart_jobs += 1
 
@@ -163,6 +179,14 @@ func _source_key(kind: int, source_id: int) -> String:
 	return "%d:%d" % [kind, source_id]
 
 
+## Indexed by kind rather than keyed by a string: this runs on every post and
+## retire, and a `str(kind)` there was per-haul garbage.
+func _count_kind(kind: int, by: int) -> void:
+	if _by_kind.size() < Kind.size():
+		_by_kind.resize(Kind.size())
+	_by_kind[kind] = maxi(0, _by_kind[kind] + by)
+
+
 func _bump(table: Dictionary, key: String, by: int) -> void:
 	var n: int = int(table.get(key, 0)) + by
 	if n <= 0:
@@ -189,6 +213,11 @@ func count_from_source(kind: int, source_id: int) -> int:
 	return int(_by_source.get(_source_key(kind, source_id), 0))
 
 
+## Live jobs of one kind across the whole settlement, open and claimed.
+func count_of_kind(kind: int) -> int:
+	return _by_kind[kind] if kind < _by_kind.size() else 0
+
+
 func cart_promised() -> bool:
 	return _cart_jobs > 0
 
@@ -206,7 +235,12 @@ func _accepts(job: Job, filter: int, workplace_id: int,
 			or job.kind == Kind.CRAFT:
 		return job.dest_id == workplace_id
 	# Felling is open to anyone: it is the player telling the settlement to
-	# clear a piece of ground, not a workplace's own business.
+	# clear a piece of ground, not a workplace's own business. So is winter
+	# tillage, and for a sharper reason — the whole point of it is that it is
+	# work for hands that are not the farm's own. Binding it to the farm the way
+	# harvesting is bound would have left it doing nothing about the season it
+	# exists to fill: the farmhands are three people out of twenty-two, and it
+	# was the other nineteen who were standing still.
 	return filter == Accept.ANY
 
 
@@ -253,6 +287,12 @@ func release(job: Job, refused_by_citizen: int = -1) -> void:
 	if refused_by_citizen >= 0:
 		job.refused_by[refused_by_citizen] = true
 	job.claimed_by = -1
+	# A taming job's progress is the trust one rancher built with the animal.
+	# It does not pass to whoever takes the job next, who would otherwise skip
+	# the taming and have the cow walk to wherever they happened to be.
+	if job.kind == Kind.TAME:
+		job.loaded = false
+		job.amount = 0.0
 	var i := _claimed.find(job)
 	if i >= 0:
 		_claimed.remove_at(i)
@@ -273,6 +313,7 @@ func _retire(job: Job) -> void:
 	job.cancelled = true
 	_bump(_by_dest, _dest_key(job.kind, job.dest_id, job.res), -1)
 	_bump(_by_source, _source_key(job.kind, job.source_id), -1)
+	_count_kind(job.kind, -1)
 	if job.uses_cart:
 		_cart_jobs = maxi(0, _cart_jobs - 1)
 	var i := _open.find(job)
@@ -311,6 +352,43 @@ func _touches_building(job: Job, building_id: int) -> bool:
 	return job.source_id == building_id or job.dest_id == building_id
 
 
+## Retire every *unclaimed* job of one kind, and return how many went.
+##
+## Claimed work is left alone deliberately. A job held by a citizen owns
+## whatever that citizen is in the middle of, and this board has been bitten
+## before by retiring work out from under its claimant — the reservations go
+## with the job, not with the worker (see `release` and `_abandon`). A holder
+## whose work has stopped mattering drops it on its own next tick.
+##
+## Used when a standing reason for work expires rather than a single job
+## finishing: the year turning out of winter, which ends the ploughing.
+func cancel_open_of_kind(kind: int) -> int:
+	var went := 0
+	for job in _open.duplicate():
+		if job.kind != kind:
+			continue
+		_retire(job)
+		went += 1
+	return went
+
+
+## Retire the unclaimed jobs of one kind bound for one building. The same
+## rule as `cancel_open_of_kind`, for a single destination whose reason for the
+## work has lapsed while the rest of the settlement's has not.
+##
+## Like `cancel`, it does not give back goods or room a job reserved — that
+## accounting lives in `Simulation._release_reservations`. Only use it for kinds
+## that reserve nothing, such as TILL.
+func cancel_open_for(kind: int, dest_id: int) -> int:
+	var went := 0
+	for job in _open.duplicate():
+		if job.kind != kind or job.dest_id != dest_id:
+			continue
+		_retire(job)
+		went += 1
+	return went
+
+
 ## Every live job, open or claimed.
 func all_jobs() -> Array[Job]:
 	var out: Array[Job] = []
@@ -336,4 +414,5 @@ func clear() -> void:
 	_claimed.clear()
 	_by_dest.clear()
 	_by_source.clear()
+	_by_kind.fill(0)
 	_cart_jobs = 0

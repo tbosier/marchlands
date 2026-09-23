@@ -71,6 +71,8 @@ back to `tools/vendor/` so a checkout can carry its own toolchain.
 | mouse wheel | zoom (and tilt — closer is more oblique) |
 | middle-drag / `Q` `E` | rotate |
 | left click | select a building, citizen, soldier, cow, resource deposit, or route |
+| click a soldier | selects his whole company · `Alt`-click just him · `Shift`-click adds to the selection |
+| `G` | form the selected soldiers into a company, split them off, or merge companies |
 | right click | order selected scouts to explore, or soldiers to move/attack; otherwise cancel selection |
 | `Space` | pause / resume at the rate you were at |
 | `1`–`6` | speed: 1× · 2× · 4× · 16× · 32× · 64× |
@@ -78,9 +80,10 @@ back to `tools/vendor/` so a checkout can carry its own toolchain.
 | `R` | rotate a building while placing (the tool stays armed after placing) |
 | `B` | open / close the build tray · `C` the Clear Ground tool |
 | `Delete` | cancel or pull down the selected building, materials returned |
-| `F` | focus the selection · `Esc` cancel · `F12` screenshot |
+| `F` | focus the selection · `Esc` cancel (or clear alerts) · `F12` screenshot |
+| `P` | footfall overlay: where traffic is wearing routes in |
 | `Ctrl+S` `Ctrl+L` | save the march / load it back |
-| `F3` | developer overlay (off by default; `--dev` to start with it on) |
+| `F3` | developer overlay (development builds, or any build launched with `--dev`) |
 
 Choose **World** on the bottom bar to start a river-and-mountain landscape:
 Small (768 m), Medium (1,536 m), Large (3,072 m), or Extra large (6,144 m).
@@ -118,7 +121,8 @@ approach and interrupt it. Older saves without a well need one built.
 
 ### Developer mode
 
-`F3`, or launch with `-- --dev`. It shows where frame time is actually going —
+`F3` in a development build, or launch any build with `-- --dev`; an exported
+release ignores `F3` otherwise, and the tool keys do nothing while it is off. It shows where frame time is actually going —
 the same `Perf` spans the headless scenario runs print — plus population, job
 board and draw-call counts. While it is open:
 
@@ -130,6 +134,14 @@ board and draw-call counts. While it is open:
 | `F7` | wear in the route under the cursor |
 | `F8` | navigation overlay: impassable cells red, road cells graded green |
 | `F9` | reset the performance counters |
+| `Alt+T` · `Alt+B` | a trained scout at the keep · a scout at the rival well with a sabotage kit |
+| `Alt+F` · `Alt+R` | recruit a friendly soldier · a rival soldier at your keep, and war |
+| `Alt+X` · `Alt+K` | declare war · kill the selected soldiers |
+| `Alt+J` | wound the selected soldier (location and severity from the panel) |
+| `Alt+P` · `Alt+I` | poison one of your own wells · set the selected building alight |
+| `Alt+N` · `Alt+Z` | jump to the next season · to just before the next hard frost |
+
+Every row is also a button on the panel.
 
 It is deliberately off unless asked for: design doc §30 asks that the game not
 advertise how it was made.

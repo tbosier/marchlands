@@ -14,7 +14,6 @@ var registry: AssetRegistry
 var scouts: Dictionary = {}
 var grid_size := 1
 var world_size := 1.0
-var revision := 0
 var _explored := PackedByteArray()
 var _visible := PackedByteArray()
 var _texture: ImageTexture
@@ -81,7 +80,6 @@ func refresh_visibility() -> void:
 	var img := Image.create_from_data(grid_size, grid_size, false, Image.FORMAT_RG8, pixels)
 	if _texture == null: _texture = ImageTexture.create_from_image(img)
 	else: _texture.update(img)
-	revision += 1
 	changed.emit()
 
 func city_report() -> Dictionary:

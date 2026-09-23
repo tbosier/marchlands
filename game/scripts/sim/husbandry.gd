@@ -83,13 +83,6 @@ func herd_at(ranch_id: int, adults_only: bool = false) -> Array[Cattle]:
 			herd.append(cow)
 	return herd
 
-
-func ranch_info(ranch_id: int) -> Dictionary:
-	return {"cattle": herd_at(ranch_id).size(), "adults": herd_at(ranch_id, true).size(),
-		"capacity": RANCH_CAPACITY,
-		"breeding_progress": float(breeding.get(ranch_id, 0.0)) / BREED_WORK_DAYS}
-
-
 func _cow_has_job(cow_id: int) -> bool:
 	for job in sim.jobs.all_jobs():
 		if job.kind in [JobBoard.Kind.TAME, JobBoard.Kind.BUTCHER] and job.cow_id == cow_id:

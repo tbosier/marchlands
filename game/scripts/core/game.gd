@@ -64,7 +64,15 @@ var _road_extent := 0
 
 var dev: DevOverlay
 var dev_mode := false
+## Set by `--dev`. A release export only opens the developer tools when asked.
+var _dev_launch := false
+var _defeat_shown := false
 var show_nav_overlay := false
+
+## keycode -> [command name, whether Alt must be held]. Built from
+## `DevOverlay.TOOLS` so that the panel listing the tools and the table binding
+## them cannot disagree; see `_build_dev_keys`.
+var _dev_keys: Dictionary = {}
 
 ## The footfall overlay (P). See _toggle_footfall_overlay.
 var show_footfall := false
@@ -119,6 +127,7 @@ func _ready() -> void:
 		_draw_road_preview()
 		_refresh_selection())
 	hud.research_open_requested.connect(func():
+		_cancel_placement()
 		_clear_selection()
 		research_open = true
 		_refresh_selection())
@@ -129,14 +138,17 @@ func _ready() -> void:
 		b.set_market_stock_target(target)
 		_refresh_selection())
 	hud.army_open_requested.connect(func():
+		_cancel_placement()
 		_clear_selection()
 		army_open = true
 		_refresh_selection())
 	hud.scouting_open_requested.connect(func():
+		_cancel_placement()
 		_clear_selection()
 		scouting_open = true
 		_refresh_selection())
 	hud.city_report_requested.connect(func():
+		_cancel_placement()
 		_clear_selection()
 		city_report_open = true
 		_refresh_selection())
@@ -264,6 +276,10 @@ func _ready() -> void:
 	_ui_layer.add_child(dev)
 	dev.setup(sim, clock, world, camera)
 	if sim.campaign != null: dev.bind_campaign(sim.campaign)
+	# The panel's buttons and the keys below are the same commands by the same
+	# names, so both arrive at `_dev_command` and the guard is written once.
+	dev.command.connect(_dev_command)
+	_build_dev_keys()
 
 	_make_ghost_materials()
 	_setup_scenario()
@@ -274,6 +290,7 @@ func _ready() -> void:
 	for arg in OS.get_cmdline_user_args():
 		if arg == "--dev":
 			dev_mode = true
+			_dev_launch = true
 			dev.visible = true
 
 	camera.look_at_position(sim.keep.global_position, 78.0)
@@ -438,6 +455,7 @@ func restore_from(data: Dictionary) -> String:
 
 
 func _adopt_world(staged: SaveGame.RestoreState) -> String:
+	_defeat_shown = false
 	_cancel_placement()
 	_exit_clear_tool()
 	_clear_selection()
@@ -472,6 +490,7 @@ func _adopt_world(staged: SaveGame.RestoreState) -> String:
 	# in the save — it is a way of looking, not part of the march — so it is
 	# the live toggle that gets reasserted here, not a restored one.
 	_set_footfall_overlay(show_footfall)
+	world.set_nav_overlay(show_nav_overlay)
 	hud.set_hint(_idle_hint())
 
 	# The camera is only moved when where it was looking makes no sense any
@@ -583,6 +602,9 @@ func _process(delta: float) -> void:
 		_update_bridge_preview()
 	if sim.campaign != null and sim.campaign.defeated:
 		clock.set_speed(0)
+		if not _defeat_shown:
+			_defeat_shown = true
+			hud.set_hint(_idle_hint())
 	var sim_delta := clock.advance(minf(delta, 0.25))
 	if sim_delta > 0.0:
 		# At high speeds a single frame can represent several seconds of world
@@ -703,6 +725,28 @@ func _refresh_selection() -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	_prune_selection()
 	if event is InputEventKey and event.pressed and not event.echo:
+		# Developer commands are tried first, and Alt is their modifier.
+		#
+		# Alt rather than a bare letter for one reason: `_dev_guard` answers a
+		# refused command with an on-screen hint, and the owner may hand this
+		# build to friends. Bare letters would have meant anyone pressing X or
+		# K in normal play being told the game has developer tools and which key
+		# opens them. Alt is not pressed by accident.
+		#
+		# Everything under Alt is swallowed, matched or not, which is why the
+		# `match` below can keep ignoring modifiers: Alt+C no longer also opens
+		# the clear-ground tool. The camera is the exception it cannot cover —
+		# it polls WASD/QE through the action map every frame regardless of what
+		# is handled here — so no command binds those six letters.
+		var bound: Variant = _dev_keys.get(event.keycode)
+		if bound != null and bool(bound[1]) == event.alt_pressed:
+			# Silent with dev mode off. The bare F4–F9 keys would otherwise
+			# answer anyone who pressed them with the hint that names F3.
+			if dev_mode:
+				_dev_command(bound[0])
+			return
+		if event.alt_pressed:
+			return
 		match event.keycode:
 			KEY_SPACE:
 				clock.toggle_pause()
@@ -752,19 +796,14 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_F12:
 				_save_screenshot("manual")
 			KEY_F3:
-				dev_mode = not dev_mode
-				dev.toggle()
-			KEY_F4: _dev_spawn_settlers(10)
-			KEY_F5: _dev_finish_buildings()
-			KEY_F6: _dev_grant_resources(300.0)
-			KEY_F7: _dev_wear_route()
-			KEY_F8: _dev_toggle_nav_overlay()
-			KEY_F9:
-				Perf.reset()
+				# A release export only opens the tools if launched with --dev.
+				if OS.is_debug_build() or _dev_launch:
+					dev_mode = not dev_mode
+					dev.toggle()
 
 	elif event is InputEventMouseButton and event.pressed:
 		var mb: InputEventMouseButton = event
-		if hud.blocks_mouse(mb.position):
+		if _ui_blocks(mb.position):
 			return
 		if mb.button_index == MOUSE_BUTTON_LEFT:
 			match mode:
@@ -786,7 +825,7 @@ func _unhandled_input(event: InputEvent) -> void:
 					var error: String = sim.scouting.command(selected_scout, hit.position)
 					if error != "": _on_alert(error, hit.position)
 					_refresh_selection()
-			elif not selected_units.is_empty():
+			elif _has_friendly_selected():
 				_order_units(mb.position)
 			else:
 				_clear_selection()
@@ -835,6 +874,9 @@ func _on_build_requested(type_id: String) -> void:
 	place_type = type_id
 	place_yaw = PI
 	_spawn_ghost()
+	# After `_exit_clear_tool`, which puts the idle hint back over the one the
+	# tray had just set.
+	hud.set_hint("Click to place (keeps placing) · R rotate · right click / Esc to stop")
 
 
 func _spawn_ghost() -> void:
@@ -940,6 +982,10 @@ func _toggle_footfall_overlay() -> void:
 
 ## What the hint line says when nothing else is claiming it.
 func _idle_hint() -> String:
+	# The clock is held at zero once the keep falls, and an alert fades; this
+	# is the line that stays up to say why nothing moves.
+	if sim != null and sim.campaign != null and sim.campaign.defeated:
+		return "The keep has fallen · Ctrl+L to load a saved march, or World for a new one"
 	return FOOTFALL_HINT if show_footfall else BASE_HINT
 
 
@@ -1135,6 +1181,7 @@ func _on_demolish_requested(b: Building) -> void:
 func _cancel_placement() -> void:
 	_cancel_bridge()
 	mode = Mode.SELECT
+	hud.set_clear_tool_active(false)
 	place_type = ""
 	if _ghost:
 		_ghost.queue_free()
@@ -1150,7 +1197,7 @@ func _update_ghost() -> void:
 	if _ghost == null:
 		return
 	var mouse := get_viewport().get_mouse_position()
-	if hud.blocks_mouse(mouse):
+	if _ui_blocks(mouse):
 		_ghost.visible = false
 		hud.hide_cursor_tooltip()
 		return
@@ -1297,6 +1344,9 @@ func _prune_selection() -> void:
 	if not is_instance_valid(selected_citizen) \
 			or sim.citizens_by_id.get(selected_citizen.id) != selected_citizen:
 		selected_citizen = null
+	if selected_scout >= 0 and (sim.scouting == null
+			or not sim.scouting.scouts.has(selected_scout)):
+		selected_scout = -1
 	if selected_units.is_empty() and selected_building == null \
 			and selected_citizen == null and not has_road_selection \
 			and not research_open and not army_open and not scouting_open and not city_report_open and not trade_open and selected_caravan < 0 and selected_bridge < 0 and mode != Mode.BRIDGE and selected_resource < 0 and selected_cow < 0:
@@ -1510,7 +1560,7 @@ func _resource_info(rec: ResourceNodes.NodeRec) -> Dictionary:
 
 func _refresh_resource_hover() -> void:
 	var mouse := get_viewport().get_mouse_position()
-	if hud.blocks_mouse(mouse):
+	if _ui_blocks(mouse):
 		hud.hide_cursor_tooltip()
 		return
 	var ray := camera.screen_ray(mouse)
@@ -1562,6 +1612,7 @@ func _focus_wild_cattle() -> void:
 	for id in sim.husbandry.cows:
 		var info: Dictionary = sim.husbandry.get_info(id)
 		if info.get("wild", false) and sim.scouting.visibility_at(info.position):
+			_cancel_placement()
 			_clear_selection()
 			selected_cow = id
 			camera.focus_on(info.position, 45.0)
@@ -1681,6 +1732,22 @@ func _regroup_selection() -> void:
 	_refresh_selection()
 
 
+func _ui_blocks(at: Vector2) -> bool:
+	return hud.blocks_mouse(at) or (dev != null and dev.blocks_mouse(at))
+
+
+## Rival soldiers can be selected to inspect but not ordered, so a right-click
+## over a selection of only theirs is the ordinary cancel.
+func _has_friendly_selected() -> bool:
+	if sim.campaign == null:
+		return false
+	for id in selected_units:
+		var unit: Node = sim.campaign.units.get(id)
+		if is_instance_valid(unit) and unit.faction == 0:
+			return true
+	return false
+
+
 func _order_units(screen_pos: Vector2) -> void:
 	var ray := camera.screen_ray(screen_pos)
 	var hit := world.terrain.raycast(ray.origin, ray.direction)
@@ -1740,7 +1807,31 @@ func _on_alert(text: String, position: Vector3) -> void:
 #
 # Gated behind dev mode so a stray function key during normal play cannot
 # quietly rewrite the settlement.
+#
+# Every one of them exists because the situation it produces is unreachable, or
+# near enough, in ordinary play: a friendly well is never poisoned by anything
+# the game ships, the first hard frost is ninety days away, fire has one source
+# and that source is a rival firepot, and a soldier who has lost an arm is very
+# hard to arrange on purpose. None of them persists anything of its own — they
+# drive the same public state a save already carries, so a march that has been
+# poked with all of them still writes and reloads.
 # ---------------------------------------------------------------------------
+
+## Fire, at the strength a rival firepot leaves behind
+## (`FrontierCampaign.tick`, where an impact lands `apply_damage(6.0, 0.55)`).
+## The ignite command uses the same figure so that what the player watches
+## afterwards — the spread, the bucket chain, the roof going — is the real
+## event and not a hotter invention of the tool's own.
+const DEV_FIRE := 0.55
+
+## How far before the frost the calendar jump lands, in days.
+##
+## Not on the frost. The point of the tool is to watch the thing happen, and a
+## jump that lands on the instant itself puts the loss in the alert log before
+## the player has looked at the fields. A quarter of a day is 45 seconds at 1x
+## and under a second at 64x.
+const DEV_FROST_LEAD := 0.25
+
 
 func _dev_guard() -> bool:
 	if dev_mode:
@@ -1749,9 +1840,62 @@ func _dev_guard() -> bool:
 	return false
 
 
-func _dev_spawn_settlers(count: int) -> void:
+## Bind every command in `DevOverlay.TOOLS` to the key that table names.
+##
+## Derived rather than restated. The keys used to live in a `match` in
+## `_unhandled_input` beside a hand-written list in the overlay, which is the
+## arrangement where a tool quietly acquires a binding nobody has written down —
+## and an undocumented developer key is the one thing this panel exists to
+## prevent. Now the table is the binding: add a row and the key works, change
+## the row and the key changes, and there is nowhere for a third opinion to live.
+func _build_dev_keys() -> void:
+	_dev_keys.clear()
+	for row in DevOverlay.TOOLS:
+		var spec: String = row[1]
+		var alt := spec.begins_with("Alt+")
+		var code := OS.find_keycode_from_string(spec.trim_prefix("Alt+"))
+		if code == KEY_NONE:
+			push_error("dev tool '%s' names an unknown key '%s'" % [row[0], spec])
+			continue
+		_dev_keys[code] = [row[0], alt]
+
+
+## Run one developer command by name.
+##
+## Returns "" if it ran, "off" if dev mode refused it, and "unknown" if the name
+## is not a command at all. The last one matters: `tests/game_integration.gd`
+## asserts that every row in `DevOverlay.TOOLS` dispatches, because a listed
+## button that quietly does nothing is exactly the failure a separate dispatch
+## table produces, and the panel is the documentation.
+##
+## The guard is here rather than inside each tool so that it cannot be left out
+## of one of them. Nothing below it may touch the world.
+func _dev_command(id: String) -> String:
 	if not _dev_guard():
-		return
+		return "off"
+	match id:
+		"settlers": _dev_spawn_settlers(10)
+		"finish": _dev_finish_buildings()
+		"grant": _dev_grant_resources(300.0)
+		"wear": _dev_wear_route()
+		"nav": _dev_toggle_nav_overlay()
+		"perf": Perf.reset()
+		"scout": _dev_spawn_scout(false)
+		"saboteur": _dev_spawn_scout(true)
+		"soldier": _dev_recruit_soldier()
+		"rival": _dev_spawn_rival()
+		"war": _dev_declare_war()
+		"kill": _dev_kill_selection()
+		"wound": _dev_wound_selection()
+		"poison": _dev_poison_well()
+		"ignite": _dev_ignite()
+		"season": _dev_jump_season()
+		"frost": _dev_jump_to_frost()
+		_: return "unknown"
+	return ""
+
+
+func _dev_spawn_settlers(count: int) -> void:
 	var origin := sim.keep.global_position if sim.keep else world.centre()
 	for i in count:
 		var a := TAU * i / float(count)
@@ -1760,8 +1904,6 @@ func _dev_spawn_settlers(count: int) -> void:
 
 
 func _dev_finish_buildings() -> void:
-	if not _dev_guard():
-		return
 	var n := 0
 	for b in sim.buildings.duplicate():
 		if b.under_construction:
@@ -1780,8 +1922,6 @@ func _dev_finish_buildings() -> void:
 
 
 func _dev_grant_resources(amount: float) -> void:
-	if not _dev_guard():
-		return
 	if sim.keep == null:
 		return
 	for res in Config.RES_COUNT:
@@ -1793,8 +1933,6 @@ func _dev_grant_resources(amount: float) -> void:
 ## Stamp enough traffic under the cursor to force a route into existence,
 ## for testing the road system without waiting for citizens to wear one.
 func _dev_wear_route() -> void:
-	if not _dev_guard():
-		return
 	var ray := camera.screen_ray(get_viewport().get_mouse_position())
 	var hit := world.terrain.raycast(ray["origin"], ray["direction"])
 	if not hit["hit"]:
@@ -1808,10 +1946,467 @@ func _dev_wear_route() -> void:
 
 
 func _dev_toggle_nav_overlay() -> void:
-	if not _dev_guard():
-		return
 	show_nav_overlay = not show_nav_overlay
 	world.set_nav_overlay(show_nav_overlay)
+
+
+# ---------------------------------------------------------------------------
+# Developer commands — shared scaffolding
+#
+# The tools below conjure situations, not buildings, but several of the
+# situations need a building the player has not put up yet. A tool that refuses
+# because a prerequisite is missing is a tool the owner then has to spend
+# materials and minutes satisfying by hand, which is the waiting these exist to
+# remove.
+# ---------------------------------------------------------------------------
+
+## A buildable spot for `type_id` near `anchor`, or Vector3.INF.
+func _dev_site(type_id: String, anchor: Vector3) -> Vector3:
+	for ring in 16:
+		for index in 12:
+			var angle := TAU * index / 12.0 + ring * 0.31
+			var p: Vector3 = anchor \
+					+ Vector3(cos(angle), 0, sin(angle)) * (6.0 + ring * 5.0)
+			p.y = world.heightmap.height_at(p.x, p.z)
+			if sim.can_place(type_id, p).ok:
+				return p
+	return Vector3.INF
+
+
+## The settlement's first completed `type_id`, raised instantly if it has none.
+func _dev_require(type_id: String) -> Building:
+	for b in sim.buildings:
+		if b.type_id == type_id and not b.under_construction:
+			return b
+	var anchor: Vector3 = sim.keep.global_position if sim.keep else world.centre()
+	var at := _dev_site(type_id, anchor)
+	if not at.is_finite():
+		return null
+	return sim.place_building(type_id, at, 0.0, true)
+
+
+## Walkable ground `from_m`..`to_m` from `anchor` that `anchor` can reach, or
+## Vector3.INF. Used to stand a conjured person somewhere they can walk out of:
+## dropping one inside a wall or across a river is a unit that never moves and
+## looks like a bug in whatever is being tested.
+func _dev_open_ground(anchor: Vector3, from_m: float, to_m: float) -> Vector3:
+	for ring in 8:
+		var radius: float = lerpf(from_m, to_m, ring / 7.0)
+		for index in 12:
+			var angle := TAU * index / 12.0 + ring * 0.37
+			var p: Vector3 = anchor + Vector3(cos(angle), 0, sin(angle)) * radius
+			if p.x < 6.0 or p.z < 6.0 \
+					or p.x > world.size_m - 6.0 or p.z > world.size_m - 6.0:
+				continue
+			p.y = world.heightmap.height_at(p.x, p.z)
+			var cell := world.world_to_cell(p)
+			if world.nav.is_solid(cell.x, cell.y):
+				continue
+			if not world.nav.can_reach(anchor, p):
+				continue
+			return p
+	return Vector3.INF
+
+
+## Put `amount` of `res` in the keep over and above what is already promised, so
+## that a tool paying a real price out of the real stores cannot fail on a poor
+## settlement. Reserved stock is excluded deliberately: spending materials a
+## construction site is waiting on is how the road quotes used to strand jobs.
+func _dev_stock(res: int, amount: float) -> void:
+	if sim.keep == null:
+		return
+	var short: float = amount - sim.keep.available(res)
+	if short > 0.0:
+		sim.keep.inventory[res] += short
+		sim.stores.refresh_totals(sim.population_members(), sim.buildings)
+
+
+## Move a conjured person without leaving a road behind them.
+##
+## `_wear_anchor` is where the next wear stamp starts from, so a teleport that
+## leaves it behind draws one segment of traffic from the old position to the new
+## one — a dirt track straight across the march, and at these distances enough
+## wear to make it a real route. `FrontierCampaign.recruit` resets the same field
+## for the same reason when a resident becomes a soldier.
+func _dev_place_person(c: Citizen, at: Vector3) -> void:
+	c.global_position = Vector3(at.x, world.heightmap.height_at(at.x, at.z), at.z)
+	c.clear_goal()
+	c._wear_anchor = c.global_position
+
+
+# ---------------------------------------------------------------------------
+# Developer commands — the tools
+# ---------------------------------------------------------------------------
+
+## A scout who has finished training, optionally standing at the rival's well
+## with a sabotage kit already in hand.
+##
+## Both halves of this go through Scouting's own public entry points rather than
+## assembling a Scout by hand, because the state a scout may legally be in is
+## enforced by `save_validation.gd` and getting it wrong produces a march that
+## plays and cannot be saved. Two of those rules cost real time to find and are
+## worth naming: a trained scout carries no tools, because training consumes
+## them ("trained scout retains consumed tools"), and a ready scout's resident
+## must be in Scouting's own trained list ("scout is active without completed
+## training") — which is why the last instant of training is run by
+## `Scouting.tick` below instead of being set here.
+##
+## The resident is a new arrival rather than a drafted worker. Drafting one meant
+## the scout could be somebody the water system was already moving, and
+## `Scouting.tick` skips a scout that WaterSystem `handles`, so the training tick
+## did nothing and the tool silently produced a half-trained scout.
+func _dev_spawn_scout(with_kit: bool) -> void:
+	var lodge := _dev_require("scout_lodge")
+	if lodge == null:
+		_on_alert("No room near the keep for a scout lodge.", camera.focus)
+		return
+	_dev_stock(Config.Res.FOOD, Scouting.FOOD_PACK)
+	# Plus the one tool the sabotage mission collects on its way out, or a
+	# poor settlement would spend its last on training and have no kit left.
+	_dev_stock(Config.Res.TOOLS, Scouting.TOOL_COST + (1.0 if with_kit else 0.0))
+	var resident := sim.add_citizen(sim.entrance_of(lodge, "att_entrance"))
+	var error: String = sim.scouting.train(lodge.id, resident.id)
+	if error != "":
+		_on_alert("Could not train a scout: " + error, lodge.global_position)
+		return
+	var scout: Scout = sim.scouting.scouts[sim.scouting.scouts.keys().max()]
+
+	# Hand over the pack the scout was sent to fetch and drop the claims on it,
+	# exactly as `Scouting._collect` does when he arrives at the store. Taking
+	# the goods rather than conjuring them keeps the stores' books straight;
+	# leaving the reservation behind would strand it for ever.
+	for item in [[Config.Res.FOOD, Scouting.FOOD_PACK, scout.food_source],
+			[Config.Res.TOOLS, Scouting.TOOL_COST, scout.tool_source]]:
+		var store: Building = sim.buildings_by_id.get(item[2])
+		if store != null:
+			store.reserved[item[0]] = maxf(0.0, store.reserved[item[0]] - item[1])
+			store.remove(item[0], item[1])
+	scout.food_reserved = false
+	scout.tools_reserved = false
+	scout.food = Scouting.FOOD_PACK
+	scout.tools = 0.0
+	scout.state = "training"
+	scout.training_left = 0.0
+	scout.destination = scout.person.global_position
+	sim.scouting.tick(0.0001)
+	if scout.state != "ready":
+		_on_alert("The scout is at the lodge and will be ready shortly.",
+				lodge.global_position)
+		return
+
+	if not with_kit:
+		_dev_show_scout(scout)
+		_on_alert("%s is trained and awaiting orders."
+				% scout.person.given_name, scout.person.global_position)
+		return
+
+	# The sabotage order cannot be placed until the rival's well has been seen,
+	# and a scout in the field is the only thing that sees it — which is the
+	# whole reason this situation is unreachable without a tool. So he is stood
+	# next to it, far enough out that a guard does not interrupt him on the
+	# first tick (`WaterSystem._poison_tick` breaks the mission off inside six
+	# metres) and close enough that his own sight reveals the well.
+	var well: Building = null
+	if sim.campaign != null:
+		for b in sim.campaign.enemy_buildings.values():
+			if b.type_id == "well" and not b.under_construction:
+				well = b
+				break
+	if well == null:
+		_dev_show_scout(scout)
+		_on_alert("The rival town has no finished well to poison.",
+				scout.person.global_position)
+		return
+	var door := sim.entrance_of(well, "att_entrance")
+	var approach := _dev_open_ground(door, 24.0, 38.0)
+	if not approach.is_finite():
+		_dev_show_scout(scout)
+		_on_alert("No approach to the rival well the scout can walk.", door)
+		return
+	_dev_place_person(scout.person, approach)
+	# Sight is recomputed from where people actually are, so the well is only a
+	# legal target once the scout has been moved and the fog re-read.
+	sim.scouting.refresh_visibility()
+	error = sim.water.poison(scout.id)
+	if error != "":
+		_dev_show_scout(scout)
+		_on_alert("Could not order sabotage: " + error, approach)
+		return
+
+	# Skip the walk home for the kit. `save_validation.gd` pins the two fields
+	# to the phase — kit exactly 1.0 and the claim released once the state has
+	# left "collect" ("unpaid sabotage kit or invalid progress", "invalid
+	# sabotage phase") — so the tool takes the tool out of the store for real.
+	var job: Dictionary = sim.water.poison_jobs[scout.id]
+	var source: Building = sim.buildings_by_id.get(job.source_id)
+	if source != null:
+		source.reserved[Config.Res.TOOLS] = \
+				maxf(0.0, source.reserved[Config.Res.TOOLS] - 1.0)
+		source.remove(Config.Res.TOOLS, 1.0)
+	job.reserved = false
+	job.kit = 1.0
+	job.state = "approach"
+	scout.status = "Approaching the enemy well"
+	_dev_show_scout(scout)
+	_on_alert("%s is at %s's well with a sabotage kit. Poisoning it declares war."
+			% [scout.person.given_name, sim.campaign.rival_name], approach)
+
+
+## Select a scout and look at it, the way the scouting panel does.
+func _dev_show_scout(scout: Scout) -> void:
+	_clear_selection()
+	selected_scout = scout.id
+	scouting_open = true
+	camera.focus_on(scout.person.global_position, 50.0)
+	_refresh_selection()
+
+
+## One more soldier in your own army, through the barracks that would have made
+## him. `FrontierCampaign.recruit` is used rather than a raw spawn because it is
+## the path that assigns the permanent civilian identity behind a soldier — the
+## thing that makes Demobilize, and an injury surviving the round trip, work at
+## all. The recruit is a new arrival so that pressing this does not quietly
+## empty a workplace.
+func _dev_recruit_soldier() -> void:
+	if sim.campaign == null:
+		return
+	var barracks := _dev_require("barracks")
+	if barracks == null:
+		_on_alert("No room near the keep for a barracks.", camera.focus)
+		return
+	for res in FrontierCampaign.RECRUIT_COST:
+		_dev_stock(res, float(FrontierCampaign.RECRUIT_COST[res]))
+	var resident := sim.add_citizen(sim.entrance_of(barracks, "att_entrance"))
+	var error: String = sim.campaign.recruit(resident.id)
+	if error != "":
+		_on_alert("Could not recruit: " + error, barracks.global_position)
+		return
+	var ids: Array[int] = sim.campaign.friendly_ids()
+	if ids.is_empty():
+		_on_alert("The recruit did not reach the roster.", barracks.global_position)
+		return
+	_clear_selection()
+	selected_units.assign([ids.max()])
+	var unit: Soldier = sim.campaign.units[selected_units[0]]
+	camera.focus_on(unit.global_position, 30.0)
+	_refresh_selection()
+	_on_alert("%s has taken the oath at the barracks." % unit.given_name,
+			unit.global_position)
+
+
+## A rival soldier at your own gate, and the war that makes him behave like one.
+##
+## `_spawn_unit` is private and there is no public alternative: `recruit` raises
+## our soldiers and nothing raises theirs but the campaign's own review.
+## `tests/game_integration.gd` already reaches for the same method for the same
+## reason. Rations are filled because a guard this far from his own stores is
+## outside `FrontierCampaign._refill` and would otherwise starve in four days
+## while the owner was still looking at him.
+func _dev_spawn_rival() -> void:
+	if sim.campaign == null or sim.keep == null:
+		return
+	var at := _dev_open_ground(sim.keep.global_position, 26.0, 44.0)
+	if not at.is_finite():
+		_on_alert("No open ground near the keep to put him on.", camera.focus)
+		return
+	var unit: Soldier = sim.campaign._spawn_unit(1, at)
+	unit.rations = FrontierCampaign.PACK_DAYS
+	unit._wear_anchor = unit.global_position
+	sim.campaign.at_war = true
+	_clear_selection()
+	selected_units.assign([unit.id])
+	camera.focus_on(at, 40.0)
+	_refresh_selection()
+	_on_alert("A soldier of %s stands at your gate, and you are at war."
+			% sim.campaign.rival_name, at)
+
+
+## Declare war without waiting for the neighbour to decide. `at_war` is a plain
+## public field with no setter; the rival sets it itself when a guard sights one
+## of ours, which on a peaceful temperament may simply never happen.
+func _dev_declare_war() -> void:
+	if sim.campaign == null:
+		return
+	if sim.campaign.at_war:
+		_on_alert("Already at war with %s." % sim.campaign.rival_name,
+				sim.campaign.rival_position)
+		return
+	sim.campaign.at_war = true
+	_on_alert("War declared on %s." % sim.campaign.rival_name,
+			sim.campaign.rival_position)
+
+
+## Kill whatever soldiers are selected.
+##
+## Through the damage path rather than by erasing the unit: FrontierCampaign
+## clears its own dead on its next tick, and that is what keeps the company
+## roster, the civilian identity map and any medic's patient list consistent
+## with the table of units. It follows that a kill ordered while the game is
+## paused leaves the body standing until time moves again, which is also what
+## happens to a soldier killed in a fight during a pause.
+func _dev_kill_selection() -> void:
+	if sim.campaign == null or selected_units.is_empty():
+		_on_alert("Select a soldier first.", camera.focus)
+		return
+	var killed := 0
+	var last := camera.focus
+	for id in selected_units.duplicate():
+		var unit: Soldier = sim.campaign.units.get(id)
+		if unit == null or unit.health <= 0.0:
+			continue
+		last = unit.global_position
+		unit.apply_damage(1000.0)
+		killed += 1
+	_prune_selection()
+	_refresh_selection()
+	_on_alert("%d soldier%s killed." % [killed, "" if killed == 1 else "s"], last)
+
+
+## Wound the selected soldier where, and as hard as, the panel says.
+##
+## Injuries persist across military and civilian roles — a veteran who has lost
+## one arm works at 45% and one who has lost both cannot work at all — and
+## arranging that deliberately in a fight is close to impossible, which is why
+## the location and the severity are choices rather than a fixed blow. The kind
+## is always a slash: it is the only one that severs a limb, and severing is the
+## case the persistence rule is really about.
+func _dev_wound_selection() -> void:
+	var unit := _dev_selected_soldier()
+	if unit == null:
+		_on_alert("Select a living soldier to wound.", camera.focus)
+		return
+	var location := dev.wound_location()
+	var result := unit.receive_hit(location, "slash", dev.wound_force())
+	if not result.get("ok", false):
+		_on_alert("%s: %s" % [unit.given_name, result.get("reason", "no effect")],
+				unit.global_position)
+		return
+	var note: String = "severed" if result.severed else (
+			"disabled" if result.disabled else result.outcome)
+	_on_alert("%s took a slash to the %s — %s, %.0f condition lost."
+			% [unit.given_name, location.replace("_", " "), note, result.damage],
+			unit.global_position)
+	_refresh_selection()
+
+
+## The one soldier a wound applies to: the first of the selection, so that a
+## whole company being held does not make the tool refuse.
+func _dev_selected_soldier() -> Soldier:
+	if sim.campaign == null or selected_units.is_empty():
+		return null
+	var unit: Soldier = sim.campaign.units.get(selected_units[0])
+	if unit == null or unit.health <= 0.0:
+		return null
+	return unit
+
+
+## Poison one of the settlement's own wells.
+##
+## Nothing the game ships does this. The sabotage mission runs one way only, at
+## the rival's well, so the entire purging feature — a worker sent to bale the
+## shaft dry and scrub it out, the settlement with nowhere to drink while he
+## works, a fire breaking the job off — has never been reachable in play.
+##
+## Written into `WaterSystem.wells` directly, which is a public field the class
+## deliberately does not cache, because there is no public method that poisons a
+## friendly well: `poison()` is the scout mission and refuses any other target.
+## `well_info` is called first for the `_sync_wells` inside it, so a well
+## finished since the last tick is in the table before it is written to.
+func _dev_poison_well() -> void:
+	var well: Building = null
+	if selected_building != null and is_instance_valid(selected_building) \
+			and selected_building.type_id == "well" \
+			and not selected_building.under_construction:
+		well = selected_building
+	else:
+		var nearest := INF
+		for b in sim.buildings:
+			if b.type_id != "well" or b.under_construction:
+				continue
+			var d: float = b.global_position.distance_squared_to(camera.focus)
+			if d < nearest:
+				nearest = d
+				well = b
+	if well == null:
+		_on_alert("There is no finished well to poison.", camera.focus)
+		return
+	var info: Dictionary = sim.water.well_info(well.id)
+	if info.is_empty():
+		_on_alert("That well has no water reserve yet.", well.global_position)
+		return
+	if info.get("poisoned", false):
+		_on_alert("That well is already poisoned.", well.global_position)
+		return
+	sim.water.wells[well.id].poison = 1.0
+	sim.water.wells[well.id].poison_days = WaterSystem.POISON_DAYS
+	_clear_selection()
+	selected_building = well
+	camera.focus_on(well.global_position, 45.0)
+	_refresh_selection()
+	_on_alert("The well is poisoned for %d days. Its panel now offers to purge it."
+			% int(WaterSystem.POISON_DAYS), well.global_position)
+
+
+## Set the selected building alight.
+##
+## Fire now crosses to whatever stands close by and can reach the keep, which
+## ends the run, and the only source in ordinary play is a rival firepot — so
+## short of provoking a raid there is no way to look at any of it.
+func _dev_ignite() -> void:
+	var b := selected_building
+	if b == null or not is_instance_valid(b) or sim.buildings_by_id.get(b.id) != b:
+		_on_alert("Select one of your buildings to set alight.", camera.focus)
+		return
+	b.apply_damage(0.0, DEV_FIRE)
+	_refresh_selection()
+	_on_alert("%s is alight. Wells can send water; close roofs will catch."
+			% b.display_name(), b.global_position)
+
+
+## Move the calendar to `target`, which must be in the future.
+##
+## The marker moves with the day for the reason `SaveGame.restore` gives: the
+## daily update charges for the interval since the marker, so a jump that left
+## it behind billed the settlement for every skipped day of eating, tool wear and
+## road decay on the next midnight. `Simulation.set_day` parks the marker on the
+## new day itself, which is exactly the accounting wanted here — a skipped day
+## was not lived and must not be paid for.
+##
+## Nothing in between is simulated, and the alert says so. The rival town grows
+## on its own clock of accumulated seconds, so a calendar jump does not age it;
+## seasons, the year and the frost are pure functions of the day counter and do
+## move. That asymmetry is real and worth stating rather than hiding.
+func _dev_set_day(target: float, note: String) -> void:
+	if target <= sim.day:
+		_on_alert("%s — already there." % note, camera.focus)
+		return
+	var skipped: float = target - sim.day
+	sim.set_day(target)
+	clock.elapsed_days = target
+	clock.set_day_marker(floori(target))
+	world.set_time_of_day(clock.day_fraction(), clock.season_fraction())
+	hud.refresh()
+	_on_alert("%s. %.1f days skipped — nothing in between was simulated."
+			% [note, skipped], camera.focus)
+
+
+func _dev_jump_season() -> void:
+	var length := float(Config.DAYS_PER_SEASON)
+	var target := (floorf(sim.day / length) + 1.0) * length
+	_dev_set_day(target, "%s of year %d begins"
+			% [Clock.season_at(target), Clock.year_at(target)])
+
+
+## The eve of the next frost that actually bites. The opening winter takes
+## nothing by design (`Config.MILD_WINTERS`), so a jump to the next winter would
+## land on a frost with no consequence and teach the wrong thing about the rule;
+## this walks forward a year at a time until the frost is a hard one.
+func _dev_jump_to_frost() -> void:
+	var frost: float = sim.day + Clock.days_to_frost(sim.day)
+	while not Clock.frost_is_hard_at(frost):
+		frost += float(Clock.days_per_year())
+	_dev_set_day(frost - DEV_FROST_LEAD,
+			"The hard frost of year %d is a quarter-day off" % Clock.year_at(frost))
 
 
 # ---------------------------------------------------------------------------
@@ -1839,6 +2434,8 @@ func _save_screenshot(tag: String) -> String:
 	var path := "%s/%s_%d.png" % [dir, tag, Time.get_ticks_msec()]
 	image.save_png(path)
 	print("screenshot: ", ProjectSettings.globalize_path(path))
+	if tag == "manual":
+		_on_alert("Screenshot saved to " + ProjectSettings.globalize_path(path), camera.focus)
 	return ProjectSettings.globalize_path(path)
 
 
@@ -1941,7 +2538,7 @@ func _bridge_click(screen_position: Vector2) -> void:
 func _update_bridge_preview() -> void:
 	if not _bridge_start.is_finite(): return
 	var mouse := get_viewport().get_mouse_position()
-	if hud.blocks_mouse(mouse): return
+	if _ui_blocks(mouse): return
 	var hit := _bridge_hit(mouse)
 	if not hit.hit or not sim.scouting.explored_at(hit.position):
 		if is_instance_valid(_bridge_preview): _bridge_preview.queue_free()

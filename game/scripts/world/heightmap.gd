@@ -20,7 +20,6 @@ var generation_version := 1
 var heights := PackedFloat32Array()
 var surface := PackedByteArray()
 var fertility := PackedFloat32Array()
-var _rng := RandomNumberGenerator.new()
 
 
 func generate(seed_value: int, size_m: float = Config.WORLD_SIZE, version: int = 1) -> void:
@@ -32,7 +31,6 @@ func generate(seed_value: int, size_m: float = Config.WORLD_SIZE, version: int =
 	if version >= 2:
 		_generate_geography(seed_value)
 		return
-	_rng.seed = seed_value
 	heights.resize(n * n)
 	surface.resize(grid_size * grid_size)
 	fertility.resize(grid_size * grid_size)
@@ -146,11 +144,6 @@ func height_at(x: float, z: float) -> float:
 	var h11 := corner(i + 1, j + 1)
 	return lerpf(lerpf(h00, h10, tx), lerpf(h01, h11, tx), tz)
 
-
-func height_at_v(p: Vector3) -> float:
-	return height_at(p.x, p.z)
-
-
 func normal_at(x: float, z: float) -> Vector3:
 	var e := Config.CELL * 0.5
 	var hl := height_at(x - e, z)
@@ -180,12 +173,6 @@ func cell_surface(cx: int, cz: int) -> int:
 	if cx < 0 or cz < 0 or cx >= grid_size or cz >= grid_size:
 		return Surface.WATER
 	return surface[cz * grid_size + cx]
-
-
-func surface_at(p: Vector3) -> int:
-	var c := world_to_cell(p)
-	return cell_surface(c.x, c.y)
-
 
 func cell_fertility(cx: int, cz: int) -> float:
 	if cx < 0 or cz < 0 or cx >= grid_size or cz >= grid_size:

@@ -158,15 +158,6 @@ func hostile_scouts() -> Array[Citizen]:
 		if scout != null and job.state in ["approach","poisoning"]: out.append(scout.person)
 	return out
 
-func sabotage_target(person_id: int) -> Vector3:
-	if sim.scouting == null: return Vector3.INF
-	for job in poison_jobs.values():
-		var scout: Scout = sim.scouting.scouts.get(job.scout_id)
-		if scout != null and scout.person.id == person_id:
-			var b: Building = _buildings().get(job.target_id)
-			if b != null: return b.global_position
-	return Vector3.INF
-
 ## `faction` is the drinker's side. Callers inside the tick loop already hold
 ## the packed key and pass `_faction_of(key)` rather than paying for `_faction`
 ## a second time for the same person.
@@ -240,7 +231,7 @@ func _damage(c: Citizen, amount: float) -> void:
 ##
 ## The wrapper exists so that holding it still cannot outlive the tick. Leaving
 ## the flag set past the end — through a future early `return` in `_tick`, say —
-## would serve a stale set to `well_info` and `sabotage_target` afterwards, and
+## would serve a stale set to `well_info` afterwards, and
 ## then to a well that a player demolished between ticks. Keep the body in
 ## `_tick` and let this clear it.
 func tick(delta: float) -> void:
@@ -314,17 +305,7 @@ func _tick(delta: float) -> void:
 	if sim.campaign != null:
 		for c in sim.campaign._workers.duplicate():
 			if c.service_health > 0: continue
-			var farm: Building = sim.campaign._enemy_type("farm")
-			if farm != null:
-				sim.campaign._protect_farm(farm,false)
-				farm.workers.erase(c.id)
-				farm.sync_fields_to_workers()
-				sim.campaign._protect_farm(farm,true,false)
-			sim.campaign._workers.erase(c)
-			sim.campaign._worker_leg.erase(c.id)
-			sim.campaign._worker_wait.erase(c.id)
-			sim.campaign.town_population = maxi(0,sim.campaign.town_population-1)
-			c.queue_free()
+			sim.campaign.remove_grower(c)
 
 func _drink(c: Citizen, key: int, delta: float) -> void:
 	var job: Dictionary = drinkers[key]
