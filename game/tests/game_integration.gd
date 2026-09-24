@@ -594,7 +594,99 @@ func _developer_guard() -> void:
 	await process_frame
 
 
+## The first playtest's list: homes are houses, old saves are re-homed, rates
+## are recorded, the lodge and keep panels lead where the player wanted, and a
+## mustered force gets its unit grid.
+func _playtest_fixes() -> void:
+	var game := _new_game(42)
+	var sim := game.sim
+	var houses := sim.buildings.filter(func(b): return b.type_id == "house")
+	_check(houses.size() == 5 and sim.keep.def.houses == 0 and sim.keep.residents.is_empty(),
+			"the opening has five hovels and nobody lives in the keep")
+	sim.workforce.mark_all_dirty()
+	sim.tick(0.1)
+	_check(sim.stat_homeless == 0 and sim.citizens.all(func(c): return c.home_id >= 0),
+			"every opening settler has a hovel")
+	var free_beds := 0
+	for b in houses:
+		free_beds += b.def.houses - b.residents.size()
+	_check(free_beds >= Config.IMMIGRATION_GROUP_MIN,
+			"the opening leaves room for the first newcomers (%d beds)" % free_beds)
+
+	# A save from before: the keep slept people, houses wore the old model.
+	var old := SaveGame.capture(game)
+	old.erase("housing_layout")
+	var keep_record: Dictionary = {}
+	for record in old.buildings:
+		if record.type_id == "keep": keep_record = record
+	var moved: Array = []
+	for record in old.buildings:
+		if record.type_id == "house":
+			record.asset_id = "house_small_02"
+			if moved.is_empty() and not record.residents.is_empty():
+				moved.append(record.residents.pop_back())
+	keep_record.residents = moved.duplicate()
+	for person in old.citizens:
+		if moved.has(person.id): person.home_id = keep_record.id
+	var error := game.restore_from(old)
+	sim = game.sim
+	_check(error == "" and sim.keep.residents.is_empty()
+			and sim.buildings.filter(func(b): return b.type_id == "house").all(
+					func(b): return b.asset_id == "house_hovel"),
+			"an old save loads with its keep emptied and its houses made hovels: " + error)
+	sim.workforce.mark_all_dirty()
+	sim.tick(0.1)
+	_check(not moved.is_empty() and sim.citizens_by_id[moved[0]].home_id >= 0,
+			"the settler who lived in the keep is found a hovel")
+
+	sim._eat_meal(sim.citizens[0])
+	_check(sim.ledger.used_per_day(Config.Res.FOOD) >= Config.MEAL_FOOD * 0.99,
+			"a meal is recorded as food used")
+	game.hud.refresh()
+	_check(game.hud._res_labels[Config.Res.FOOD].tooltip_text.contains("used"),
+			"hovering food shows what is produced and used")
+
+	var lodge := sim.place_building("scout_lodge",
+			sim.keep.global_position + Vector3(-40, 0, -30), 0.0, true)
+	game.selected_building = lodge
+	game._refresh_selection()
+	var manage: Button = null
+	for button in game.hud._selection_actions.get_children():
+		if button is Button and button.text == "Manage scouts": manage = button
+	_check(manage != null, "a scout lodge offers its scouts screen without training anyone")
+	if manage != null:
+		manage.pressed.emit()
+		_check(game.scouting_open, "Manage scouts opens the scouts screen")
+	game._clear_selection()
+	game.selected_building = sim.keep
+	game._refresh_selection()
+	_check(game.hud._selection_body.text.contains("Research"),
+			"the keep's panel says what is being researched")
+	game._clear_selection()
+
+	game.dev_mode = true
+	game._dev_command("soldier")
+	game._dev_command("soldier")
+	game.dev_mode = false
+	game.selected_scout = 7
+	game.army_open = true
+	game.hud.muster_requested.emit()
+	_check(game.selected_units.size() >= 2 and game.selected_scout < 0 and not game.army_open,
+			"muster makes a fresh selection of the force")
+	_check(game.hud._unit_grid_panel.visible
+			and game.hud._unit_grid.get_child_count() == game.selected_units.size(),
+			"the selected force appears in the unit grid")
+	game.hud.unit_pick_requested.emit(game.selected_units[0], false)
+	_check(game.selected_units.size() == 1, "clicking a tile picks out one soldier")
+	game._clear_selection()
+	game._refresh_selection()
+	_check(not game.hud._unit_grid_panel.visible, "the grid goes when nobody is selected")
+	game.free()
+	await process_frame
+
+
 func _run() -> void:
+	await _playtest_fixes()
 	await _selection_and_placement()
 	await _roads_and_research()
 	await _clock_and_load()

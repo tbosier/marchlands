@@ -206,6 +206,9 @@ func _economy(world_seed: int, days: int) -> void:
 	_build(game, "granary", centre + Vector3(40, 0, 4))
 	_build(game, "house", centre + Vector3(-42, 0, 8))
 	_build(game, "house", centre + Vector3(8, 0, 52))
+	# A second well: each keeps about twenty in water, and newcomers do not
+	# come to a march that cannot water them.
+	_build(game, "well", centre + Vector3(-34, 0, 30))
 	for pair in [["logging_camp", ResourceNodes.Kind.TREE], ["quarry", ResourceNodes.Kind.STONE]]:
 		var node := game.world.nodes.find_nearest(pair[1], centre, 350.0, false)
 		_check(node != null, "seed %d has resource for %s" % [world_seed, pair[0]])

@@ -1,5 +1,17 @@
 extends "res://tests/scouting.gd"
 
+## The scouting fixture, cut back to a single well. The opening now has two,
+## and these fixtures are about what one well does — its only-well warnings,
+## a purge that leaves nowhere to drink — so the second is taken down first.
+func _prepare_scouts() -> SeededGame:
+	var game := super()
+	var wells := game.sim.buildings.filter(func(b): return b.type_id == "well")
+	for i in range(1, wells.size()):
+		game.sim.demolish(wells[i], false)
+	game.sim.water._sync_wells()
+	return game
+
+
 func _water_step(game: SeededGame, delta: float = 0.25) -> void:
 	game.sim.day += delta / Config.DAY_LENGTH
 	game.sim.water.tick(delta)
@@ -864,7 +876,39 @@ func _purge_gives_way_under_a_standing_carrier() -> void:
 	game.free()
 	await process_frame
 
+## A well keeps about twenty people in water, reports what is being drawn from
+## it, and a march left dry is told so — once, not every tick.
+func _well_load_and_thirst_alert() -> void:
+	var game := _prepare_scouts()
+	var sim := game.sim
+	var water: WaterSystem = sim.water
+	_check(int(WaterSystem.SERVES) == 20, "a well serves about twenty people (%.1f)" % WaterSystem.SERVES)
+	var well: Building = sim.buildings.filter(func(b): return b.type_id == "well")[0]
+	var drinker: Citizen = sim.citizens[0]
+	drinker.hydration = 0.2
+	for i in 400:
+		_water_step(game)
+		if drinker.hydration >= 0.9: break
+	var info := water.well_info(well.id)
+	_check(float(info.drawn_per_day) > 0.5 and float(info.serves) == WaterSystem.SERVES,
+		"the well's panel data reports what is being drawn from it (%.2f)" % float(info.drawn_per_day))
+	var alerts: Array = []
+	sim.alert.connect(func(text: String, _at: Vector3): alerts.append(text))
+	for id in water.wells:
+		water.wells[id].water = 0.0
+	for c in sim.population_members():
+		c.hydration = 0.0
+	water._thirst_alert_at = 0.0
+	water._warn_thirst()
+	water._warn_thirst()
+	var thirsty := alerts.filter(func(t: String): return t.contains("going thirsty"))
+	_check(thirsty.size() == 1 and thirsty[0].contains("run dry"),
+		"a dry march is told once, and why: %s" % str(thirsty))
+	game.free()
+
+
 func _run() -> void:
+	await _well_load_and_thirst_alert()
 	await _hydration_and_claims()
 	await _loaded_drinking_destination(false)
 	await _loaded_drinking_destination(true)

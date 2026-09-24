@@ -16,8 +16,8 @@ func _inspect(game: SeededGame, world_seed: int, size_m: int) -> void:
 	var label := "seed=%d size=%d" % [world_seed, size_m]
 	var buildings: Array = game.sim.buildings.duplicate()
 	buildings.append_array(game.sim.campaign.enemy_buildings.values())
-	_check(game.sim.buildings.size() == 7 and game.sim.campaign.enemy_buildings.size() == 6,
-			label + " contains the complete seven-building opening and six-building rival")
+	_check(game.sim.buildings.size() == 9 and game.sim.campaign.enemy_buildings.size() == 6,
+			label + " contains the complete nine-building opening and six-building rival")
 	var issues: Array[String] = []
 	var max_foundation_gap := 0.0
 	var wells := 0
@@ -73,7 +73,7 @@ func _inspect(game: SeededGame, world_seed: int, size_m: int) -> void:
 				issues.append("building #%d overlaps #%d" % [buildings[i].id, buildings[j].id])
 	for issue in issues:
 		print("SPAWN_ISSUE %s %s" % [label, issue])
-	_check(wells == 2, label + " supplies both settlements with a physical well")
+	_check(wells == 3, label + " supplies the player's two wells and the rival's one")
 	_check(issues.is_empty(), label + " has dry, grounded, unobstructed, nonoverlapping starting buildings")
 	print("SPAWN_METRIC %s buildings=%d max_foundation_gap=%.3f issues=%d" %
 			[label, buildings.size(), max_foundation_gap, issues.size()])

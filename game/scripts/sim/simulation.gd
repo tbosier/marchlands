@@ -32,6 +32,11 @@ var registry: AssetRegistry
 
 var jobs := JobBoard.new()
 var stores := Stores.new()
+## Production and consumption rates for the interface. See `ResourceLedger`.
+var ledger := ResourceLedger.new()
+## Off only for experiments that must hold the population fixed, so that two
+## runs differ in the one thing being measured and not in who moved in.
+var immigration_enabled := true
 var workforce := Workforce.new()
 var production := Production.new()
 var population := Population.new()
@@ -80,6 +85,7 @@ func setup(world_node: World, asset_registry: AssetRegistry,
 	world = world_node
 	registry = asset_registry
 	_rng.seed = seed_value + 4242
+	stores.ledger = ledger
 
 	# The simulation's day and the clock's day have to be the same day. They
 	# advance at the same rate, but the clock opens at mid-morning while this
@@ -135,6 +141,7 @@ func tick(delta: float) -> void:
 	if delta <= 0.0:
 		return
 	Perf.begin("sim.total")
+	ledger.decay(delta)
 
 	if water != null: water.tick(delta)
 	_advance_civilian_conditions(delta)
@@ -256,6 +263,13 @@ func _daily(elapsed_days: float) -> void:
 	Perf.end("sim.daily")
 
 
+## A citizen sits down to a meal: `Citizen.take_meal` plus the food it cost,
+## for the ledger. Every meal path in this file comes through here.
+func _eat_meal(c: Citizen) -> void:
+	ledger.used(Config.Res.FOOD, Config.MEAL_FOOD)
+	c.take_meal(day)
+
+
 ## Tools are worn out by the people using them. While the march has some in
 ## store every trade works faster; when they run out, work slows to bare hands
 ## — which is the whole reason to dig iron and keep a forge.
@@ -268,14 +282,51 @@ func _consume_tools(elapsed_days: float) -> void:
 		return
 	var wanted := workers * Config.TOOLS_PER_WORKER_DAY * elapsed_days
 	var short := stores.consume(Config.Res.TOOLS, wanted)
+	ledger.used(Config.Res.TOOLS, wanted - short)
 	tools_bonus = 1.0 + Config.TOOLS_WORK_BONUS * (
 			0.0 if wanted <= 0.0 else clampf(1.0 - short / wanted, 0.0, 1.0))
 
 
+## How many more people the settlement's finished wells can keep in water, or
+## -1 when there is no water system to ask (isolated simulation tests).
+func water_room() -> int:
+	if water == null:
+		return -1
+	var wells := 0
+	for b in buildings:
+		if b.def.role == BuildingDefs.Role.WELL and not b.under_construction:
+			wells += 1
+	return maxi(0, int(float(wells) * WaterSystem.SERVES) - population_members().size())
+
+
+## What is holding newcomers back, in a sentence, or "" when nothing is — the
+## gates `Population.consider_immigration` applies, in the order it applies
+## them. For the population readout, so a stalled march says why.
+func immigration_blocker() -> String:
+	var members := population_members()
+	var spare := population.housing_capacity(buildings) - members.size()
+	if spare < Config.IMMIGRATION_GROUP_MIN:
+		return "Newcomers need beds: build or upgrade houses."
+	var room := water_room()
+	if room >= 0 and room < Config.IMMIGRATION_GROUP_MIN:
+		return "Newcomers need water: each well serves about %d people. Build another well." \
+				% int(WaterSystem.SERVES)
+	var needed := Config.IMMIGRATION_MIN_FOOD_DAYS
+	var season := Clock.season_index_at(day)
+	if season == Clock.AUTUMN or season == Clock.WINTER:
+		var year := float(Clock.days_per_year())
+		needed = maxf(needed, year - fposmod(day, year))
+	if population.food_days_remaining(members) < needed:
+		return "Newcomers want food to last %d days%s." % [ceili(needed),
+				" — through to the spring" if needed > Config.IMMIGRATION_MIN_FOOD_DAYS else ""]
+	return ""
+
+
 func _run_immigration() -> void:
-	if keep == null:
+	if keep == null or not immigration_enabled:
 		return
-	var decision := population.consider_immigration(buildings, population_members())
+	var decision := population.consider_immigration(buildings, population_members(), day,
+			water_room())
 	var count: int = decision.get("count", 0)
 	if count <= 0:
 		return
@@ -304,6 +355,27 @@ func _run_immigration() -> void:
 	var reasons: Array = decision.get("reasons", [])
 	alert.emit("%d settlers are travelling to your lands — %s."
 			% [count, ", ".join(reasons)], entry)
+
+
+## How well the workplaces are staffed: finished buildings with worker places,
+## how many of them have nobody, how many are short, and how many places are
+## open in all. For the population readout's tooltip.
+func staffing_summary() -> Dictionary:
+	var empty: Array[String] = []
+	var short := 0
+	var open := 0
+	for b in buildings:
+		if b.under_construction or b.def.worker_slots <= 0:
+			continue
+		var missing := b.def.worker_slots - b.workers.size()
+		if missing <= 0:
+			continue
+		open += missing
+		if b.workers.is_empty():
+			empty.append(b.def.display_name)
+		else:
+			short += 1
+	return {"empty": empty, "short": short, "open_places": open}
 
 
 ## Say why the settlement has stopped.
@@ -385,7 +457,7 @@ func _tick_citizen(c: Citizen, delta: float) -> void:
 	# and is eaten once before asking the household for another ration.
 	if c is Soldier and c.rations >= Config.MEAL_FOOD and c.is_hungry(day):
 		c.rations -= Config.MEAL_FOOD
-		c.take_meal(day)
+		_eat_meal(c)
 		if c.state == Citizen.State.EATING:
 			_end_meal(c)
 
@@ -654,6 +726,7 @@ func _tick_haul(c: Citizen, delta: float) -> void:
 	var left := 0.0
 	if dst.under_construction:
 		left = dst.deliver_material(job.res, amount)
+		ledger.used(job.res, amount - left)
 	else:
 		left = amount - dst.add(job.res, amount)
 	if left > 0.01:
@@ -706,6 +779,7 @@ func _tick_gather(c: Citizen, delta: float) -> void:
 			c.update_animation(delta, 0.0)
 			return
 		var taken := world.nodes.harvest(node, Config.CARRY_CAPACITY, day)
+		ledger.made(job.res, taken)
 		node.reserved_by = -1
 		if taken <= 0.01:
 			_retire_job(c)
@@ -809,6 +883,7 @@ func _tick_harvest(c: Citizen, delta: float) -> void:
 			c.update_animation(delta, 0.0)
 			return
 		var yield_amount := Config.harvest_load(farm.crop_growth)
+		ledger.made(Config.Res.FOOD, yield_amount)
 		c.pick_up(Config.Res.FOOD, yield_amount, registry)
 		c.state = Citizen.State.TRAVELLING
 		c.task_label = "carrying grain"
@@ -920,7 +995,9 @@ func _tick_craft(c: Citizen, delta: float) -> void:
 	if not c.work_tick(delta):
 		c.update_animation(delta, 0.0)
 		return
-	shop.craft()
+	for res in shop.def.consumes:
+		ledger.used(int(res), float(shop.def.consumes[res]) * Config.CRAFT_BATCH)
+	ledger.made(shop.def.produces, shop.craft())
 	jobs.complete(job)
 	_go_idle(c)
 
@@ -951,6 +1028,7 @@ func _tick_fell(c: Citizen, delta: float) -> void:
 			c.update_animation(delta, 0.0)
 			return
 		var taken := world.nodes.fell(node, Config.CARRY_CAPACITY)
+		ledger.made(Config.Res.TIMBER, taken)
 		if taken <= 0.01:
 			node.reserved_by = -1
 			_retire_job(c)
@@ -1169,7 +1247,7 @@ func _tick_meal(c: Citizen, delta: float) -> void:
 		c.carrying_amount -= Config.MEAL_FOOD
 		if c.carrying_amount <= 0.0:
 			c.drop()
-		c.take_meal(day)
+		_eat_meal(c)
 		_end_meal(c)
 		return
 	# The route to the counter or the door failed. `has_arrived` never turns
@@ -1195,7 +1273,7 @@ func _tick_meal(c: Citizen, delta: float) -> void:
 				c.carrying_amount -= Config.MEAL_FOOD
 				if c.carrying_amount <= 0.0:
 					c.drop()
-				c.take_meal(day)
+				_eat_meal(c)
 			# Their house came down while they were at the granary. They keep
 			# hold of the food and walk it to a store instead.
 			_end_meal(c)
@@ -1234,7 +1312,7 @@ func _tick_meal(c: Citizen, delta: float) -> void:
 			return
 		if counter.remove(Config.Res.FOOD, Config.MEAL_FOOD) \
 				> Config.MEAL_FOOD * 0.9:
-			c.take_meal(day)
+			_eat_meal(c)
 		_end_meal(c)
 		if c.job == null and c.carrying_amount > 0.01:
 			_carry_stray_load(c, delta)
@@ -1275,7 +1353,7 @@ func _tick_meal(c: Citizen, delta: float) -> void:
 ## arriving and eating, in which case the errand simply carries on.
 func _sit_down(c: Citizen, home: Building) -> void:
 	if home.take_meal():
-		c.take_meal(day)
+		_eat_meal(c)
 		_end_meal(c)
 
 

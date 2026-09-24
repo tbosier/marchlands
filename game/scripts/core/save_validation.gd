@@ -35,6 +35,8 @@ static func validate(data: Variant, registry: AssetRegistry = null,
 				% [data.version, expected_version]
 	if data.get("resource_layout", 2) != 2:
 		return "unknown resource layout"
+	if data.get("housing_layout", 2) != 2:
+		return "unknown housing layout"
 	error = RoadResearch.validate(data.get("research", {}))
 	if error != "": return "research: " + error
 	# This first pass checks the campaign schema. Player-target references
@@ -55,7 +57,7 @@ static func validate(data: Variant, registry: AssetRegistry = null,
 		return "save seed exceeds the supported range"
 	error = _fields(data, {"saved_at": TYPE_STRING, "day_marker": TYPE_FLOAT,
 		"resume_speed_index": TYPE_INT, "speed_layout": TYPE_INT,
-		"resource_layout": TYPE_INT}, "save", true)
+		"resource_layout": TYPE_INT, "housing_layout": TYPE_INT}, "save", true)
 	if error != "":
 		return error
 	if data.get("speed_layout", 1) not in [1, 2]:

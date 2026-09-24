@@ -136,6 +136,10 @@ func try_spend(cost: Dictionary) -> bool:
 	return true
 
 
+## Written by `spend`, when the simulation hands one over. See ResourceLedger.
+var ledger: ResourceLedger
+
+
 ## Take `cost` out of the settlement's stores, nearest-to-dearest order
 ## unspecified — this is for abstracted spending (road works), not hauling.
 func spend(cost: Dictionary) -> void:
@@ -156,6 +160,8 @@ func spend(cost: Dictionary) -> void:
 			# quietly take less, which bought road works for nothing.
 			remaining -= b.remove(res, minf(remaining, b.available(res)))
 		_totals[res] = maxf(0.0, _totals[res] - (float(cost[res]) - remaining))
+		if ledger != null:
+			ledger.used(int(res), float(cost[res]) - remaining)
 
 
 # --- Lookup -----------------------------------------------------------------

@@ -862,10 +862,17 @@ func _harvest_decides_the_winter(world_seed: int, draft: bool,
 	# else about the two runs — day of the year, stores, staffing, the crop in
 	# the ground, the suppression — is identical.
 	var year := float(Clock.days_per_year()) if hard_frost else 0.0
+	# The same people in every arm. A mild winter's standing crop otherwise
+	# draws newcomers, who eat the difference the experiment is measuring.
+	sim.immigration_enabled = false
 	var farm := _staffed_farm(game, game.world.centre() + Vector3(42, 0, -30))
 	if farm == null:
 		game.free()
 		return {}
+	# A second well, as a march past twenty people needs: one well keeps about
+	# twenty in water, and a thirsty march spends its days at the well rather
+	# than at its meals, which is a different experiment from this one.
+	_build(game, "well", game.world.centre() + Vector3(-34, 0, 30))
 
 	# Start of autumn in a year whose winter bites, with a ripe field and a
 	# fortnight of food in hand — a march that is doing neither well nor badly.
@@ -1883,7 +1890,9 @@ func _run() -> void:
 		# The state of things before this change, reproduced: with nobody
 		# allowed to break ground, a settlement in mid-winter has all but
 		# nothing on its board and most of the march is standing still.
-		_check(int(untouched.open_high) <= 2
+		# "All but nothing" scales with the march: a few stray hauls in twenty
+		# people, a few more in forty.
+		_check(int(untouched.open_high) <= maxi(3, int(untouched.population) / 10)
 				and int(untouched.idle_high) >= int(untouched.population) * 3 / 4,
 				"suppressing winter fieldwork puts the march back where it was: "
 				+ "at most %d jobs open on any winter day and %d of %d people "

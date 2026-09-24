@@ -231,60 +231,40 @@ def keep_tier1() -> Asset:
 # Houses
 # --------------------------------------------------------------------------
 
-def house_small_01() -> Asset:
-    """Thatched cottage: stone socle, close studding, a porch and a wood pile.
+def house_hovel() -> Asset:
+    """A one-room hovel: the first home a settler is given.
 
-    The detail that makes a cottage read is all at eye level — the porch, the
-    shuttered window, the stack of firewood, the fence — because that is where
-    the silhouette meets the ground the citizens walk on.
+    Low walls on a rough stone course, a thatch that comes down almost to head
+    height, one door, one small window and a stub of a smoke stack. No porch,
+    no fence, no second storey — the cottage (`house_small_02`) is what a
+    household earns by upgrading, so the difference has to read from across
+    the settlement.
     """
-    mb = M.MeshBuilder("house_small_01")
-    w, d, h = 6.2, 7.2, 3.1
-    rng = random.Random(3)
+    mb = M.MeshBuilder("house_hovel")
+    w, d, h = 4.2, 4.6, 2.2
+    rng = random.Random(5)
 
-    K.foundation(mb, w, d, 0.3, material="stone_dark")
-    K.stone_socle(mb, w + 0.24, d + 0.24, 0.66, center=(0, 0, 0.08),
+    K.foundation(mb, w, d, 0.2, material="stone_dark")
+    K.stone_socle(mb, w + 0.18, d + 0.18, 0.5, center=(0, 0, 0.05),
                   material="stone_dark")
     K.wall_box(mb, w, d, h, material="plaster_warm", center=(0, 0, 0.1))
-    K.timber_frame(mb, w, d, h, center=(0, 0, 0.1), posts=4, beam=0.16)
+    K.timber_frame(mb, w, d, h, center=(0, 0, 0.1), posts=3, beam=0.14)
 
-    # Close studding on the front: short vertical studs between the rails,
-    # which is what separates a cottage from a plain plastered box. Fine
-    # dressing, so it leaves with the rest of tier 2 at distance.
-    with mb.detail(2):
-        for i in range(7):
-            x = -w * 0.42 + w * 0.84 * i / 6.0
-            mb.add(*M.box(0.11, 0.1, h * 0.44,
-                          center=(x, -d * 0.5 - 0.03, 0.1 + h * 0.54)),
-                   "timber_dark")
-
-    K.door(mb, center=(-1.4, -d * 0.5 - 0.05, 0.1), width=0.95, height=1.95)
-    # Porch over the door.
-    K.awning(mb, 1.9, 1.0, 2.5, center=(-1.4, -d * 0.5, 0.1), drop=0.35,
-             material="thatch", facing="-y")
-    K.window(mb, center=(1.3, -d * 0.5 - 0.04, 1.35), width=0.78, height=0.85,
+    K.door(mb, center=(-0.8, -d * 0.5 - 0.05, 0.1), width=0.85, height=1.75)
+    K.window(mb, center=(0.9, -d * 0.5 - 0.04, 1.15), width=0.55, height=0.55,
              shutters=True)
-    K.window(mb, center=(w * 0.5 + 0.04, 1.0, 1.35), width=0.72, height=0.85,
-             facing="+x")
-    K.window(mb, center=(-w * 0.5 - 0.04, -1.2, 1.35), width=0.6, height=0.7,
-             facing="-x")
 
-    roof_h = K.roof_thatch(mb, w, d, h + 0.1, pitch=0.52, overhang=0.38)
+    roof_h = K.roof_thatch(mb, w, d, h + 0.1, pitch=0.6, overhang=0.34)
     ridge = h + 0.1 + roof_h
-    smoke = K.chimney(mb, center=(w * 0.5 - 1.2, -1.7, h + 0.1), height=2.3,
-                      width=0.68, material="stone_dark", min_top=ridge + 0.8)
+    smoke = K.chimney(mb, center=(w * 0.5 - 0.8, 1.0, h + 0.1), height=1.2,
+                      width=0.5, material="stone_dark", min_top=ridge + 0.35)
 
-    # The life around the house (design doc 2.2).
-    K.log_stack(mb, center=(w * 0.5 + 1.0, 1.9, 0.0), rows=3, cols=3,
-                log_r=0.12, length=1.5, rng=rng)
-    K.barrel_shape(mb, center=(-w * 0.5 - 0.7, -2.2, 0.0), radius=0.3,
-                   height=0.78, hoop_material="timber_dark")
-    K.fence_run(mb, (-w * 0.5 - 1.1, -d * 0.5 - 1.6, 0.0),
-                (w * 0.5 + 1.1, -d * 0.5 - 1.6, 0.0), height=0.85,
-                post_spacing=1.6)
+    # A few logs by the wall is all the life a hovel has room for.
+    K.log_stack(mb, center=(w * 0.5 + 0.55, 0.9, 0.0), rows=2, cols=2,
+                log_r=0.11, length=1.1, rng=rng)
 
-    a = Asset("house_small_01", "building", mb, (w + 2.2, d + 3.2))
-    a.attach("att_entrance", (-1.4, -d * 0.5 - 2.4, 0.0))
+    a = Asset("house_hovel", "building", mb, (w + 1.4, d + 1.6))
+    a.attach("att_entrance", (-0.8, -d * 0.5 - 1.3, 0.0))
     a.attach("att_smoke", smoke)
     return a
 
@@ -966,7 +946,7 @@ BUILDINGS = {
     "mine": mine,
     "blacksmith": blacksmith,
     "keep_tier1": keep_tier1,
-    "house_small_01": house_small_01,
+    "house_hovel": house_hovel,
     "house_small_02": house_small_02,
     "stockpile": stockpile,
     "logging_camp": logging_camp,

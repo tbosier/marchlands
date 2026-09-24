@@ -4,8 +4,26 @@ extends Node3D
 ## Local wells, real drinking journeys and bucket carriers. Water never appears
 ## in the global construction wallet or moves to a fire without a person.
 const CAPACITY := 80.0
-const REFILL_PER_DAY := 40.0
+## A resident drinks about 2 x THIRST_PER_DAY = 0.7 water a day, so a well
+## refilling 14 a day keeps about twenty people watered. It was 40, which
+## kept 57 — more than a march ever put on one well — so wells never ran dry
+## and never mattered. Past twenty, a well's reserve drains and people walk
+## on to the next well, or go thirsty if there is none.
+const REFILL_PER_DAY := 14.0
 const THIRST_PER_DAY := 0.35
+## The least a well must hold to be worth walking to, and what a drinker gives
+## up at: below it the shaft is dry for practical purposes.
+const DRINK_MIN := 1.0
+## What one person heading to a well is counted as taking from it, so that a
+## well with a drink or two in it draws one or two people, not every thirsty
+## person in the march at once.
+const DRINK_PLEDGE := 1.1
+## How many people one well keeps in water at the steady rate.
+const SERVES := REFILL_PER_DAY / (2.0 * THIRST_PER_DAY)
+## Residents this dry are suffering for it; a fifth of the march that dry, or
+## two people in a small one, is worth an alert. See `_warn_thirst`.
+const THIRST_ALERT_AT := 0.1
+const THIRST_ALERT_DAYS := 1.5
 const SEEK_AT := 0.45
 const BUCKET := 4.0
 const POISON_SECONDS := 12.0
@@ -28,6 +46,13 @@ const PURGE_SECONDS := 90.0
 ## counting as a resident for as long as the job lasted.
 const PURGE_STATES := ["approach","purging"]
 var sim: Simulation
+## Water drawn for drinking at each well, as a sum decaying over a day, so it
+## reads as "about this much a day". For the panel only; not saved.
+var _drawn: Dictionary = {}
+var _thirst_alert_at := 0.0
+var _thirst_warned := false
+## Water already spoken for by people on their way to each well, this tick.
+var _pledged: Dictionary = {}
 var world: World
 var registry: AssetRegistry
 var wells: Dictionary = {}
@@ -180,13 +205,18 @@ func hostile_scouts() -> Array[Citizen]:
 ## broken on the building id, which is stable in both, and the result no longer
 ## depends on any insertion order at all: the nearest reachable well, and the
 ## lowest id among equals.
-func _well_for(c: Citizen, faction: int) -> Building:
+## `least` is how much a well must hold to count: a drink for people walking
+## to quench their thirst, a trickle for a bucket carrier, whose every drop
+## goes on a fire.
+func _well_for(c: Citizen, faction: int, least: float = DRINK_MIN) -> Building:
 	var best: Building
 	var distance := INF
 	var buildings := _buildings()
 	var enemy_buildings: Dictionary = sim.campaign.enemy_buildings if sim.campaign != null else {}
 	for id in wells:
-		if wells[id].water < 0.01: continue
+		# Not a trickle: a well with less than a drink in it is not worth the
+		# walk, and whoever went would only stand there waiting for it.
+		if wells[id].water - float(_pledged.get(id, 0.0)) < least: continue
 		var b: Building = buildings.get(id)
 		if b == null or b.under_construction: continue
 		if int(enemy_buildings.has(id)) != faction: continue
@@ -252,6 +282,10 @@ func _tick(delta: float) -> void:
 	var scrubbed := {}
 	for job in carriers.values():
 		if job.state == "purging": scrubbed[job.well_id] = true
+	var decay := exp(-delta / Config.DAY_LENGTH)
+	for id in _drawn.keys():
+		if not wells.has(id): _drawn.erase(id)
+		else: _drawn[id] *= decay
 	for well in wells.values():
 		if scrubbed.has(well.id): well.water = 0.0
 		else: well.water = minf(CAPACITY,well.water+REFILL_PER_DAY*delta/Config.DAY_LENGTH)
@@ -260,6 +294,9 @@ func _tick(delta: float) -> void:
 	var people := _people()
 	for key in drinkers.keys():
 		if not people.has(key): drinkers.erase(key)
+	_pledged.clear()
+	for job in drinkers.values():
+		_pledged[job.well_id] = float(_pledged.get(job.well_id, 0.0)) + DRINK_PLEDGE
 	for key in people:
 		var c: Citizen = people[key]
 		if (c is Soldier and c.health <= 0) or c.service_health <= 0: continue
@@ -283,6 +320,7 @@ func _tick(delta: float) -> void:
 				# `_pack(_faction(c),_identity(c))` for this very person, so the
 				# two fields capture() persists are the same integers either way.
 				drinkers[key] = {"faction":_faction_of(key),"person_id":_identity_of(key),"well_id":well.id}
+				_pledged[well.id] = float(_pledged.get(well.id, 0.0)) + DRINK_PLEDGE
 		if drinkers.has(key): _drink(c,key,delta)
 	# `carriers.has(id)` and not the bare key: one carrier's tick can now end
 	# another's. `_fire_tick` breaks off a purge that is holding the only well dry
@@ -295,6 +333,7 @@ func _tick(delta: float) -> void:
 	_review -= delta
 	if _review <= 0:
 		_review = 2.0
+		_warn_thirst()
 		for b in sim.buildings:
 			# Purges share `carriers`, and a settlement that ordered one must not
 			# thereby stop answering its own fires. Only bucket carriers count
@@ -331,15 +370,57 @@ func _drink(c: Citizen, key: int, delta: float) -> void:
 	if not _move(c,sim.entrance_of(b,"att_entrance"),delta,key): return
 	var well: Dictionary = wells[b.id]
 	var amount := minf(float(well.water),(1.0-c.hydration)*2.0)
-	if amount <= 0.00001: return
-	well.water -= amount
-	c.hydration = minf(1,c.hydration+amount*0.5)
-	if well.poison > 0: c.water_sickness = minf(1,c.water_sickness+well.poison*amount)
-	if c.hydration >= 0.95:
+	if amount > 0.00001:
+		well.water -= amount
+		_drawn[b.id] = float(_drawn.get(b.id, 0.0)) + amount
+		c.hydration = minf(1,c.hydration+amount*0.5)
+		if well.poison > 0: c.water_sickness = minf(1,c.water_sickness+well.poison*amount)
+	# Drunk their fill, or drunk the well dry. Waiting at an empty shaft for
+	# the trickle to refill used to hold people there for days — too long to
+	# eat, since the water errand owns them until it ends — once a well served
+	# more people than it refilled for.
+	if c.hydration >= 0.95 or float(well.water) < DRINK_MIN:
 		drinkers.erase(key)
 		c.clear_goal()
-		c.task_label = "Finished drinking"
+		c.task_label = "Finished drinking" if c.hydration >= 0.95 else "The well ran dry"
+		# A soldier goes back to the post he was ordered to, rather than
+		# standing at the well having forgotten the order.
+		if c is Soldier and c.ordered_to.is_finite() \
+				and c.global_position.distance_to(c.ordered_to) > Config.ARRIVE_RADIUS:
+			c.set_goal(c.ordered_to)
+			c.task_label = "Marching"
 		_resume_civilian(c)
+
+## Say so when a real share of the march is going without water, and why if it
+## can be told: every well dry, or none at all.
+##
+## Once when the thirst sets in, not over and over while it lasts: the alert
+## re-arms only after the march has recovered, and even then not within
+## THIRST_ALERT_DAYS, so a well hovering at empty at 64x does not flood the log.
+## Checked on the two-second review, not every tick.
+func _warn_thirst() -> void:
+	var members := sim.population_members()
+	var dry := 0
+	for c in members:
+		if c.service_health > 0 and c.hydration <= THIRST_ALERT_AT: dry += 1
+	if dry < maxi(2, members.size() / 5):
+		_thirst_warned = false
+		return
+	if _thirst_warned or sim.day < _thirst_alert_at: return
+	_thirst_warned = true
+	_thirst_alert_at = sim.day + THIRST_ALERT_DAYS
+	var own := 0
+	var with_water := 0
+	for b in sim.buildings:
+		if not wells.has(b.id) or b.under_construction: continue
+		own += 1
+		if wells[b.id].water >= 1.0: with_water += 1
+	var why := "Build a well." if own == 0 else (
+			"Every well has run dry. Each serves about %d people; build another." % int(SERVES)
+			if with_water == 0 else
+			"The wells are too far or too few. Each serves about %d people." % int(SERVES))
+	var at: Vector3 = sim.keep.global_position if sim.keep != null else world.centre()
+	sim.alert.emit("%d residents are going thirsty. %s" % [dry, why], at)
 
 func _resume_civilian(c: Citizen) -> void:
 	# The water movement already consumed this tick. Restore the destination
@@ -473,7 +554,7 @@ func _firefighters() -> int:
 ## it again when the chosen well runs dry, so a source nobody could have been
 ## given is not a source anybody is left standing at either.
 func _fire_source(c: Citizen, target: Building) -> Building:
-	var source := _well_for(c,_faction(c))
+	var source := _well_for(c,_faction(c),0.01)
 	if source == null: return null
 	if not world.nav.can_reach(sim.entrance_of(source,"att_entrance"),sim.entrance_of(target,"att_entrance")): return null
 	return source
@@ -536,15 +617,15 @@ func _anyone_could_fetch(head: Vector3, also: Citizen = null) -> bool:
 ## and the poison keeps.
 ##
 ## Releasing a well does not fill it. The shaft was physically baled out, so it
-## comes back at REFILL_PER_DAY -- 40 a day against a DAY_LENGTH of 180 s, about
-## 0.22 a second. It is a candidate for `_well_for` again within a tick, since
+## comes back at REFILL_PER_DAY -- 14 a day against a DAY_LENGTH of 180 s, about
+## 0.08 a second. It is a candidate for `_well_for` again within a tick, since
 ## that asks only for 0.01, and the automatic dispatcher then sends somebody on
 ## its own two-second cadence: measured in `water.gd`, four seconds from the
 ## building catching to a carrier being detached. What is slow is the water, not
 ## the dispatch. Each trip draws whatever has trickled in rather than a full
-## BUCKET -- about one bucket's worth every 18 s, against the twenty buckets a
-## full 80-unit shaft hands out on demand -- so the response is thin for the
-## first minute and ordinary after six, when the well is full again. That is the
+## BUCKET -- about one bucket's worth every 51 s, against the twenty buckets a
+## full 80-unit shaft hands out on demand -- so the response stays thin for a
+## long while: the shaft takes about seventeen minutes at 1x to fill again. That is the
 ## honest price of the order, and it is what the player is warned about when
 ## they give it.
 ##
@@ -886,6 +967,8 @@ func well_info(id: int) -> Dictionary:
 		if job.well_id == id and job.state in PURGE_STATES: data.purge_ordered = true
 	data.sole_well = sim.buildings_by_id.has(id) and _sole_well(id)
 	data.refill_per_day = REFILL_PER_DAY
+	data.drawn_per_day = float(_drawn.get(id, 0.0))
+	data.serves = SERVES
 	return data
 
 func info() -> Dictionary:

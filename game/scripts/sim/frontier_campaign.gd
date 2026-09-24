@@ -395,7 +395,10 @@ func recruit(citizen_id: int = -1) -> String:
 			barracks = b
 			break
 	if barracks == null: return "Build a barracks before recruiting residents."
-	if not sim.stores.try_spend(_recruit_cost(citizen)): return "Recruitment needs 5 available tools and supplies for training and a four-day pack."
+	var cost := _recruit_cost(citizen)
+	if not sim.stores.try_spend(cost): return "Recruitment needs 5 available tools and supplies for training and a four-day pack."
+	# Training eats six; the rest is the pack, recorded as it is eaten below.
+	sim.ledger.unused(Config.Res.FOOD, float(cost.get(Config.Res.FOOD, 0.0)) - 6.0)
 	var identity := SaveGame._capture_citizen(citizen)
 	identity.workplace_id = -1
 	sim.detach_for_service(citizen)
@@ -897,6 +900,7 @@ func command(ids: Array[int], ground: Vector3, target: Dictionary = {}) -> void:
 			destination.x = clampf(destination.x, 0.5, world.size_m - 0.5)
 			destination.z = clampf(destination.z, 0.5, world.size_m - 0.5)
 			u.order_move(destination)
+			u.ordered_to = destination
 			offset += 1
 		band_depth = maxf(band_depth,
 				float(mini(ranks, (block.size() - 1) / width + 1) - 1) * FILE_SPACING)
@@ -905,7 +909,22 @@ func command(ids: Array[int], ground: Vector3, target: Dictionary = {}) -> void:
 func pick_target(origin: Vector3, direction: Vector3) -> Dictionary:
 	var q := PhysicsRayQueryParameters3D.create(origin,origin+direction*4000.0,8)
 	q.collide_with_areas = true
-	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	# Look past the player's own men. The ray used to stop on whichever friendly
+	# soldier stood between the camera and the enemy, and the order became a
+	# plain march onto the ground behind him.
+	var hit := {}
+	var skipped: Array[RID] = []
+	for attempt in 64:
+		q.exclude = skipped
+		hit = get_world_3d().direct_space_state.intersect_ray(q)
+		if hit.is_empty(): return {}
+		var candidate: Node = hit.collider
+		if candidate.has_meta("unit_id"):
+			var mine: Soldier = units.get(int(candidate.get_meta("unit_id")))
+			if mine != null and mine.faction == 0:
+				skipped.append(hit.rid)
+				continue
+		break
 	if hit.is_empty(): return {}
 	var node: Node = hit.collider
 	if node.has_meta("rival_building_id"):
@@ -966,6 +985,7 @@ func tick(delta: float) -> void:
 			continue
 		if u.faction == 0 and not sim.buildings_by_id.has(u.home_id):
 			u.home_id = -1
+		if u.faction == 0: sim.ledger.used(Config.Res.FOOD, minf(u.rations, delta/Config.DAY_LENGTH))
 		u.rations = maxf(0.0,u.rations-delta/Config.DAY_LENGTH)
 		_refill(u)
 		u.speed_modifier = 0.65 if u.rations <= 0 else 1.0

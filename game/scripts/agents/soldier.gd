@@ -8,6 +8,10 @@ const Body = preload("res://scripts/agents/soldier_body.gd")
 
 var _body_state: Dictionary = Body.healthy()
 var faction: int = 0
+## Where the player last ordered this soldier to stand — set by
+## `FrontierCampaign.command` only, never by the AI's own chases. A trip to a
+## well returns him here (`WaterSystem._drink`). Not saved.
+var ordered_to := Vector3.INF
 ## Compatibility for campaign removal and old saves. Injury locations remain
 ## authoritative; assigning legacy health changes systemic strain, never limbs.
 var health: float:

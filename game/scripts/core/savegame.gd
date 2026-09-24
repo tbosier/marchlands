@@ -41,9 +41,66 @@ static func validate(data: Variant, registry: AssetRegistry = null) -> String:
 	return Validation.validate(migrate(data), registry, VERSION)
 
 
+static func migrate(data: Variant) -> Variant:
+	return _migrate_housing(_migrate_resources(data))
+
+
+## Saves from before houses were the only homes: the keep slept six and a
+## house four, and every house used one of two larger models. Clear the keeps'
+## rolls and send the people on them back to being unhoused — `Workforce`
+## finds them a bed on the first tick — and give every house the hovel model.
+## Four residents fit a five-room hovel, so no house roll needs trimming.
+static func _migrate_housing(data: Variant) -> Variant:
+	if not data is Dictionary or data.has("housing_layout"):
+		return data
+	var upgraded: Dictionary = data.duplicate(true)
+	upgraded["housing_layout"] = 2
+	var keeps := {}
+	for record in upgraded.get("buildings", []) if upgraded.get("buildings") is Array else []:
+		if not record is Dictionary:
+			continue
+		match record.get("type_id"):
+			"keep":
+				keeps[record.get("id")] = true
+				record["residents"] = []
+			"house":
+				record["asset_id"] = "house_hovel"
+	var campaign: Variant = upgraded.get("campaign")
+	if campaign is Dictionary and campaign.get("buildings") is Array:
+		for record in campaign.buildings:
+			if record is Dictionary and record.get("type_id") == "keep":
+				record["residents"] = []
+	# Anyone who lived in the keep, wherever the save keeps their record: at
+	# home, in the army, out scouting or away with a caravan.
+	var people: Array = []
+	if upgraded.get("citizens") is Array:
+		people.append_array(upgraded.citizens)
+	if campaign is Dictionary and campaign.get("units") is Array:
+		for unit in campaign.units:
+			if unit is Dictionary and unit.get("faction", 0) == 0:
+				people.append(unit)
+				if unit.get("civilian") is Dictionary:
+					people.append(unit.civilian)
+	for system in ["scouting", "trade", "water"]:
+		var block: Variant = upgraded.get(system)
+		if not block is Dictionary:
+			continue
+		for key in ["scouts", "caravans", "carriers"]:
+			if block.get(key) is Array:
+				for entry in block[key]:
+					if not entry is Dictionary:
+						continue
+					if entry.get("citizen") is Dictionary:
+						people.append(entry.citizen)
+	for person in people:
+		if person is Dictionary and keeps.has(person.get("home_id", -1)):
+			person["home_id"] = -1
+	return upgraded
+
+
 ## Five-resource version-one saves predate hides and leather. Migrate only
 ## that known layout, leaving malformed modern arrays for validation to reject.
-static func migrate(data: Variant) -> Variant:
+static func _migrate_resources(data: Variant) -> Variant:
 	if not data is Dictionary or data.has("resource_layout"):
 		return data
 	var upgraded: Dictionary = data.duplicate(true)
@@ -200,6 +257,7 @@ static func capture(game: Node) -> Dictionary:
 	return {
 		"version": VERSION,
 		"resource_layout": 2,
+		"housing_layout": 2,
 		"seed": world.world_seed,
 		"world_settings": world.generation_settings.duplicate(),
 		"saved_at": Time.get_datetime_string_from_system(true),

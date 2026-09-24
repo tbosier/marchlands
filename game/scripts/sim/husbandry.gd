@@ -11,6 +11,9 @@ const BREED_WORK_DAYS := 1.5
 const FOOD_YIELD := 20.0
 const HIDE_YIELD := 4.0
 const TAME_SECONDS := 8.0
+## Wild cattle grazing within this many metres of the one the player picks are
+## the same herd, and are taken home with it.
+const HERD_RADIUS := 18.0
 const BUTCHER_SECONDS := 12.0
 const MAX_CATTLE := 256
 
@@ -85,9 +88,20 @@ func herd_at(ranch_id: int, adults_only: bool = false) -> Array[Cattle]:
 
 func _cow_has_job(cow_id: int) -> bool:
 	for job in sim.jobs.all_jobs():
-		if job.kind in [JobBoard.Kind.TAME, JobBoard.Kind.BUTCHER] and job.cow_id == cow_id:
+		if job.kind == JobBoard.Kind.BUTCHER and job.cow_id == cow_id:
+			return true
+		if job.kind == JobBoard.Kind.TAME and job.cow_ids.has(cow_id):
 			return true
 	return false
+
+
+## Cattle already on their way to a ranch: every animal in its taming runs.
+func _incoming(ranch_id: int) -> int:
+	var total := 0
+	for job in sim.jobs.all_jobs():
+		if job.kind == JobBoard.Kind.TAME and job.dest_id == ranch_id:
+			total += job.cow_ids.size()
+	return total
 
 
 func _receiving_ranch(cow: Cattle) -> Building:
@@ -96,7 +110,7 @@ func _receiving_ranch(cow: Cattle) -> Building:
 	for b in sim.buildings:
 		if not b.def.is_ranch() or b.under_construction or b.workers.is_empty():
 			continue
-		var expected := herd_at(b.id).size() + sim.jobs.count_for(JobBoard.Kind.TAME, b.id, -1)
+		var expected := herd_at(b.id).size() + _incoming(b.id)
 		if expected >= RANCH_CAPACITY:
 			continue
 		var d := cow.position.distance_squared_to(b.position)
@@ -132,8 +146,19 @@ func request_domestication(cow_id: int) -> String:
 	if not info.can_domesticate:
 		return info.reason
 	var cow: Cattle = cows[cow_id]
-	cow.marked = true
 	var ranch := _receiving_ranch(cow)
+	# The whole herd, not one animal: every wild beast grazing with this one,
+	# nearest first, for as many as the ranch has room.
+	var room := RANCH_CAPACITY - herd_at(ranch.id).size() - _incoming(ranch.id) if ranch != null else 1
+	var herd: Array[Cattle] = []
+	for other: Cattle in cows.values():
+		if other.ranch_id < 0 and not other.marked \
+				and other.grazing_anchor.distance_to(cow.grazing_anchor) <= HERD_RADIUS:
+			herd.append(other)
+	herd.sort_custom(func(a: Cattle, b: Cattle) -> bool:
+		return a.position.distance_squared_to(cow.position) < b.position.distance_squared_to(cow.position))
+	for member in herd.slice(0, maxi(1, room)):
+		member.marked = true
 	if ranch != null:
 		post_ranch_jobs(ranch)
 	return ""
@@ -145,6 +170,8 @@ func _post(kind: int, ranch: Building, cow: Cattle = null) -> JobBoard.Job:
 	job.dest_id = ranch.id
 	job.required_workplace = ranch.id
 	job.cow_id = cow.id if cow != null else -1
+	if kind == JobBoard.Kind.TAME and cow != null:
+		job.cow_ids.append(cow.id)
 	job.res = -1
 	sim.jobs.index(job)
 	return job
@@ -153,16 +180,29 @@ func _post(kind: int, ranch: Building, cow: Cattle = null) -> JobBoard.Job:
 func post_ranch_jobs(ranch: Building) -> void:
 	if ranch.under_construction or ranch.workers.is_empty():
 		return
+	# Marked cattle nobody is fetching yet, shared between the ranchers who are
+	# free: two ranchers split a herd of four and bring two each.
 	var taming := sim.jobs.count_for(JobBoard.Kind.TAME, ranch.id, -1)
+	var free_hands := ranch.workers.size() - taming
+	var room := RANCH_CAPACITY - herd_at(ranch.id).size() - _incoming(ranch.id)
+	var waiting: Array[Cattle] = []
 	for cow: Cattle in cows.values():
-		if taming >= ranch.workers.size() or herd_at(ranch.id).size() + taming >= RANCH_CAPACITY:
+		if waiting.size() >= room:
 			break
 		if cow.ranch_id >= 0 or not cow.marked or _cow_has_job(cow.id):
 			continue
 		if _receiving_ranch(cow) != ranch:
 			continue
-		_post(JobBoard.Kind.TAME, ranch, cow)
-		taming += 1
+		waiting.append(cow)
+	if free_hands > 0 and not waiting.is_empty():
+		var runs: Array[JobBoard.Job] = []
+		for i in mini(free_hands, waiting.size()):
+			runs.append(_post(JobBoard.Kind.TAME, ranch, waiting[i]))
+		for i in waiting.size():
+			var run := runs[i % runs.size()]
+			if not run.cow_ids.has(waiting[i].id):
+				run.cow_ids.append(waiting[i].id)
+		taming += runs.size()
 	if not sim.research.completed.has("ranching"):
 		return
 	var adults := herd_at(ranch.id, true)
@@ -200,13 +240,18 @@ func tick(delta: float) -> void:
 			else:
 				sim._release_reservations(job)
 				sim.jobs.cancel(job)
-			var abandoned: Cattle = cows.get(job.cow_id)
-			if unstaffed and abandoned != null and job.kind == JobBoard.Kind.TAME:
-				abandoned.marked = false
-				abandoned.clear_goal()
-				abandoned.grazing_anchor = abandoned.position
+			if unstaffed and job.kind == JobBoard.Kind.TAME:
+				for id in job.cow_ids:
+					var abandoned: Cattle = cows.get(id)
+					if abandoned != null:
+						abandoned.marked = false
+						abandoned.clear_goal()
+						abandoned.grazing_anchor = abandoned.position
 			continue
-		if job.kind != JobBoard.Kind.TEND:
+		if job.kind == JobBoard.Kind.TAME:
+			for id in job.cow_ids:
+				busy[id] = true
+		elif job.kind != JobBoard.Kind.TEND:
 			busy[job.cow_id] = true
 	for cow: Cattle in cows.values():
 		cow.age_days += delta / Config.DAY_LENGTH
@@ -253,53 +298,107 @@ func tick_job(worker: Citizen, delta: float) -> void:
 		_tick_butcher(worker, ranch, delta)
 
 
+## A taming run: gain each animal's trust in turn, with those already won
+## following behind, then lead the whole group home and pen each one as it
+## reaches the ranch.
 func _tick_tame(worker: Citizen, ranch: Building, delta: float) -> void:
 	var job := worker.job
-	var cow: Cattle = cows.get(job.cow_id)
-	if cow == null or cow.ranch_id >= 0:
+	# Animals that died, or were taken in by another ranch, drop out of the run.
+	for id in job.cow_ids.duplicate():
+		var gone: Cattle = cows.get(id)
+		if gone == null or gone.ranch_id >= 0:
+			job.cow_ids.erase(id)
+			job.cows_trusted.erase(id)
+	if job.cow_ids.is_empty():
 		sim._retire_job(worker)
 		return
-	if not job.loaded:
-		worker.set_goal(cow.position)
-		worker.advance(delta, world)
-		if not worker.has_arrived():
-			return
-		worker.state = Citizen.State.WORKING
-		worker.task_label = "gaining a cow's trust"
-		worker.update_animation(delta, 0.0)
-		job.amount += delta * worker.workability()
-		if job.amount < TAME_SECONDS:
-			return
-		job.loaded = true
-	worker.state = Citizen.State.TRAVELLING
-	worker.task_label = "leading cattle home"
 	var home := sim.entrance_of(ranch, "att_entrance")
-	cow.set_goal(worker.position)
-	cow.advance(delta, world)
-	if cow.position.distance_to(worker.position) < 4.0:
+	var followers: Array[Cattle] = []
+	for id in job.cows_trusted:
+		followers.append(cows[id])
+	if not job.loaded:
+		var next: Cattle = null
+		for id in job.cow_ids:
+			if not job.cows_trusted.has(id):
+				next = cows[id]
+				break
+		if next == null:
+			job.loaded = true
+		else:
+			job.cow_id = next.id
+			_follow(followers, worker, delta)
+			worker.set_goal(next.position)
+			worker.advance(delta, world)
+			if not worker.has_arrived():
+				return
+			worker.state = Citizen.State.WORKING
+			worker.task_label = "gaining a cow's trust"
+			worker.update_animation(delta, 0.0)
+			job.amount += delta * worker.workability()
+			if job.amount < TAME_SECONDS:
+				return
+			job.amount = 0.0
+			job.cows_trusted.append(next.id)
+			next.clear_goal()
+			return
+	worker.state = Citizen.State.TRAVELLING
+	worker.task_label = "leading %d cattle home" % followers.size() if followers.size() > 1 \
+			else "leading cattle home"
+	_follow(followers, worker, delta)
+	# Walk on only while the herd keeps up, so nobody is left in the field.
+	var straggling := false
+	for cow in followers:
+		if cow.position.distance_to(worker.position) > 7.0:
+			straggling = true
+	if not straggling:
 		worker.set_goal(home)
 		worker.advance(delta, world)
-	if worker.position.distance_to(home) > 2.5 or cow.position.distance_to(home) > 4.0:
-		return
-	if herd_at(ranch.id).size() >= RANCH_CAPACITY:
+	var penned := false
+	for cow in followers:
+		if worker.position.distance_to(home) > 2.5 + 4.0 or cow.position.distance_to(home) > 5.0:
+			continue
+		if herd_at(ranch.id).size() >= RANCH_CAPACITY:
+			break
+		cow.ranch_id = ranch.id
+		cow.marked = false
+		cow.grazing_anchor = home
+		cow.clear_goal()
+		job.cow_ids.erase(cow.id)
+		job.cows_trusted.erase(cow.id)
+		domesticated.emit(cow.id, ranch.id)
+		penned = true
+	if penned:
+		var discovered := not sim.research.ranching_known
+		sim.research.discover_ranching()
+		if discovered:
+			sim.alert.emit("Cattle brought home. Ranching knowledge is available.", ranch.position)
+	if job.cow_ids.is_empty():
+		sim.jobs.complete(job)
+		sim._go_idle(worker)
+	elif worker.position.distance_to(home) <= 2.5 and herd_at(ranch.id).size() >= RANCH_CAPACITY:
+		# Home, and no room left for the rest: they go back to the wild.
+		for id in job.cow_ids:
+			var cow: Cattle = cows.get(id)
+			if cow != null:
+				cow.marked = false
+				cow.grazing_anchor = cow.position
+				cow.clear_goal()
 		sim._retire_job(worker)
-		return
-	cow.ranch_id = ranch.id
-	cow.marked = false
-	cow.grazing_anchor = home
-	cow.clear_goal()
-	sim.jobs.complete(job)
-	sim._go_idle(worker)
-	var discovered := not sim.research.ranching_known
-	sim.research.discover_ranching()
-	domesticated.emit(cow.id, ranch.id)
-	if discovered:
-		sim.alert.emit("Cattle brought home. Ranching knowledge is available.", ranch.position)
+
+
+## Tamed cattle trail the rancher in a loose line behind him.
+func _follow(followers: Array[Cattle], worker: Citizen, delta: float) -> void:
+	for i in followers.size():
+		var cow := followers[i]
+		var behind := Vector3(cos(float(i) * 2.1), 0, sin(float(i) * 2.1)) * (2.0 + float(i) * 0.6)
+		if cow.position.distance_to(worker.position) > 3.0 + float(i) * 0.6:
+			cow.set_goal(worker.position + behind)
+		cow.advance(delta, world)
 
 
 func _tick_tend(worker: Citizen, ranch: Building, delta: float) -> void:
 	if herd_at(ranch.id, true).size() < 2 or herd_at(ranch.id).size() \
-			+ sim.jobs.count_for(JobBoard.Kind.TAME, ranch.id, -1) >= RANCH_CAPACITY \
+			+ _incoming(ranch.id) >= RANCH_CAPACITY \
 			or cows.size() >= MAX_CATTLE:
 		sim._retire_job(worker)
 		return
@@ -346,6 +445,8 @@ func _tick_butcher(worker: Citizen, ranch: Building, delta: float) -> void:
 		return
 	ranch.add(Config.Res.FOOD, FOOD_YIELD)
 	ranch.add(Config.Res.HIDES, HIDE_YIELD)
+	sim.ledger.made(Config.Res.FOOD, FOOD_YIELD)
+	sim.ledger.made(Config.Res.HIDES, HIDE_YIELD)
 	cows.erase(cow.id)
 	cow.queue_free()
 	sim.jobs.complete(job)
@@ -356,11 +457,12 @@ func remove_ranch(ranch_id: int) -> void:
 	breeding.erase(ranch_id)
 	for job in sim.jobs.all_jobs():
 		if job.kind == JobBoard.Kind.TAME and job.dest_id == ranch_id:
-			var cow: Cattle = cows.get(job.cow_id)
-			if cow != null:
-				cow.marked = false
-				cow.clear_goal()
-				cow.grazing_anchor = cow.position
+			for id in job.cow_ids:
+				var cow: Cattle = cows.get(id)
+				if cow != null:
+					cow.marked = false
+					cow.clear_goal()
+					cow.grazing_anchor = cow.position
 	for cow: Cattle in herd_at(ranch_id):
 		cow.ranch_id = -1
 		cow.marked = false

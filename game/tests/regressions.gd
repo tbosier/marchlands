@@ -36,8 +36,8 @@ const BUCKET_EFFECT := 1.0
 ## What a soldier's firepot leaves behind, from FrontierCampaign's impact.
 const FIREPOT := 0.55
 ## Centre spacing for houses packed as tightly as can_place will allow: a
-## 10.4 m depth plus the 1 m of clear ground CLEARANCE leaves.
-const TIGHT_ROW := 11.4
+## hovel's 6.2 m depth plus the 1 m of clear ground CLEARANCE leaves.
+const TIGHT_ROW := 7.2
 
 
 ## Advance only what fire does — the spread scan on its real cadence, then the
@@ -64,7 +64,7 @@ func _burn(sim: Simulation, seconds: float, lost: Array = []) -> Array:
 
 
 func _raise(sim: Simulation, at: Vector3, type_id := "house",
-		variant := "house_small_01", instant := true) -> Building:
+		variant := "house_hovel", instant := true) -> Building:
 	return sim.place_building(type_id, at, 0.0, instant, variant)
 
 
@@ -118,7 +118,7 @@ func _fire_state(sim: Simulation) -> String:
 ##    life of the job and cannot be moved to the fire that has since become the
 ##    worst one; this picks the two worst afresh on every trip.
 ##  - It never runs short. A real bucket is `minf(BUCKET, well water)`: a full
-##    80-unit shaft is twenty of them, and past that one more every eighteen
+##    80-unit shaft is twenty of them, and past that one more every fifty-one
 ##    seconds, which is all REFILL_PER_DAY puts back. This tips BUCKET_EFFECT
 ##    whatever the wells hold, including nothing.
 ##  - It is never interrupted. A real carrier is handed back at HUNGER_URGENT,
@@ -167,8 +167,8 @@ func _packed_row(sim: Simulation, base: Vector3, houses: int) -> Array[Building]
 
 ## Fire spreads between buildings that stand close together.
 ##
-## A house is 8.4 x 10.4 m. can_place pads only the building being placed, by
-## Simulation.CLEARANCE, so houses may stand 1 m apart along Z — centres 11.4 m
+## A hovel is 5.6 x 6.2 m. can_place pads only the building being placed, by
+## Simulation.CLEARANCE, so houses may stand 1 m apart along Z — centres 7.2 m
 ## apart — and that is the worst case every claim below is made against.
 func _fire_spread(game: Node) -> void:
 	var sim: Simulation = game.sim
@@ -181,25 +181,25 @@ func _fire_spread(game: Node) -> void:
 	# of the blaze — past the reach entirely — is never touched.
 	var source := _raise(sim, base)
 	var close := _raise(sim, base + Vector3(0, 0, TIGHT_ROW))
-	# 11 m clear of the neighbour that is about to catch, and 22.4 m clear of
+	# 11 m clear of the neighbour that is about to catch, and 18.2 m clear of
 	# the fire itself. Spelled out in metres rather than derived from
 	# FIRE_SPREAD_REACH, so widening the reach fails this instead of moving it.
-	var apart := _raise(sim, base + Vector3(0, 0, 32.8))
+	var apart := _raise(sim, base + Vector3(0, 0, 24.4))
 	source.apply_damage(0.0, FIREPOT)
 	_burn(sim, 40.0)
 	_check(close.fire > 0.25 and close.health < close.max_health(),
 			"a house built a metre from a burning one catches and burns with it")
 	_check(apart.fire == 0.0 and apart.health == apart.max_health(),
 			"a house beyond the blaze's reach is untouched")
-	_check(alerts.count("House has caught fire") == 1,
+	_check(alerts.count("Hovel has caught fire") == 1,
 			"the house that caught is reported to the player exactly once")
 	_clear(sim, [source, close, apart])
 
 	# Where the reach ends, to the half metre. One scan and no burn, so this
 	# measures the reach itself rather than what a fire can go on to sustain.
 	source = _raise(sim, base)
-	var inside := _raise(sim, base + Vector3(0, 0, 19.9))     # 9.5 m of clear ground
-	var outside := _raise(sim, base - Vector3(0, 0, 20.9))    # 10.5 m of clear ground
+	var inside := _raise(sim, base + Vector3(0, 0, 15.7))     # 9.5 m of clear ground
+	var outside := _raise(sim, base - Vector3(0, 0, 16.7))    # 10.5 m of clear ground
 	source.apply_damage(0.0, 1.0)
 	campaign._spread_fire_scan(10.0)
 	_check(inside.fire > 0.0 and outside.fire == 0.0,
@@ -219,12 +219,12 @@ func _fire_spread(game: Node) -> void:
 	_clear(sim, [source, close])
 
 	# Proximity is footprint to footprint. A grain warehouse is 16 m deep and a
-	# house 10.4 m, so at the same 18.5 m centre distance the warehouse stands
-	# 5.3 m clear of the fire and the house 8.1 m: near enough to take hold in
+	# hovel 6.2 m, so at the same 16.4 m centre distance the warehouse stands
+	# 5.3 m clear of the fire and the hovel 10.2 m: near enough to take hold in
 	# the first case, not in the second.
 	source = _raise(sim, base)
-	var deep := _raise(sim, base + Vector3(0, 0, 18.5), "grain_warehouse", "granary_large")
-	var slight := _raise(sim, base - Vector3(0, 0, 18.5))
+	var deep := _raise(sim, base + Vector3(0, 0, 16.4), "grain_warehouse", "granary_large")
+	var slight := _raise(sim, base - Vector3(0, 0, 16.4))
 	source.apply_damage(0.0, 1.0)
 	_burn(sim, 60.0)
 	_check(deep.fire > 0.1 and slight.fire == 0.0,
@@ -236,8 +236,8 @@ func _fire_spread(game: Node) -> void:
 	# timber frame waiting to happen, and an upgrading building reports itself
 	# as an undelivered site while being a finished, stocked, occupied one.
 	source = _raise(sim, base)
-	var site := _raise(sim, base + Vector3(0, 0, TIGHT_ROW), "house", "house_small_01", false)
-	var upgrading := _raise(sim, base - Vector3(0, 0, 16.0), "granary", "granary")
+	var site := _raise(sim, base + Vector3(0, 0, TIGHT_ROW), "house", "house_hovel", false)
+	var upgrading := _raise(sim, base - Vector3(0, 0, 13.9), "granary", "granary")
 	upgrading.begin_upgrade(BuildingDefs.get_def("grain_warehouse"),
 			{Config.Res.TIMBER: 20}, 10.0, game.registry)
 	source.apply_damage(0.0, FIREPOT)
@@ -325,8 +325,10 @@ func _run() -> void:
 	var original_home := c.home_id
 	var original_workplace := c.workplace_id
 	c.next_meal = 100.0
-	c.home_id = sim.keep.id
-	var door := sim.entrance_of(sim.keep, "att_entrance")
+	# A hovel, because only houses are homes: the keep sleeps nobody.
+	var home: Building = sim.buildings.filter(func(b): return b.type_id == "house")[0]
+	c.home_id = home.id
+	var door := sim.entrance_of(home, "att_entrance")
 	var tree: ResourceNodes.NodeRec = game.world.nodes.find_nearest(
 			ResourceNodes.Kind.TREE, door, 200.0)
 	_check(tree != null, "a tree exists away from the worker's home")

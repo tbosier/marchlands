@@ -53,6 +53,11 @@ class Job:
 	var node_id := -1
 	## Livestock IDs have their own namespace, independent of resource nodes.
 	var cow_id := -1
+	## A taming run's whole group: the rancher gains each one's trust in turn,
+	## then leads them home together. `cow_id` is the one being worked on now.
+	var cow_ids: Array[int] = []
+	## Which of `cow_ids` already trust the rancher and follow him.
+	var cows_trusted: Array[int] = []
 	## Bridges are independent of building IDs; never overload dest_id.
 	var bridge_id := -1
 	## Abandoned trading carts use their own identifier namespace.
@@ -297,6 +302,7 @@ func release(job: Job, refused_by_citizen: int = -1) -> void:
 	if job.kind == Kind.TAME:
 		job.loaded = false
 		job.amount = 0.0
+		job.cows_trusted.clear()
 	var i := _claimed.find(job)
 	if i >= 0:
 		_claimed.remove_at(i)

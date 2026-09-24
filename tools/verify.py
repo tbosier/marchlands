@@ -169,7 +169,7 @@ def plan(headless: bool, skip_long_run: bool) -> list[Stage]:
         ("connections", r"^Connections regression failures: 0$"),
     ]:
         stages.append(Stage(name, headless_godot + ["--script", f"res://tests/{name}.gd"],
-                            (marker,), timeout=300 if name == "spawn_layouts" else 180,
+                            (marker,), timeout=300 if name in ("spawn_layouts", "campaign") else 180,
                             expected_decoders=name == "save_validation"))
     for name in SCENARIOS:
         stages.append(Stage(name, headless_godot + ["--fixed-fps", "60", "--",

@@ -120,19 +120,43 @@ func appeal(buildings: Array[Building], citizens: Array[Citizen]) -> Dictionary:
 
 
 ## Decide whether a group sets out this day. Returns how many, and why.
+##
+## Settlers weigh the stores with themselves counted in, and from autumn on
+## they want to see enough to last until the spring: nothing grows in winter,
+## so a march that fills its new houses in autumn on a fortnight's grain has
+## only invited more people to starve with it. `day` is the simulation's day.
+##
+## Water is weighed the same way as beds: `water_room` is how many more people
+## the settlement's wells can keep in water (-1 for "not modelled"). A march
+## that filled its houses past what its wells refill for used to let its
+## newest arrivals go dry and die of thirst a fortnight later.
 func consider_immigration(buildings: Array[Building],
-						  citizens: Array[Citizen]) -> Dictionary:
+						  citizens: Array[Citizen], day: float = 0.0,
+						  water_room: int = -1) -> Dictionary:
 	var info := appeal(buildings, citizens)
 	var spare: int = info["spare_housing"]
+	if water_room >= 0:
+		spare = mini(spare, water_room)
 	if spare < Config.IMMIGRATION_GROUP_MIN:
 		return {"count": 0}
-	if float(info["food_days"]) < Config.IMMIGRATION_MIN_FOOD_DAYS:
+	var needed := Config.IMMIGRATION_MIN_FOOD_DAYS
+	var season := Clock.season_index_at(day)
+	if season == Clock.AUTUMN or season == Clock.WINTER:
+		var year := float(Clock.days_per_year())
+		needed = maxf(needed, year - fposmod(day, year))
+	if float(info["food_days"]) < needed:
 		return {"count": 0}
 	if _rng.randf() > float(info["score"]):
 		return {"count": 0}
 
 	var count: int = mini(spare, _rng.randi_range(
 			Config.IMMIGRATION_GROUP_MIN, Config.IMMIGRATION_GROUP_MAX))
+	# No bigger a group than the stores can carry for that long.
+	var mouths := maxf(1.0, float(citizens.size()))
+	while count > 0 and float(info["food_days"]) * mouths / (mouths + count) < needed:
+		count -= 1
+	if count < Config.IMMIGRATION_GROUP_MIN:
+		return {"count": 0}
 	return {"count": count, "reasons": info["reasons"]}
 
 

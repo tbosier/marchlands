@@ -79,6 +79,7 @@ back to `tools/vendor/` so a checkout can carry its own toolchain.
 | left click | select a building, citizen, soldier, cow, resource deposit, or route |
 | click a soldier | selects his whole company · `Alt`-click just him · `Shift`-click adds to the selection |
 | `G` | form the selected soldiers into a company, split them off, or merge companies |
+| unit grid | selected soldiers appear as tiles along the bottom: click one to pick him out, `Shift`-click to drop him |
 | right click | order selected scouts to explore, or soldiers to move/attack; otherwise cancel selection |
 | `Space` | pause / resume at the rate you were at |
 | `1`–`6` | speed: 1× · 2× · 4× · 16× · 32× · 64× |
@@ -120,7 +121,9 @@ for the implemented limits.
 
 The opening settlement has a **Well**. Build more where people work and travel:
 citizens physically visit them to drink, and fire responders carry buckets from
-wells to burning buildings. Select a burning building to request a responder.
+wells to burning buildings. A well keeps about twenty people in water; its panel
+shows how much is being drawn against what it refills, and you are warned when
+residents are going thirsty. Select a burning building to request a responder.
 Visible enemy units generate contact alerts. Scouts can sabotage a visible enemy
 well, but must collect supplies and spend time there; town guards can spot the
 approach and interrupt it. Older saves without a well need one built.
@@ -152,7 +155,8 @@ Every row is also a button on the panel.
 It is deliberately off unless asked for: design doc §30 asks that the game not
 advertise how it was made.
 
-The build tray opens from the bottom bar. Alongside the buildings there is a
+The build tray opens from the bottom bar, with buildings under tabs — Homes,
+Food, Industry, Storage & Trade, Military. Alongside the buildings there is a
 **Clear Ground** tool: click trees and citizens will fell them and carry the
 timber to your stores — which is also how you recover from committing your last
 timber to a site you cannot finish, since selecting any building under
@@ -262,7 +266,12 @@ the roads and that the reloaded settlement completes a newly ordered building.
 **Layer 5 — Settlement growth.** Housing, food production with a growth and
 harvest cycle, consumption and famine, and immigration: settlers evaluate the
 kingdom's spare housing, food security and available work, then physically walk
-in from the map edge.
+in from the map edge. People live in houses — a hovel sleeps five and upgrades
+to a cottage for eight — plus two farmhands at each farm and two keepers at each
+granary; nobody lives in the keep. Beds are what limit immigration, so growth
+keeps pace with the houses you raise. Hover a resource in the top bar for what
+is being produced and used a day, and the population for which workplaces are
+short of hands.
 
 ### Markets, research and the frontier
 
@@ -322,7 +331,8 @@ includes mail beneath it, so a moderate stab may cause bruising instead of a
 penetrating wound. Injuries persist through discharge, reenlistment and saves.
 
 Build a **Cattle Ranch**, use **Wild cattle** to find a herd, and select a cow to
-send a rancher. The worker must reach it and lead it home. That first successful
+send the ranchers for its whole herd. They win each animal's trust in turn and
+lead the group home together. That first successful
 domestication discovers **Ranching**, which still needs paid research. Staffed
 ranches breed cattle and slaughter surplus adults for food and hides. Research
 **Leatherworking** and build a **Tannery** to turn hides and timber into leather.
@@ -371,7 +381,7 @@ assets/generated/*.glb        + a .json manifest per asset
 
 ```bash
 tools/build.sh assets                 # regenerate everything
-tools/build.sh assets house_small_01  # or just one
+tools/build.sh assets house_hovel     # or just one
 tools/build.sh validate -v            # full PASS/WARN/FAIL report
 tools/build.sh previews               # turntables + assets/previews/_all_assets.png
 tools/build.sh icons                  # the build-tray icons

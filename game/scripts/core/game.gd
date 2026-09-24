@@ -74,6 +74,9 @@ var _saved_hash := 0
 var _quit_dialog: ConfirmationDialog
 ## Whether the quit dialog paused the clock, so cancelling it resumes play.
 var _quit_paused := false
+## When the last order's "Marching…/Attacking…" line gives way to the idle
+## hint again, in engine milliseconds; 0 when no order line is up.
+var _order_hint_until := 0
 var show_nav_overlay := false
 
 ## keycode -> [command name, whether Alt must be held]. Built from
@@ -222,8 +225,19 @@ func _ready() -> void:
 		if sim.campaign.disband_company(company_id):
 			_on_alert("%s disbanded; its soldiers march loose." % name_of.get("name", "The company"), camera.focus)
 		_refresh_selection())
+	hud.unit_pick_requested.connect(func(unit_id: int, remove: bool):
+		if remove:
+			selected_units.erase(unit_id)
+		else:
+			selected_units.assign([unit_id])
+		_refresh_selection())
 	hud.muster_requested.connect(func():
+		# A fresh selection: a scout or the Army screen left over from before
+		# would take the right-click that is meant for the force.
+		_cancel_placement()
+		_clear_selection()
 		selected_units.assign(sim.campaign.friendly_ids())
+		_refresh_selection()
 		_on_alert("Force selected — right-click to march or attack", sim.keep.position))
 	hud.rival_focus_requested.connect(func():
 		var report: Dictionary = sim.scouting.city_report()
@@ -238,7 +252,7 @@ func _ready() -> void:
 		_refresh_selection())
 	hud.domesticate_requested.connect(func(id):
 		var error: String = sim.husbandry.request_domestication(id)
-		_on_alert(error if error != "" else "A rancher will approach and lead this animal home.", sim.keep.position)
+		_on_alert(error if error != "" else "The ranchers will gather this herd and lead it home.", sim.keep.position)
 		_refresh_selection())
 	hud.cattle_focus_requested.connect(_focus_wild_cattle)
 	hud.new_world_requested.connect(func(seed_value: int, size_m: int):
@@ -593,13 +607,14 @@ func _setup_scenario() -> void:
 	keep.inventory[Config.Res.TIMBER] = START_TIMBER
 	keep.inventory[Config.Res.STONE] = START_STONE
 
-	# Four houses and a stockpile, loosely grouped south of the keep so the
-	# settlement has somewhere to be before the player touches anything.
+	# Five hovels and a stockpile, loosely grouped south of the keep so the
+	# settlement has somewhere to be before the player touches anything. Five
+	# rooms of five for twenty settlers leaves the first newcomers a bed.
 	var rng := RandomNumberGenerator.new()
 	rng.seed = world.world_seed + 7
 	var house_spots := [
 		Vector3(-19, 0, 21), Vector3(-6, 0, 26),
-		Vector3(9, 0, 24), Vector3(21, 0, 16),
+		Vector3(9, 0, 24), Vector3(21, 0, 16), Vector3(-30, 0, 10),
 	]
 	for offset in house_spots:
 		var p: Vector3 = centre + (offset as Vector3)
@@ -608,19 +623,22 @@ func _setup_scenario() -> void:
 
 	var stock := _settle(centre + Vector3(16, 0, -6))
 	sim.place_building("stockpile", stock, PI * 0.5, true)
-	# Established households start with one physical water source. Subsequent
-	# districts and expeditions need the player to build their own wells.
-	var well_position := Vector3.INF
-	for ring in 12:
-		for index in 12:
-			var angle := TAU * index / 12.0
-			var candidate := centre + Vector3(-20, 0, -14) + Vector3(cos(angle), 0, sin(angle)) * ring * 3.0
-			candidate.y = world.heightmap.height_at(candidate.x, candidate.z)
-			if sim.can_place("well", candidate).ok:
-				well_position = candidate
-				break
-		if well_position.is_finite(): break
-	if well_position.is_finite(): sim.place_building("well", well_position, 0.0, true)
+	# Established households start with two wells. A well keeps about twenty
+	# people in water, so one would exactly cover the opening settlers and
+	# leave no room for the first newcomers; with two, beds are what limit
+	# early growth, and later districts need the player's own wells.
+	for anchor in [Vector3(-20, 0, -14), Vector3(30, 0, -22)]:
+		var well_position := Vector3.INF
+		for ring in 12:
+			for index in 12:
+				var angle := TAU * index / 12.0
+				var candidate := centre + (anchor as Vector3) + Vector3(cos(angle), 0, sin(angle)) * ring * 3.0
+				candidate.y = world.heightmap.height_at(candidate.x, candidate.z)
+				if sim.can_place("well", candidate).ok:
+					well_position = candidate
+					break
+			if well_position.is_finite(): break
+		if well_position.is_finite(): sim.place_building("well", well_position, 0.0, true)
 
 	# The settlement's one cart, parked at the stockpile's loading bay.
 	var cart := Cart.new()
@@ -692,6 +710,10 @@ func _process(delta: float) -> void:
 	_ui_timer -= delta
 	if _ui_timer <= 0.0:
 		_ui_timer = 0.25
+		if _order_hint_until > 0 and Time.get_ticks_msec() >= _order_hint_until:
+			_order_hint_until = 0
+			if mode == Mode.SELECT:
+				hud.set_hint(_idle_hint())
 		hud.refresh()
 		_refresh_selection()
 		_refresh_unit_rings()
@@ -716,6 +738,7 @@ func _refresh_city_marker() -> void:
 
 func _refresh_selection() -> void:
 	_refresh_city_marker.call_deferred()
+	_refresh_unit_grid()
 	if mode == Mode.BRIDGE:
 		return
 	if city_report_open:
@@ -884,6 +907,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				_cancel_placement()
 			elif mode == Mode.CLEAR:
 				_exit_clear_tool()
+			elif _has_friendly_selected():
+				_order_units(mb.position)
 			elif selected_scout >= 0:
 				var ray := camera.screen_ray(mb.position)
 				var hit := world.terrain.raycast(ray.origin, ray.direction)
@@ -891,8 +916,6 @@ func _unhandled_input(event: InputEvent) -> void:
 					var error: String = sim.scouting.command(selected_scout, hit.position)
 					if error != "": _on_alert(error, hit.position)
 					_refresh_selection()
-			elif _has_friendly_selected():
-				_order_units(mb.position)
 			else:
 				_clear_selection()
 
@@ -1802,6 +1825,17 @@ func _ui_blocks(at: Vector2) -> bool:
 	return hud.blocks_mouse(at) or (dev != null and dev.blocks_mouse(at))
 
 
+## The bottom grid of the player's own selected men; empty hides it.
+func _refresh_unit_grid() -> void:
+	var own: Array = []
+	if sim.campaign != null:
+		for id in selected_units:
+			var unit: Node = sim.campaign.units.get(id)
+			if is_instance_valid(unit) and unit.faction == 0 and unit.health > 0.0:
+				own.append(unit)
+	hud.show_unit_grid(own)
+
+
 ## Rival soldiers can be selected to inspect but not ordered, so a right-click
 ## over a selection of only theirs is the ordinary cancel.
 func _has_friendly_selected() -> bool:
@@ -1820,6 +1854,22 @@ func _order_units(screen_pos: Vector2) -> void:
 	if not hit.hit: return
 	var target: Dictionary = sim.campaign.pick_target(ray.origin, ray.direction)
 	sim.campaign.command(selected_units, hit.position, target)
+	# Say what the order became. A click that missed its target used to march
+	# the men to the ground under it with no word, which reads as "nothing".
+	var what := "Marching to the marked ground"
+	if target.get("kind", "") == "unit":
+		what = "Attacking the rival soldier"
+	elif target.get("kind", "") == "building":
+		var b: Building = sim.campaign.enemy_buildings.get(int(target.get("id", -1)))
+		what = "Attacking the rival %s" % (b.def.display_name.to_lower() if b != null else "building")
+	var drinking := 0
+	for id in selected_units:
+		var unit: Node = sim.campaign.units.get(id)
+		if unit != null and sim.water != null and sim.water.handles(unit): drinking += 1
+	if drinking > 0:
+		what += " · %d will follow once they have drunk" % drinking
+	hud.set_hint(what)
+	_order_hint_until = Time.get_ticks_msec() + 4000
 	_refresh_selection()
 
 

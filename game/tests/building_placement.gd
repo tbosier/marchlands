@@ -26,7 +26,7 @@ func _resource_sites() -> void:
 		unchanged = unchanged and nodes.records[i].amount == quantities[i] and not nodes.records[i].depleted
 	_check(unchanged and _sim.buildings.is_empty(), "rejected placements do not erase resources or commission buildings")
 	var bounds: AABB = nodes._pick_world_bounds[stone.id]
-	var edge_site := Vector3(bounds.end.x + _registry.footprint("house_small_01").x * 0.5 - 0.5, 9, stone.position.z)
+	var edge_site := Vector3(bounds.end.x + _registry.footprint("house_hovel").x * 0.5 - 0.5, 9, stone.position.z)
 	_check(not _sim.can_place("house", edge_site).ok,
 			"a deposit's visible edge blocks placement even when its centre is outside the building")
 	var timber := nodes.harvest(tree, tree.amount, _sim.day)

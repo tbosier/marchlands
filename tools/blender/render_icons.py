@@ -38,7 +38,7 @@ ICON_SIZE = 256
 ## sounds: re-running this script after a palette or lighting change would
 ## refresh six icons and leave those two sitting beside them in the old look.
 BUILD_BAR = [
-    "house_small_01",
+    "house_hovel",
     "stockpile",
     "logging_camp",
     "quarry",

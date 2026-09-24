@@ -40,6 +40,17 @@
   },
   {
     "op": "build",
+    "type": "well",
+    "offset": [
+      30,
+      -20
+    ],
+    "radius": 50,
+    "instant": true,
+    "note": "a well keeps about twenty people in water, and this march grows past that; one well for all of them leaves the settlement thirsty and slow, which is correct behaviour and a poor fixture for testing upgrades"
+  },
+  {
+    "op": "build",
     "type": "market",
     "offset": [
       -40,
@@ -136,7 +147,7 @@
     ],
     "radius": 70,
     "instant": true,
-    "note": "far enough out that the Forge it grows into (16.2 x 16.0 m, against the Blacksmith's 10.4 x 12.5) still has room \u2014 upgrades are now refused when the larger footprint would overlap a neighbour"
+    "note": "far enough out that the Forge it grows into (16.2 x 16.0 m, against the Blacksmith's 10.4 x 12.5) still has room — upgrades are now refused when the larger footprint would overlap a neighbour"
   },
   {
     "op": "build",

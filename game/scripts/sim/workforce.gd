@@ -133,7 +133,11 @@ func _assign_homes(buildings: Array[Building], citizens: Array[Citizen],
 		if c.immigrant:
 			continue
 		var home: Building = by_id.get(c.home_id)
-		if home == null or home.under_construction \
+		# Not `under_construction`: a hovel being raised into a cottage is a
+		# site, but its household is still its household, and a new site has
+		# nobody on its roll to lose. A building that no longer houses anyone
+		# does lose them.
+		if home == null or home.def.houses <= 0 \
 				or not home.residents.has(c.id):
 			# Same reasoning as the workplace roll above: leave the id behind
 			# and the house is permanently full of a resident who lives

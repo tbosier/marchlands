@@ -166,8 +166,8 @@ static func _build() -> void:
 		"asset": "keep_tier1",
 		"display_name": "Keep",
 		"role": Role.SEAT,
-		"description": "Your seat. Stores goods and houses the first settlers.",
-		"houses": 6,
+		"description": "Your seat and the settlement's first store. Nobody lives here: "
+				+ "people live in houses.",
 		"storage": 400.0,
 		"stores": [Config.Res.FOOD, Config.Res.TIMBER, Config.Res.STONE,
 				   Config.Res.IRON, Config.Res.TOOLS, Config.Res.HIDES, Config.Res.LEATHER],
@@ -176,14 +176,27 @@ static func _build() -> void:
 	})
 	_add({
 		"type_id": "house",
-		"asset": "house_small_01",
-		"variants": ["house_small_01", "house_small_02"],
-		"display_name": "House",
+		"asset": "house_hovel",
+		"display_name": "Hovel",
 		"role": Role.HOUSING,
-		"description": "Homes four citizens. Settlers will not come without room.",
-		"cost": {Config.Res.TIMBER: 20, Config.Res.STONE: 8},
-		"build_time": 26.0,
-		"houses": 4,
+		"description": "One room for five people. Settlers will not come without room. "
+				+ "After Civic building research, upgrade it to a cottage for eight.",
+		"cost": {Config.Res.TIMBER: 16, Config.Res.STONE: 6},
+		"build_time": 22.0,
+		"houses": 5,
+		"upgrades_to": "cottage",
+		"upgrade_cost": {Config.Res.TIMBER: 24, Config.Res.STONE: 14},
+		"upgrade_time": 28.0,
+	})
+	_add({
+		"type_id": "cottage",
+		"asset": "house_small_02",
+		"display_name": "Cottage",
+		"role": Role.HOUSING,
+		"description": "A jettied upper storey and a tiled roof. Homes eight.",
+		"build_time": 28.0,
+		"houses": 8,
+		"buildable": false,
 	})
 	_add({
 		"type_id": "well",
@@ -393,6 +406,8 @@ static func _build() -> void:
 		"build_time": 28.0,
 		"storage": 500.0,
 		"stores": [Config.Res.FOOD],
+		# The granary keepers live over the store.
+		"houses": 2,
 		"upgrades_to": "grain_warehouse",
 		"upgrade_cost": {Config.Res.TIMBER: 40, Config.Res.STONE: 24},
 		"upgrade_time": 36.0,
@@ -407,6 +422,7 @@ static func _build() -> void:
 		"build_time": 36.0,
 		"storage": 1400.0,
 		"stores": [Config.Res.FOOD],
+		"houses": 2,
 		"buildable": false,
 	})
 	_add({
@@ -430,6 +446,25 @@ static func _build() -> void:
 		"produces": Config.Res.LEATHER,
 		"consumes": {Config.Res.HIDES: 1.0, Config.Res.TIMBER: 0.25},
 	})
+
+
+## The build tray's tabs, in order, and the buildings each one offers. Anything
+## buildable that is not named here is shown under a last "Other" tab rather
+## than hidden, so a new building cannot quietly go missing from the tray.
+const TRAY_CATEGORIES := [
+	["Homes", ["house", "well"]],
+	["Food", ["farm", "granary", "ranch"]],
+	["Industry", ["logging_camp", "quarry", "mine", "blacksmith", "tannery"]],
+	["Storage & Trade", ["stockpile", "market"]],
+	["Military", ["barracks", "supply_hut", "scout_lodge"]],
+]
+
+
+static func tray_category(type_id: String) -> String:
+	for row in TRAY_CATEGORIES:
+		if (row[1] as Array).has(type_id):
+			return row[0]
+	return "Other"
 
 
 const _FIELDS := [

@@ -1582,7 +1582,7 @@ Generate only what the prototype requires.
 
 ```text
 keep_tier1
-house_small_01
+house_hovel
 house_small_02
 stockpile
 logging_camp

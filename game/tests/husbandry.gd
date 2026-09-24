@@ -97,13 +97,19 @@ func _ranching_chain() -> void:
 			"ranch and tannery employ real citizens from the civilian workforce")
 	_check(sim.stores.find_store(Config.Res.FOOD, ranch.position, -1) != ranch,
 			"farm overflow cannot occupy the ranch's slaughter output capacity")
+	# One order takes the whole herd the picked animal grazes with.
 	var selected: Array[int] = []
 	for cow: Cattle in manager.cows.values():
 		if manager.get_info(cow.id).can_domesticate:
-			selected.append(cow.id)
-			_check(manager.request_domestication(cow.id) == "", "player can order reachable wild cattle home")
-		if selected.size() == 4: break
-	_check(selected.size() == 4, "four real wild cattle can be claimed for the initial herd")
+			_check(manager.request_domestication(cow.id) == "", "player can order a reachable wild herd home")
+			break
+	for cow: Cattle in manager.cows.values():
+		if cow.marked: selected.append(cow.id)
+	_check(selected.size() == 4, "one order claims the picked animal's whole herd of four")
+	var runs := 0
+	for job in sim.jobs.all_jobs():
+		if job.kind == JobBoard.Kind.TAME: runs += 1
+	_check(runs == 2, "the herd is shared between the ranch's two ranchers (%d runs)" % runs)
 	var first_position: Vector3 = manager.cows[selected[0]].position if not selected.is_empty() else Vector3.ZERO
 	_check(not sim.research.ranching_known and manager.herd_at(ranch.id).is_empty(),
 			"ordering domestication does not teleport cattle or award knowledge")

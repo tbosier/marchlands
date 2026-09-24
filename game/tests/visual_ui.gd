@@ -21,22 +21,24 @@ func _tray(game: SeededGame, suffix: String) -> void:
 	_check(game.hud._build_scroll.get_global_rect().end.x >= game.hud.size.x - 16,
 		"open tray uses the full available row " + suffix)
 	await _shot("tray_first_" + suffix)
+	# Each building lives under one tab, reached by clicking it: one click per
+	# tab, then every card it shows is checked.
+	var by_tab := {}
 	for type_id in game.hud._build_buttons:
-		var button: Button = game.hud._build_buttons[type_id]
-		game.hud._build_scroll.ensure_control_visible(button)
-		await _settle_ui()
-		var viewport := game.hud._build_scroll.get_global_rect()
-		_check(viewport.encloses(button.get_global_rect()), "build card is reachable: " + type_id + " " + suffix)
-		var label: Label = game.hud._build_cards[type_id].name
-		var text_width := label.get_theme_font("font").get_string_size(label.text,
-			HORIZONTAL_ALIGNMENT_LEFT, -1, label.get_theme_font_size("font_size")).x
-		_check(text_width <= label.size.x + 1.0, "build name is fully readable: " + type_id + " " + suffix)
-		var price: Label = game.hud._build_cards[type_id].cost
-		var price_width := price.get_theme_font("font").get_string_size(price.text,
-			HORIZONTAL_ALIGNMENT_LEFT, -1, price.get_theme_font_size("font_size")).x
-		_check(price.is_visible_in_tree() and price_width <= price.size.x + 1.0,
-			"building material price is fully readable: " + type_id + " " + suffix)
+		var category := BuildingDefs.tray_category(type_id)
+		if not by_tab.has(category): by_tab[category] = []
+		by_tab[category].append(type_id)
+	for category in by_tab:
+		await _click(game.hud._tray_tabs[category])
+		for other in game.hud._build_buttons:
+			var shown: bool = game.hud._build_buttons[other].visible
+			if shown != by_tab[category].has(other):
+				_check(false, "the %s tab %s %s %s" % [category,
+						"hides" if shown else "shows", other, suffix])
+		for type_id in by_tab[category]:
+			await _check_card(game, type_id, suffix)
 	game.hud._build_scroll.ensure_control_visible(game.hud._clear_button)
+
 	await _shot("tray_last_" + suffix)
 	await _click(game.hud._clear_button)
 	_check(game.mode == game.Mode.CLEAR, "last scrolled tray action activates Clear Ground " + suffix)
@@ -120,3 +122,20 @@ func _run() -> void:
 	await _settle_ui()
 	print("Visual UI regression failures: %d" % _failures)
 	quit(1 if _failures else 0)
+
+
+func _check_card(game: SeededGame, type_id: String, suffix: String) -> void:
+	var button: Button = game.hud._build_buttons[type_id]
+	game.hud._build_scroll.ensure_control_visible(button)
+	await _settle_ui()
+	var viewport := game.hud._build_scroll.get_global_rect()
+	_check(viewport.encloses(button.get_global_rect()), "build card is reachable: " + type_id + " " + suffix)
+	var label: Label = game.hud._build_cards[type_id].name
+	var text_width := label.get_theme_font("font").get_string_size(label.text,
+		HORIZONTAL_ALIGNMENT_LEFT, -1, label.get_theme_font_size("font_size")).x
+	_check(text_width <= label.size.x + 1.0, "build name is fully readable: " + type_id + " " + suffix)
+	var price: Label = game.hud._build_cards[type_id].cost
+	var price_width := price.get_theme_font("font").get_string_size(price.text,
+		HORIZONTAL_ALIGNMENT_LEFT, -1, price.get_theme_font_size("font_size")).x
+	_check(price.is_visible_in_tree() and price_width <= price.size.x + 1.0,
+		"building material price is fully readable: " + type_id + " " + suffix)

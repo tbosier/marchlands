@@ -301,7 +301,9 @@ func _feed(scout: Scout, delta: float) -> void:
 			if b.under_construction or c.global_position.distance_to(sim.entrance_of(b,"att_entrance")) > Config.ARRIVE_RADIUS + 0.25: continue
 			need -= b.remove(Config.Res.FOOD,minf(need,b.available(Config.Res.FOOD)))
 			if need <= 0: break
-	c.hunger = Config.travel_hunger(c.hunger, need, delta / Config.DAY_LENGTH * Config.HUNGER_PER_DAY)
+	var ration := delta / Config.DAY_LENGTH * Config.HUNGER_PER_DAY
+	sim.ledger.used(Config.Res.FOOD, ration - need)
+	c.hunger = Config.travel_hunger(c.hunger, need, ration)
 	c.next_meal = Config.next_meal_after(sim.day)
 	if c.hunger >= 1:
 		if c is Soldier: c.apply_damage(delta*0.15)

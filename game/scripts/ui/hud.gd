@@ -22,6 +22,9 @@ signal speed_requested(index: int)
 signal upgrade_route_requested()
 signal road_scope_requested(scope: String)
 signal research_open_requested()
+## A tile in the unit grid was clicked: select just that soldier, or with
+## Shift held, drop him from the selection.
+signal unit_pick_requested(unit_id: int, remove: bool)
 signal research_requested(tech_id: String)
 signal army_open_requested()
 signal scouting_open_requested()
@@ -95,7 +98,9 @@ const ACCENT_DEEP := Color(0.46, 0.38, 0.22)
 const TOP_BAR_H := 46.0
 const TOP_BAR_INNER_H := 34.0
 const TRAY_CARD_H := 54.0
-const BAR_OPEN_H := 78.0
+## Open, the bar is two rows: the toggle with the category tabs, then the
+## cards. Sharing one row, the tabs pushed the cards off a 640 px window.
+const BAR_OPEN_H := BAR_CLOSED_H + TRAY_CARD_H + 16.0
 const BAR_CLOSED_H := 46.0
 
 var _res_labels: Array[Label] = []
@@ -141,6 +146,10 @@ var _clock: Clock
 var _active_build := ""
 var _compact := false
 var _primary_actions: Array[Button] = []
+## The build tray's category tabs, shown in place of the primary actions while
+## the tray is open, and which one is showing.
+var _tray_tabs: Dictionary = {}
+var _tray_category := ""
 var _world_dialog: ConfirmationDialog
 var _world_size_choice: OptionButton
 var _world_seed_input: LineEdit
@@ -199,6 +208,7 @@ func setup(sim: Simulation, clock: Clock) -> void:
 	_build_top_bar()
 	_build_bottom_bar()
 	_build_selection_panel()
+	_build_unit_grid()
 	_build_alerts()
 	_build_tooltip()
 	_fit_to_viewport()
@@ -211,6 +221,50 @@ func _fit_to_viewport() -> void:
 	position = Vector2.ZERO
 	size = rect
 	_relayout(rect)
+
+
+## Size the tray's cards for the window and the tab showing. Only the cards
+## in the open tab share the row, so a tab of three spreads them wider than
+## the old single tray of fifteen could.
+func _layout_tray_cards() -> void:
+	var width := size.x
+	var shown := 0
+	for type_id in _build_buttons:
+		if BuildingDefs.tray_category(type_id) == _tray_category:
+			shown += 1
+	for type_id in _build_buttons:
+		var b: Button = _build_buttons[type_id]
+		var def := BuildingDefs.get_def(type_id)
+		b.tooltip_text = "%s\n%s\n\n%s" % [def.display_name,
+				def.cost_text(), def.description]
+		# The tray scrolls horizontally, so preserve complete names and prices
+		# instead of squeezing every building into the visible row.
+		var per: float = (width - 128.0) / float(maxi(1, shown))
+		var button_w: float = clampf(per, 152.0, 176.0)
+		b.custom_minimum_size = Vector2(button_w, TRAY_CARD_H)
+
+		var parts: Dictionary = _build_cards[type_id]
+		var name_label: Label = parts["name"]
+		var cost_label: Label = parts["cost"]
+		var icon_rect: TextureRect = parts["icon"]
+		name_label.text = def.display_name
+		cost_label.text = def.cost_text()
+		name_label.add_theme_font_size_override("font_size", F_SMALL)
+		cost_label.visible = true
+		var icon_size := 32.0
+		icon_rect.visible = icon_rect.texture != null
+		icon_rect.custom_minimum_size = Vector2(icon_size, icon_size)
+
+		# Fit the price to the column rather than letting it clip. At the
+		# widest the tray ever gets, "26 Timber, 14 Stone" is a few pixels
+		# wider than the text column, so every card with a two-resource price
+		# read "14 Stor" — in the one place the player goes to find out what
+		# something costs.
+		if cost_label.visible:
+			var text_w: float = button_w - 16.0
+			if icon_rect.visible:
+				text_w -= icon_size + 8.0
+			_fit_label(cost_label, text_w, [F_MICRO, 10, 9])
 
 
 ## Keep the interface usable in a narrow window.
@@ -265,39 +319,7 @@ func _relayout(rect: Vector2) -> void:
 
 	_hint_room = width >= 1180.0
 	_apply_hint_visibility()
-	for type_id in _build_buttons:
-		var b: Button = _build_buttons[type_id]
-		var def := BuildingDefs.get_def(type_id)
-		b.tooltip_text = "%s\n%s\n\n%s" % [def.display_name,
-				def.cost_text(), def.description]
-		# The tray scrolls horizontally, so preserve complete names and prices
-		# instead of squeezing every building into the visible row.
-		var per: float = (width - 128.0) / float(maxi(1, _build_buttons.size()))
-		var button_w: float = clampf(per, 152.0, 176.0)
-		b.custom_minimum_size = Vector2(button_w, TRAY_CARD_H)
-
-		var parts: Dictionary = _build_cards[type_id]
-		var name_label: Label = parts["name"]
-		var cost_label: Label = parts["cost"]
-		var icon_rect: TextureRect = parts["icon"]
-		name_label.text = def.display_name
-		cost_label.text = def.cost_text()
-		name_label.add_theme_font_size_override("font_size", F_SMALL)
-		cost_label.visible = true
-		var icon_size := 32.0
-		icon_rect.visible = icon_rect.texture != null
-		icon_rect.custom_minimum_size = Vector2(icon_size, icon_size)
-
-		# Fit the price to the column rather than letting it clip. At the
-		# widest the tray ever gets, "26 Timber, 14 Stone" is a few pixels
-		# wider than the text column, so every card with a two-resource price
-		# read "14 Stor" — in the one place the player goes to find out what
-		# something costs.
-		if cost_label.visible:
-			var text_w: float = button_w - 16.0
-			if icon_rect.visible:
-				text_w -= icon_size + 8.0
-			_fit_label(cost_label, text_w, [F_MICRO, 10, 9])
+	_layout_tray_cards()
 
 	if _selection_panel:
 		var panel_w: float = clampf(width * 0.34, 208.0, 306.0)
@@ -617,6 +639,8 @@ func _build_resource_chip(index: int) -> Control:
 
 	var name_label := _make_label(Res.display(index), F_SMALL, INK_DIM)
 	name_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	# Hovering the name shows the same rates as hovering the number.
+	name_label.mouse_filter = Control.MOUSE_FILTER_STOP
 	row.add_child(name_label)
 	_res_name_labels.append(name_label)
 
@@ -642,9 +666,12 @@ func _build_bottom_bar() -> void:
 	bar.mouse_filter = Control.MOUSE_FILTER_STOP
 	add_child(bar)
 
+	var rows := VBoxContainer.new()
+	rows.add_theme_constant_override("separation", 4)
+	bar.add_child(rows)
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 6)
-	bar.add_child(row)
+	rows.add_child(row)
 
 	_build_toggle = Button.new()
 	_build_toggle.text = "▲  Build"
@@ -681,12 +708,38 @@ func _build_bottom_bar() -> void:
 	row.add_child(world_button)
 	_primary_actions.append(world_button)
 
+	# Category tabs share the primary actions' place in the row: those hide
+	# while the tray is open, so the bar keeps its height.
+	var tab_group := ButtonGroup.new()
+	var categories: Array[String] = []
+	for row_def in BuildingDefs.TRAY_CATEGORIES:
+		categories.append(row_def[0])
+	for type_id in BuildingDefs.buildable():
+		var category := BuildingDefs.tray_category(type_id)
+		if not categories.has(category):
+			categories.append(category)
+	for category in categories:
+		var tab := Button.new()
+		tab.text = category
+		tab.toggle_mode = true
+		tab.button_group = tab_group
+		tab.focus_mode = Control.FOCUS_NONE
+		tab.custom_minimum_size = Vector2(58, 32)
+		tab.add_theme_font_size_override("font_size", F_SMALL)
+		tab.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		tab.visible = false
+		_style_button(tab)
+		tab.pressed.connect(_select_tray_category.bind(category))
+		row.add_child(tab)
+		_tray_tabs[category] = tab
+
 	_build_scroll = ScrollContainer.new()
 	_build_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_build_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	_build_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
 	_build_scroll.visible = false
-	row.add_child(_build_scroll)
+	_build_scroll.custom_minimum_size.y = TRAY_CARD_H + 6.0
+	rows.add_child(_build_scroll)
 	_build_tray = HBoxContainer.new()
 	_build_tray.add_theme_constant_override("separation", 6)
 	_build_tray.visible = false
@@ -725,6 +778,20 @@ func _build_bottom_bar() -> void:
 	_hint_label.size_flags_horizontal = Control.SIZE_SHRINK_END
 	row.add_child(_hint_label)
 	set_hint("WASD pan · wheel zoom · middle-drag rotate · click to select")
+	_select_tray_category(BuildingDefs.TRAY_CATEGORIES[0][0])
+
+
+## Show one tab's buildings. Clear Ground stays in every tab: it is a tool, not
+## a building, and the player reaches for it from wherever they are.
+func _select_tray_category(category: String) -> void:
+	_tray_category = category
+	for key in _tray_tabs:
+		_tray_tabs[key].set_pressed_no_signal(key == category)
+	for type_id in _build_buttons:
+		_build_buttons[type_id].visible = BuildingDefs.tray_category(type_id) == category
+	if _build_scroll != null:
+		_build_scroll.scroll_horizontal = 0
+	_layout_tray_cards()
 
 
 ## One building in the tray.
@@ -811,9 +878,10 @@ func _fit_label(label: Label, available: float, sizes: Array) -> void:
 func _on_build_tray_toggled(pressed: bool) -> void:
 	for action in _primary_actions:
 		action.visible = not pressed
+	for tab in _tray_tabs.values():
+		tab.visible = pressed
 	_build_tray.visible = pressed
 	_build_scroll.visible = pressed
-	_build_spacer.visible = not pressed
 	_build_toggle.text = "▼  Build" if pressed else "▲  Build"
 	if _build_bar:
 		_build_bar.offset_top = -BAR_OPEN_H if pressed else -BAR_CLOSED_H
@@ -995,6 +1063,8 @@ func set_active_build(type_id: String) -> void:
 		_build_buttons[key].button_pressed = (key == type_id)
 	if type_id != "":
 		set_clear_tool_active(false)
+		if BuildingDefs.tray_category(type_id) != _tray_category:
+			_select_tray_category(BuildingDefs.tray_category(type_id))
 		if _build_toggle and not _build_toggle.button_pressed:
 			_build_toggle.button_pressed = true
 			_build_tray.visible = true
@@ -1043,13 +1113,25 @@ func refresh() -> void:
 func _refresh_readouts() -> void:
 	if _sim == null:
 		return
+	# A game day is DAY_LENGTH seconds at 1x, so a per-minute figure depends on
+	# the speed the player is running at; per day does not.
+	var scale: float = _clock.scale() if _clock != null and not _clock.paused() else 1.0
+	var per_minute := 60.0 * scale / Config.DAY_LENGTH
 	for i in Config.RES_COUNT:
 		var amount := _sim.total_resource(i)
 		_res_labels[i].text = "%d" % int(amount)
+		var made := _sim.ledger.made_per_day(i)
+		var used := _sim.ledger.used_per_day(i)
+		_res_labels[i].tooltip_text = ("%s: %d\nProduced %.1f a day · used %.1f a day · net %+.1f\n"
+				% [Res.display(i), int(amount), made, used, made - used]
+				+ "At %s: +%.1f / −%.1f a minute\n(averaged over the last day or so)"
+				% ["this speed" if scale != 1.0 else "1x", made * per_minute, used * per_minute])
 
 	var bonus := _sim.tools_bonus
-	_res_labels[Config.Res.TOOLS].tooltip_text = ("Tools in store make every "
-			+ "trade faster.\nCurrent work rate: %d%%" % int(bonus * 100.0))
+	_res_labels[Config.Res.TOOLS].tooltip_text += ("\n\nTools in store make every "
+			+ "trade faster. Current work rate: %d%%" % int(bonus * 100.0))
+	for i in Config.RES_COUNT:
+		_res_name_labels[i].tooltip_text = _res_labels[i].tooltip_text
 	_res_labels[Config.Res.TOOLS].add_theme_color_override("font_color",
 			INK if bonus > 1.01 else INK_DIM)
 
@@ -1088,6 +1170,27 @@ func _refresh_readouts() -> void:
 					_sim.stat_population])
 	if responders > 0:
 		_pop_label.tooltip_text = "%d people: %d civilians, %d soldiers, %d merchants, %d scouts, %d bucket carriers. Responders leave production to carry water." % [civilians + soldiers + merchants + scouts + responders, civilians, soldiers, merchants, scouts, responders]
+	var blocker := _sim.immigration_blocker()
+	if blocker != "":
+		_pop_label.tooltip_text += "\n" + blocker
+	var staffing: Dictionary = _sim.staffing_summary()
+	if staffing.open_places > 0:
+		var empty: Array = staffing.empty
+		var text := "\n%d work place%s open" % [staffing.open_places,
+				"" if staffing.open_places == 1 else "s"]
+		if not empty.is_empty():
+			var counts := {}
+			for name in empty:
+				counts[name] = int(counts.get(name, 0)) + 1
+			var named: Array[String] = []
+			for name in counts:
+				named.append(name if counts[name] == 1 else "%s ×%d" % [name, counts[name]])
+			text += " · no workers at: " + ", ".join(named)
+		if staffing.short > 0:
+			text += " · %d more short-handed" % staffing.short
+		_pop_label.tooltip_text += text
+	else:
+		_pop_label.tooltip_text += "\nEvery workplace is fully staffed."
 	if reason != "":
 		_pop_label.add_theme_color_override("font_color", WARN)
 		_idle_reason = reason
@@ -1126,6 +1229,88 @@ func _actions_changed(signature: String) -> bool:
 		_selection_actions.remove_child(child)
 		child.queue_free()
 	return true
+
+
+## The selected force, one tile a man, along the bottom of the screen — the
+## way a real-time strategy game shows who is under the player's hand. Tiles
+## carry the soldier's name, health and water, and pick him out on click.
+const UNIT_GRID_MAX := 24
+const UNIT_TILE := Vector2(86, 46)
+var _unit_grid_panel: PanelContainer
+var _unit_grid: GridContainer
+var _unit_grid_more: Label
+var _unit_grid_ids: Array[int] = []
+
+
+func _build_unit_grid() -> void:
+	_unit_grid_panel = PanelContainer.new()
+	_unit_grid_panel.name = "unit_grid"
+	_unit_grid_panel.add_theme_stylebox_override("panel", _bar_box(true))
+	_unit_grid_panel.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	_unit_grid_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_unit_grid_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_unit_grid_panel.offset_bottom = -BAR_OPEN_H - 6.0
+	_unit_grid_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	_unit_grid_panel.visible = false
+	add_child(_unit_grid_panel)
+	var column := VBoxContainer.new()
+	_unit_grid_panel.add_child(column)
+	_unit_grid = GridContainer.new()
+	_unit_grid.columns = 8
+	_unit_grid.add_theme_constant_override("h_separation", 4)
+	_unit_grid.add_theme_constant_override("v_separation", 4)
+	column.add_child(_unit_grid)
+	_unit_grid_more = _make_label("", F_MICRO, INK_DIM)
+	_unit_grid_more.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	column.add_child(_unit_grid_more)
+
+
+## Show `units` (Soldier nodes, the player's own) in the grid, or hide it when
+## there are none. Tiles are rebuilt only when the set of men changes; their
+## readings are refreshed on every call.
+func show_unit_grid(units: Array) -> void:
+	if units.is_empty():
+		_unit_grid_panel.visible = false
+		_unit_grid_ids.clear()
+		return
+	var shown := units.slice(0, UNIT_GRID_MAX)
+	var ids: Array[int] = []
+	for unit in shown:
+		ids.append(unit.id)
+	if ids != _unit_grid_ids:
+		_unit_grid_ids = ids
+		for child in _unit_grid.get_children():
+			_unit_grid.remove_child(child)
+			child.queue_free()
+		_unit_grid.columns = clampi(shown.size(), 1, 8)
+		for unit in shown:
+			var tile := Button.new()
+			tile.custom_minimum_size = UNIT_TILE
+			tile.focus_mode = Control.FOCUS_NONE
+			tile.clip_text = true
+			tile.add_theme_font_size_override("font_size", F_MICRO)
+			_style_button(tile, "card")
+			var unit_id: int = unit.id
+			tile.gui_input.connect(func(event: InputEvent):
+				if event is InputEventMouseButton and event.pressed \
+						and event.button_index == MOUSE_BUTTON_LEFT:
+					unit_pick_requested.emit(unit_id, event.shift_pressed)
+					accept_event())
+			_unit_grid.add_child(tile)
+	for i in shown.size():
+		var unit = shown[i]
+		var tile: Button = _unit_grid.get_child(i)
+		var health := int(round(unit.health))
+		var first: String = String(unit.given_name).split(" ")[0]
+		tile.text = "%s\n%d%% · water %d%%" % [first, health, int(round(unit.hydration * 100.0))]
+		tile.tooltip_text = "%s — %s\nHealth %d%% · water %d%% · %s armour\nClick to pick him out · Shift-click to drop him" \
+				% [unit.given_name, unit.task_label, health,
+				int(round(unit.hydration * 100.0)), String(unit.armor_tier)]
+		var colour := INK if health >= 70 else (WARN if health >= 35 else Color(0.86, 0.42, 0.36))
+		tile.add_theme_color_override("font_color", colour)
+	_unit_grid_more.visible = units.size() > shown.size()
+	_unit_grid_more.text = "+%d more" % (units.size() - shown.size())
+	_unit_grid_panel.visible = true
 
 
 func clear_selection() -> void:
@@ -1179,12 +1364,44 @@ func show_building(b: Building) -> void:
 		lines.append("  Construction: %d%%" % int(b.build_progress * 100.0))
 	else:
 		_add_upgrade_action(b, rebuild)
-		if b.type_id == "scout_lodge" and rebuild:
-			var train := _action_button("Train a citizen scout")
-			train.pressed.connect(func():
-				var live := _live_building(building_ref)
-				if live != null: scout_train_requested.emit(live.id))
-			_selection_actions.add_child(train)
+		if b.type_id == "scout_lodge" and _sim.scouting != null:
+			# The Scouts screen is where scouts are sent out, recalled and
+			# followed, and it has to be reachable from the lodge without
+			# training somebody new to get there.
+			if rebuild:
+				var manage := _action_button("Manage scouts")
+				manage.pressed.connect(func(): scouting_open_requested.emit())
+				_selection_actions.add_child(manage)
+				var train := _action_button("Train a citizen scout")
+				train.name = "train_scout"
+				train.pressed.connect(func():
+					var live := _live_building(building_ref)
+					if live != null: scout_train_requested.emit(live.id))
+				_selection_actions.add_child(train)
+			var scouting: Dictionary = _sim.scouting.info()
+			var training := 0
+			for row in scouting.scouts:
+				if row.training: training += 1
+			lines.append("\n[b]Scouts[/b] %d in service · %d in training"
+					% [scouting.scouts.size() - training, training])
+			var train_button := _selection_actions.get_node_or_null("train_scout") as Button
+			if train_button != null:
+				train_button.disabled = not scouting.can_train
+				train_button.tooltip_text = String(scouting.reason)
+			if not scouting.can_train and String(scouting.reason) != "":
+				lines.append("[color=#a9a49b]%s[/color]" % scouting.reason)
+		if b.type_id == "keep" and _sim.research != null:
+			if rebuild:
+				var research := _action_button("Open research")
+				research.pressed.connect(func(): research_open_requested.emit())
+				_selection_actions.add_child(research)
+			var active: String = _sim.research.active
+			if active == "":
+				lines.append("\n[b]Research[/b] none in progress")
+			else:
+				var quote: Dictionary = _sim.research.quote(active, true)
+				lines.append("\n[b]Researching[/b] %s — %d%% · %.1f days left"
+						% [quote.name, int(quote.progress * 100.0), quote.remaining_days])
 		if b.fire > 0.0:
 			lines.append("\n[color=#e0a85c]Burning — the fire is spreading through the building[/color]")
 		elif b.health < b.max_health() * 0.7:
@@ -1192,6 +1409,12 @@ func show_building(b: Building) -> void:
 		if b.type_id == "well" and _sim.water != null:
 			var water: Dictionary = _sim.water.well_info(b.id)
 			lines.append("\n[b]Water[/b] %.1f / %.0f\nPeople walk here to drink. Firefighters collect buckets here and carry them to fires." % [water.get("water", 0.0), water.get("capacity", 80.0)])
+			# What the well can sustain against what is being taken from it.
+			var drawn: float = water.get("drawn_per_day", 0.0)
+			var refill: float = water.get("refill_per_day", 14.0)
+			var people := int(round(drawn / (refill / maxf(1.0, water.get("serves", 20.0)))))
+			lines.append("[color=%s]Drinking %.0f a day of %.0f it refills · about %d of the ~%d people it can serve[/color]"
+					% ["#e0a85c" if drawn > refill else "#a9a49b", drawn, refill, people, int(water.get("serves", 20.0))])
 			if water.get("purging", false):
 				# Two different sentences, because a sole well makes the usual one
 				# false: `_drink` lets go of everyone walking here and `_well_for`
@@ -1697,12 +1920,12 @@ func show_cow(info: Dictionary) -> void:
 	_selection_panel.visible = true
 	_selection_title.text = "Wild cattle" if info.wild else "Ranch cattle"
 	var rebuild := _actions_changed("cow:%d:%s" % [info.id, info.wild])
-	_selection_body.text = "%s\n\nBuild and staff a ranch, then send a rancher to approach a wild animal and lead it home. Your first successful domestication unlocks Ranching research. Keep a breeding pair; surplus cattle provide food and hides. A tannery turns hides into leather for armor." % info.status
+	_selection_body.text = "%s\n\nBuild and staff a ranch, then send its ranchers for this animal's herd: they win each beast's trust in turn and lead the group home together. Your first successful domestication unlocks Ranching research. Keep a breeding pair; surplus cattle provide food and hides. A tannery turns hides into leather for armor." % info.status
 	if info.wild:
 		var id: int = info.id
 		var button: Button
 		if rebuild:
-			button = _action_button("Send rancher to domesticate")
+			button = _action_button("Send ranchers for this herd")
 			button.pressed.connect(func(): domesticate_requested.emit(id))
 			_selection_actions.add_child(button)
 		else:
