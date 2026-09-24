@@ -99,8 +99,10 @@ geography; the default opening also keeps the original small landscape.
 For a fresh generated landscape at launch, use
 `tools/build.sh run -- --world-size=small` (also `medium`, `large`, or `xl`).
 
-Build a **Scout lodge**, train a resident through **Scouts**, select that person,
-and right-click to explore. Unknown ground is obscured; remembered terrain is
+Build a **Scout lodge**, train a resident through **Scouts**, select that person
+(click them on the map, or pick them from the Scouts panel), and right-click to
+explore. An order given while the scout is still training is held and carried
+out as soon as training ends. Unknown ground is obscured; remembered terrain is
 dimmed. Discovered towns leave dated reports. **Visit known castle** sends a
 scout to seek the ruler's account; ordinary observations are estimates. Merchants
 can bring observations from established routes, but cannot explore on command.
@@ -119,7 +121,11 @@ Injuries persist through discharge and later service. There are no floating
 health bars. See [scouting and wounds](design/SCOUTING_AND_WOUNDS_2026-09-21.md)
 for the implemented limits.
 
-The opening settlement has a **Well**. Build more where people work and travel:
+New players get **tips** as situations first arise — beds all taken, wells
+at their limit, food running short, winter coming. "Don't show tips" turns them
+off; the **Tips** button on the bottom bar turns them back on.
+
+The opening settlement has two **Wells**. Build more where people work and travel:
 citizens physically visit them to drink, and fire responders carry buckets from
 wells to burning buildings. A well keeps about twenty people in water; its panel
 shows how much is being drawn against what it refills, and you are warned when
@@ -460,6 +466,14 @@ crossings, a merchant's complete bridge journey, and saves taken mid-crossing.
 Rendered checks click through the new controls at several window sizes. Godot,
 Python 3, rsync, Xvfb, xauth and Mesa are required; Blender is only needed when
 regenerating assets. Set `GODOT=/path/to/godot` to choose an engine explicitly.
+
+After the four setup stages, the rest run in parallel — about a third of the
+machine's threads, up to eight at once, slowest first. On a 12-core, 24-thread
+machine that took the full gate from about 35 minutes (measured 2,059 and
+2,156 s serially) to about 8 (467–523 s in parallel). A 4-thread CI runner
+still runs one stage at a time. Each parallel stage
+gets its own save directory and its own Xvfb display, and timeouts are widened
+for the shared CPU. `--jobs 1` runs everything one after another as before.
 
 Every stage has a timeout and retains its complete log. Tests must reach their
 success marker and have no unexpected engine errors; Godot exiting zero alone

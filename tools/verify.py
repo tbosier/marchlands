@@ -9,7 +9,8 @@ Every test must also reach its own success marker without unexpected errors.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass, replace
 import fcntl
 import json
 import os
@@ -19,6 +20,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +38,79 @@ SCENARIOS = (
     "first_road", "regrowth", "construction", "farm_check", "tools_check",
     "industry", "save_load", "upgrade", "households", "stress",
 )
+
+
+# Stages that build what every later stage runs against. They run first, one
+# at a time, and a failure among them stops the gate.
+SETUP = ("python-tests", "assets", "sync", "import")
+
+# Process groups of stages that are running, so an interrupted parallel gate
+# can stop all of them rather than only the one the main thread waited on.
+_ACTIVE: set[int] = set()
+_ACTIVE_LOCK = threading.Lock()
+# Set once the gate is stopping. A stage whose process starts after that (its
+# worker was between taking the stage and registering the pid) kills itself.
+_STOPPING = threading.Event()
+
+
+def stop_active() -> None:
+    """Terminate every running stage's process group, then force the rest.
+
+    A second Ctrl-C during the grace period skips straight to the force."""
+    _STOPPING.set()
+    with _ACTIVE_LOCK:
+        groups = list(_ACTIVE)
+    for group in groups:
+        try:
+            os.killpg(group, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    try:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and groups:
+            groups = [g for g in groups if _alive(g)]
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        pass
+    with _ACTIVE_LOCK:
+        groups = list(_ACTIVE)
+    for group in groups:
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+_DISPLAY_LOCK = threading.Lock()
+_DISPLAYS_TAKEN: set[int] = set()
+
+
+def claim_display(start: int = 300) -> int:
+    """A free X display number, not in use by this gate or anything else.
+
+    Numbered servers instead of `xvfb-run -a` because -a races when several
+    stages start together; checked against the X lock files so a gate in
+    another checkout, or any other X server, is not trodden on."""
+    with _DISPLAY_LOCK:
+        number = start
+        while (number in _DISPLAYS_TAKEN or Path(f"/tmp/.X{number}-lock").exists()
+               or Path(f"/tmp/.X11-unix/X{number}").exists()):
+            number += 1
+        _DISPLAYS_TAKEN.add(number)
+        return number
+
+
+def release_display(number: int) -> None:
+    with _DISPLAY_LOCK:
+        _DISPLAYS_TAKEN.discard(number)
+
+
+def _alive(group: int) -> bool:
+    try:
+        os.killpg(group, 0)
+        return True
+    except ProcessLookupError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -87,6 +162,13 @@ def run_stage(stage: Stage, output_dir: Path, env: dict[str, str],
             process = subprocess.Popen(stage.command, cwd=cwd, env=env,
                                        stdout=stream, stderr=subprocess.STDOUT,
                                        start_new_session=True)
+            with _ACTIVE_LOCK:
+                _ACTIVE.add(process.pid)
+            if _STOPPING.is_set():
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             try:
                 returncode = process.wait(timeout=stage.timeout)
             except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
@@ -113,6 +195,9 @@ def run_stage(stage: Stage, output_dir: Path, env: dict[str, str],
                     raise
                 issues.append(f"timed out after {stage.timeout:g}s")
                 returncode = process.returncode
+            finally:
+                with _ACTIVE_LOCK:
+                    _ACTIVE.discard(process.pid)
         except OSError as exc:
             issues.append(str(exc))
             stream.write(str(exc) + "\n")
@@ -224,12 +309,95 @@ def plan(headless: bool, skip_long_run: bool) -> list[Stage]:
     return stages
 
 
+def default_jobs() -> int:
+    """About a third of the machine's threads, up to eight: each stage is one
+    Godot process, and the display stages add an Xvfb and a software renderer."""
+    return max(1, min(8, (os.cpu_count() or 2) // 3))
+
+
+# The last complete gate's stage durations, longest first, so the slowest
+# stages start at once instead of finishing last. Unknown stages count as a
+# minute.
+def _expected_seconds() -> dict[str, float]:
+    runs = sorted((ROOT / "artifacts/verification").glob("*/summary.json"), reverse=True)
+    for path in runs:
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if data.get("complete_gate") and len(data.get("results", [])) > 40:
+            return {item["name"]: float(item["seconds"]) for item in data["results"]}
+    return {}
+
+
+def run_rest(stages: list[Stage], jobs: int, output_dir: Path, env: dict[str, str],
+             state_dir: Path, results: list, report, save) -> None:
+    """Run the post-setup stages, `jobs` at a time.
+
+    In parallel each stage gets its own Godot user directory, so two tests that
+    write the same save slot cannot read each other's file, and each display
+    stage gets its own Xvfb server number rather than racing `xvfb-run -a` for
+    the next free one. Timeouts grow with the load: a stage sharing the CPU with
+    seven others runs slower than it does alone.
+    """
+    if jobs <= 1:
+        for stage in stages:
+            print(f"RUN  {stage.name} (timeout {stage.timeout:g}s)", flush=True)
+            result = run_stage(stage, output_dir, env)
+            results.append(result)
+            save()
+            report(result)
+        return
+    expected = _expected_seconds()
+    stages = sorted(stages, key=lambda stage: -expected.get(stage.name, 60.0))
+    scale = min(2.5, 1.0 + 0.25 * (jobs - 1))
+    prepared = []
+    for stage in stages:
+        prepared.append((replace(stage, timeout=stage.timeout * scale),
+                         {**env, "MARCHLANDS_GODOT_HOME": str(state_dir / "parallel" / stage.name)}))
+
+    def run_one(stage: Stage, stage_env: dict[str, str]) -> dict:
+        command = list(stage.command)
+        display = -1
+        if command and command[0] == "xvfb-run" and "-a" in command:
+            display = claim_display()
+            at = command.index("-a")
+            command[at:at + 1] = ["-n", str(display)]
+        try:
+            return run_stage(replace(stage, command=command), output_dir, stage_env)
+        finally:
+            if display >= 0:
+                release_display(display)
+    print(f"running {len(prepared)} stages, {jobs} at a time (timeouts x{scale:g})", flush=True)
+    pool = ThreadPoolExecutor(max_workers=jobs)
+    pending = set()
+    try:
+        for stage, stage_env in prepared:
+            pending.add(pool.submit(run_one, stage, stage_env))
+        while pending:
+            # Short waits keep the main thread able to take the interrupt that
+            # SIGTERM and Ctrl-C raise.
+            done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+            for future in done:
+                result = future.result()
+                results.append(result)
+                save()
+                report(result)
+    except KeyboardInterrupt:
+        pool.shutdown(wait=False, cancel_futures=True)
+        stop_active()
+        raise
+    pool.shutdown(wait=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--headless", action="store_true",
                         help="partial gate: omit real-driver shaders and viewport tests")
     parser.add_argument("--skip-long-run", action="store_true",
                         help="partial gate: omit the multi-seed endurance test")
+    parser.add_argument("--jobs", type=int, default=default_jobs(),
+                        help="stages run at once after setup (default %(default)s; 1 = serial)")
     args = parser.parse_args(argv)
     needed = [name for name in ["rsync"] if not shutil.which(name)]
     if not args.headless:
@@ -266,19 +434,31 @@ def main(argv: list[str] | None = None) -> int:
 
     previous_term = signal.signal(signal.SIGTERM, interrupted)
     try:
-        for stage in plan(args.headless, args.skip_long_run):
-            print(f"RUN  {stage.name} (timeout {stage.timeout:g}s)", flush=True)
-            result = run_stage(stage, output_dir, env)
-            results.append(result)
-            summary_path.write_text(json.dumps(summary, indent=2) + "\n")
-            print(f"{'PASS' if result['passed'] else 'FAIL'} {stage.name} ({result['seconds']:.1f}s)", flush=True)
+        stages = plan(args.headless, args.skip_long_run)
+        setup = [stage for stage in stages if stage.name in SETUP]
+        rest = [stage for stage in stages if stage.name not in SETUP]
+
+        def report(result: dict) -> None:
+            print(f"{'PASS' if result['passed'] else 'FAIL'} {result['name']} ({result['seconds']:.1f}s)", flush=True)
             if not result["passed"]:
                 for issue in result["issues"][:12]:
                     print("  " + issue, flush=True)
                 print("  log: " + result["log"], flush=True)
+
+        setup_ok = True
+        for stage in setup:
+            print(f"RUN  {stage.name} (timeout {stage.timeout:g}s)", flush=True)
+            result = run_stage(stage, output_dir, env)
+            results.append(result)
+            summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+            report(result)
+            if not result["passed"]:
                 # Setup failures make all dependent Godot results meaningless.
-                if stage.name in {"python-tests", "assets", "sync", "import"}:
-                    break
+                setup_ok = False
+                break
+        if setup_ok:
+            run_rest(rest, args.jobs, output_dir, env, state_dir, results, report,
+                     lambda: summary_path.write_text(json.dumps(summary, indent=2) + "\n"))
         summary["passed"] = (len(results) == len(plan(args.headless, args.skip_long_run))
                              and all(item["passed"] for item in results))
     except KeyboardInterrupt:

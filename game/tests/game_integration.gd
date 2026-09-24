@@ -685,7 +685,104 @@ func _playtest_fixes() -> void:
 	await process_frame
 
 
+## A selected scout goes where the player right-clicks: the real input path,
+## from a synthesised mouse event through `_unhandled_input` to the order.
+func _scout_right_click() -> void:
+	# A window's worth of screen: headless starts at 64 x 64, where the
+	# interface covers everything a click could land on.
+	var previous_size := root.size
+	root.size = Vector2i(1280, 720)
+	var game := _new_game(42)
+	game.dev_mode = true
+	_check(game._dev_command("scout") == "", "the scout tool trains a scout")
+	game.dev_mode = false
+	var scouts: Array = game.sim.scouting.scouts.values()
+	_check(not scouts.is_empty(), "a scout is in service")
+	if scouts.is_empty():
+		game.free()
+		root.size = previous_size
+		return
+	var scout: Scout = scouts[0]
+	_check(scout.state == "ready", "the scout is ready for orders (%s)" % scout.state)
+	# Picking him out on the map needs real physics; `tests/scouting_ui.gd`
+	# covers that click. Here the panel's selection stands in for it.
+	game.hud.scout_select_requested.emit(scout.id)
+	game.camera.focus_on(scout.person.global_position, 60.0)
+	for i in 30:
+		game.camera._process(0.1)
+	var target: Vector3 = scout.person.global_position + Vector3(24, 0, 18)
+	target.y = game.world.heightmap.height_at(target.x, target.z)
+	var at: Vector2 = game.camera._camera.unproject_position(target)
+	_check(not game._ui_blocks(at), "the target ground is not under the interface")
+	var click := InputEventMouseButton.new()
+	click.button_index = MOUSE_BUTTON_RIGHT
+	click.pressed = true
+	click.position = at
+	game._unhandled_input(click)
+	_check(scout.state == "exploring" and scout.destination.distance_to(target) < 6.0,
+			"right-clicking the ground sends the selected scout there (%s, %.1f m off)"
+			% [scout.state, scout.destination.distance_to(target)])
+	_check(game.selected_scout == scout.id, "and the scout stays selected for the next order")
+	# An order given during training is kept, not refused, and carried out
+	# the moment training ends.
+	scout.state = "training"
+	scout.training_left = 1.0
+	scout.orders_waiting = false
+	var later: Vector3 = scout.person.global_position + Vector3(-20, 0, 14)
+	later.y = game.world.heightmap.height_at(later.x, later.z)
+	_check(game.sim.scouting.command(scout.id, later) == "" and scout.orders_waiting,
+			"a scout still in training takes an order and holds it")
+	for i in 8:
+		game.sim.scouting.tick(0.25)
+	_check(scout.state == "exploring" and not scout.orders_waiting
+			and scout.destination.distance_to(later) < 0.01,
+			"and sets out on it as soon as training ends (%s)" % scout.state)
+	game.free()
+	root.size = previous_size
+	await process_frame
+
+
+## A tip appears when its situation arises, once, and "Don't show tips" turns
+## them off and remembers it.
+func _tips() -> void:
+	var game := _new_game(42)
+	var tips: Tips = game.tips
+	_check(tips != null and not tips.enabled, "tests start with tips off")
+	tips.enabled = true
+	tips._seen.clear()
+	tips._next_at = 0
+	for b in game.sim.buildings:
+		b.inventory[Config.Res.FOOD] = 0.0
+	game.sim.stores.refresh_totals(game.sim.population_members(), game.sim.buildings)
+	tips.poll()
+	_check(tips.visible and tips.showing() == "food",
+			"running short of food brings up the food tip (%s)" % tips.showing())
+	tips.dismiss()
+	tips._next_at = 0
+	tips.poll()
+	_check(tips.showing() != "food", "a tip is not shown twice")
+	tips.visible = false
+	var off: Button = tips.find_child("no_tips", true, false)
+	tips.visible = true
+	off.pressed.emit()
+	_check(not tips.enabled and not tips.visible, "Don't show tips turns them off")
+	var settings := ConfigFile.new()
+	_check(settings.load(Tips.SETTINGS) == OK
+			and settings.get_value("tips", "enabled", true) == false,
+			"and the choice is remembered in the settings file")
+	tips._next_at = 0
+	tips.poll()
+	_check(not tips.visible, "no tip appears once they are off")
+	_check(not game.hud._tips_button.button_pressed, "the Tips button shows them off")
+	game.hud._tips_button.pressed.emit()
+	_check(tips.enabled and game.hud._tips_button.button_pressed, "the Tips button turns them back on")
+	game.free()
+	await process_frame
+
+
 func _run() -> void:
+	await _tips()
+	await _scout_right_click()
 	await _playtest_fixes()
 	await _selection_and_placement()
 	await _roads_and_research()

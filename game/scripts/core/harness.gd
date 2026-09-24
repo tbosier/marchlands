@@ -35,6 +35,8 @@ var _steps: Array = []
 var _index := 0
 var _run_remaining := 0.0
 var _out_dir := "res://../artifacts"
+## The scenario's file name, so parallel gate stages each keep their own log.
+var _scenario := "harness"
 var _failures: Array[String] = []
 var _log: Array[String] = []
 var _settled := 0
@@ -58,6 +60,7 @@ var _felling_expected := 0.0
 
 func run(game_node, script_path: String) -> void:
 	game = game_node
+	_scenario = script_path.get_file().get_basename()
 	# Production's review jitter and scripted population scatter use the global
 	# generator. Keep automated runs reproducible without changing normal play.
 	seed(game.world.world_seed)
@@ -1671,7 +1674,7 @@ func _fail(text: String) -> void:
 
 func _finish() -> void:
 	var summary := "\n".join(_log)
-	var file := FileAccess.open("%s/harness_log.txt" % _out_dir, FileAccess.WRITE)
+	var file := FileAccess.open("%s/harness_log_%s.txt" % [_out_dir, _scenario], FileAccess.WRITE)
 	if file:
 		file.store_string(summary + "\n")
 		file.close()

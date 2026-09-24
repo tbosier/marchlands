@@ -53,8 +53,11 @@ func _run() -> void:
 			and mesh.get_surface_count() == 7,
 			"stone ring, roof, winch and bucket fit the declared well footprint and height")
 	var keep := _sim.place_building("keep", Vector3(200, 9, 200), 0, true)
-	keep.inventory[Config.Res.TIMBER] = 12.0
-	keep.inventory[Config.Res.STONE] = 20.0
+	# Exactly the price, read from the definition, so the check below can ask
+	# for every unit to have been carried to the site.
+	var well_cost: Dictionary = BuildingDefs.get_def("well").cost
+	keep.inventory[Config.Res.TIMBER] = float(well_cost[Config.Res.TIMBER])
+	keep.inventory[Config.Res.STONE] = float(well_cost[Config.Res.STONE])
 	var site := Vector3(236, 9, 200)
 	_check(_sim.research.completed.is_empty() and _sim.can_place("well", site).ok,
 			"basic water access needs no research")
@@ -95,7 +98,8 @@ func _run() -> void:
 	_check(carried and labour and not _well.under_construction,
 			"real citizens haul both materials and perform labour to complete the well")
 	_check(keep.inventory[Config.Res.TIMBER] == 0.0 and keep.inventory[Config.Res.STONE] == 0.0
-			and _well.delivered[Config.Res.TIMBER] == 12.0 and _well.delivered[Config.Res.STONE] == 20.0,
+			and _well.delivered[Config.Res.TIMBER] == float(well_cost[Config.Res.TIMBER])
+			and _well.delivered[Config.Res.STONE] == float(well_cost[Config.Res.STONE]),
 			"completed well accounts for every supplied timber and stone")
 	_check(_well._visual.visible and (_well._blueprint == null or not _well._blueprint.visible),
 			"completion replaces the translucent blueprint with the finished model")

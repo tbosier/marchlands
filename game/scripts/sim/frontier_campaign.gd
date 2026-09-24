@@ -42,13 +42,16 @@ const COMPANY_GAP := 4.0
 ## reads the head count, not whether `_eat` actually found the meal. The town is
 ## still held to its own stores for everything it spends; it is the supply of
 ## raw material that is a rate rather than a place on the map.
-const LABOUR_TIMBER := 1.3   ## per labourer per day
-const LABOUR_STONE := 0.7
+## Doubled with the building prices (BuildingDefs), so the rival still grows at
+## the pace it was tuned to rather than at half of it.
+const LABOUR_TIMBER := 2.6   ## per labourer per day
+const LABOUR_STONE := 1.4
 const LABOUR_IRON := 0.35    ## peaceful towns only; what makes their trade renewable
 ## Kept deliberately low. The keep holds 400 of everything together, so every
 ## unit of material on the shelf is a unit of food the town cannot bank, and a
 ## town that cannot bank food starves its garrison the first bad week. These
-## are a little over the price of the dearest thing the town builds.
+## are a little over the price of the dearest thing the town builds: a granary
+## at 52 timber, a well at 40 stone.
 const TIMBER_CEILING := 70.0
 const STONE_CEILING := 50.0
 const IRON_CEILING := 60.0

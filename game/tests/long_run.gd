@@ -12,6 +12,10 @@ class SeededGame extends "res://scripts/core/game.gd":
 	func _seed_from_args() -> int:
 		return scenario_seed
 
+	# Tests drive the interface directly; a tip must not appear mid-check.
+	func _tips_allowed() -> bool:
+		return false
+
 
 const SEEDS := [20260911, 1776, 42]
 const DEFAULT_DAYS := 90

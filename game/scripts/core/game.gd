@@ -11,8 +11,8 @@ extends Node3D
 
 const START_FOOD := 200.0
 const START_TOOLS := 50.0
-const START_TIMBER := 40.0
-const START_STONE := 20.0
+const START_TIMBER := 100.0
+const START_STONE := 50.0
 
 enum Mode { SELECT, PLACE, CLEAR, BRIDGE }
 
@@ -77,6 +77,8 @@ var _quit_paused := false
 ## When the last order's "Marching…/Attacking…" line gives way to the idle
 ## hint again, in engine milliseconds; 0 when no order line is up.
 var _order_hint_until := 0
+## Advice for new players; see `Tips`.
+var tips: Tips
 var show_nav_overlay := false
 
 ## keycode -> [command name, whether Alt must be held]. Built from
@@ -315,6 +317,16 @@ func _ready() -> void:
 			dev_mode = true
 			_dev_launch = true
 			dev.visible = true
+
+	tips = Tips.new()
+	tips.setup(self)
+	_ui_layer.add_child(tips)
+	tips.enabled_changed.connect(hud.set_tips_on)
+	hud.tips_toggle_requested.connect(func(): tips.set_enabled(not tips.enabled))
+	if not _tips_allowed():
+		# Not saved: a scripted run must not switch the player's tips off.
+		tips.enabled = false
+	hud.set_tips_on(tips.enabled)
 
 	camera.look_at_position(sim.keep.global_position, 78.0)
 	world.set_time_of_day(clock.day_fraction(), clock.season_fraction())
@@ -710,6 +722,8 @@ func _process(delta: float) -> void:
 	_ui_timer -= delta
 	if _ui_timer <= 0.0:
 		_ui_timer = 0.25
+		if tips != null:
+			tips.poll()
 		if _order_hint_until > 0 and Time.get_ticks_msec() >= _order_hint_until:
 			_order_hint_until = 0
 			if mode == Mode.SELECT:
@@ -1822,18 +1836,37 @@ func _regroup_selection() -> void:
 
 
 func _ui_blocks(at: Vector2) -> bool:
-	return hud.blocks_mouse(at) or (dev != null and dev.blocks_mouse(at))
+	return hud.blocks_mouse(at) or (dev != null and dev.blocks_mouse(at)) \
+			or (tips != null and tips.visible and tips.get_global_rect().has_point(at))
+
+
+## Tips are for people playing. A scripted harness run drives the interface by
+## coordinates and must not have a tip appear under its next click.
+func _tips_allowed() -> bool:
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--harness="):
+			return false
+	# Nor under a test script that loads the main scene directly.
+	return not OS.get_cmdline_args().has("--script")
 
 
 ## The bottom grid of the player's own selected men; empty hides it.
+##
+## Runs on every selection change, including a click that takes a 2,000-man
+## company, so it gathers only the tiles the grid can show and counts the rest
+## (`tests/campaign.gd` holds that click to a time budget).
 func _refresh_unit_grid() -> void:
-	var own: Array = []
+	var shown: Array = []
+	var total := 0
 	if sim.campaign != null:
 		for id in selected_units:
 			var unit: Node = sim.campaign.units.get(id)
-			if is_instance_valid(unit) and unit.faction == 0 and unit.health > 0.0:
-				own.append(unit)
-	hud.show_unit_grid(own)
+			if not is_instance_valid(unit) or unit.faction != 0 or unit.health <= 0.0:
+				continue
+			total += 1
+			if shown.size() < HUD.UNIT_GRID_MAX:
+				shown.append(unit)
+	hud.show_unit_grid(shown, total)
 
 
 ## Rival soldiers can be selected to inspect but not ordered, so a right-click

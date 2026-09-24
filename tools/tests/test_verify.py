@@ -11,7 +11,7 @@ import time
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from verify import Stage, diagnostics, plan, run_stage
+from verify import Stage, diagnostics, plan, run_rest, run_stage
 
 
 class VerifierTests(unittest.TestCase):
@@ -93,6 +93,13 @@ class VerifierTests(unittest.TestCase):
         self.assertLess(result["seconds"], 6)
 
     def test_gate_termination_stops_active_stage_and_retains_summary(self):
+        # Both paths, whatever this machine's default: one stage at a time, and
+        # the pool, where the interrupt reaches a thread-run stage.
+        for jobs in (1, 2):
+            with self.subTest(jobs=jobs):
+                self._terminate_gate(jobs)
+
+    def _terminate_gate(self, jobs):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             pid_file = root / "stage.pid"
@@ -103,7 +110,7 @@ class VerifierTests(unittest.TestCase):
                       f"import verify; verify.ROOT=Path({directory!r}); "
                       "verify.shutil.which=lambda _: sys.executable; "
                       f"verify.plan=lambda *_: [verify.Stage('active',[sys.executable,'-c',{child!r}])]; "
-                      "raise SystemExit(verify.main(['--headless','--skip-long-run']))")
+                      f"raise SystemExit(verify.main(['--headless','--skip-long-run','--jobs','{jobs}']))")
             gate = subprocess.Popen([sys.executable, "-c", helper],
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             try:
@@ -131,6 +138,45 @@ class VerifierTests(unittest.TestCase):
                         os.killpg(int(pid_file.read_text()), signal.SIGKILL)
                     except ProcessLookupError:
                         pass
+
+    def test_parallel_stages_overlap_and_are_isolated(self):
+        """Two one-second stages finish together, each in its own user dir."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            probe = ("import os,time; time.sleep(1.0); "
+                     "print('HOME=' + os.environ['MARCHLANDS_GODOT_HOME']); print('DONE')")
+            stages = [Stage(name, [sys.executable, "-c", probe], (r"^DONE$",))
+                      for name in ("first", "second")]
+            results = []
+            started = time.monotonic()
+            run_rest(stages, 2, root, dict(os.environ), root / "state", results,
+                     lambda _result: None, lambda: None)
+            self.assertLess(time.monotonic() - started, 1.8, "stages ran one after another")
+            self.assertTrue(all(result["passed"] for result in results))
+            homes = {Path(r["log"]).read_text().split("HOME=")[1].split()[0] for r in results}
+            self.assertEqual(len(homes), 2, "parallel stages shared a Godot user directory")
+
+    def test_parallel_display_stages_get_their_own_server(self):
+        """`xvfb-run -a` races when started together; parallel stages are numbered."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            seen = root / "commands"
+            seen.mkdir()
+            # Stand-in for xvfb-run: record the arguments it was given.
+            fake = root / "xvfb-run"
+            # printf, not echo: echo would take the "-n" it is meant to record.
+            fake.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" > " + str(seen) + "/$$\necho DONE\n")
+            fake.chmod(0o755)
+            stages = [Stage(name, ["xvfb-run", "-a", "-s", "-screen 0 8x8x24"], (r"^DONE$",))
+                      for name in ("one", "two")]
+            env = {**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"]}
+            results = []
+            run_rest(stages, 2, root, env, root / "state", results, lambda _r: None, lambda: None)
+            recorded = [path.read_text() for path in seen.iterdir()]
+            self.assertEqual(len(recorded), 2)
+            self.assertTrue(all("-a" not in line.split() and "-n" in line.split() for line in recorded))
+            numbers = {line.split()[line.split().index("-n") + 1] for line in recorded}
+            self.assertEqual(len(numbers), 2, "two display stages were given the same server")
 
     def test_full_gate_includes_graphics_and_endurance(self):
         names = {stage.name for stage in plan(False, False)}

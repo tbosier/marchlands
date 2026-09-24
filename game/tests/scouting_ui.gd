@@ -48,6 +48,16 @@ func _run() -> void:
 		if scout.state == "ready": break
 		if i % 100 == 0: await process_frame
 	_check(scout.state == "ready", "scout collects supplies, walks to lodge and completes timed training")
+	# Found on the map and clicked, the way a player picks him out.
+	game._clear_selection()
+	game.camera.look_at_position(scout.person.global_position, 30)
+	await _settle_ui()
+	await _click_at(game.camera.camera().unproject_position(
+			scout.person.global_position + Vector3(0, 0.9, 0)), MOUSE_BUTTON_LEFT)
+	_check(game.selected_scout == scout.id,
+			"clicking the scout on the map selects him (selected %d)" % game.selected_scout)
+	game._clear_selection()
+	game.scouting_open = true
 	game._refresh_selection()
 	await _click(_button(game.hud._selection_actions, "Select ·"))
 	_check(game.selected_scout == scout.id, "select action chooses the trained person")

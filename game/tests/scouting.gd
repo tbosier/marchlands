@@ -46,7 +46,11 @@ func _training_and_intel() -> void:
 	var scout: Scout = manager.scouts.values()[0]
 	_check(scout.person == person and sim.population_members().size() == population and not sim.citizens_by_id.has(identity),"scout assignment keeps the same person and housing without creating population")
 	_check(sim.keep.inventory[Config.Res.TOOLS] == tools_before and scout.tools == 0 and scout.food == 0,"assignment reserves but does not teleport training stock")
-	_check(manager.command(scout.id,sim.campaign.rival_position) != "","an untrained scout cannot explore")
+	_check(manager.command(scout.id,sim.campaign.rival_position) == "" and scout.orders_waiting,
+			"an untrained scout takes an order and holds it until trained")
+	# The rest of this fixture walks the training phases with nothing pending;
+	# the held order itself is followed through in tests/game_integration.gd.
+	scout.orders_waiting = false
 	for phase in ["food","tools","lodge","training","ready"]:
 		_check(_until_scout(game,phase),"scout physically reaches " + phase)
 		var snapshot := SaveGame.capture(game)

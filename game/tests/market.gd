@@ -47,9 +47,11 @@ func _paid_market() -> void:
 		await _advance_day(game)
 		if not market.under_construction and market.inventory[Config.Res.FOOD] >= 8.0:
 			break
+	# Read from the definition, so a price change moves the check with it.
+	var market_cost: Dictionary = BuildingDefs.get_def("market").cost
 	_check(not market.under_construction
-			and market.delivered.get(Config.Res.TIMBER) == 24.0
-			and market.delivered.get(Config.Res.STONE) == 8.0,
+			and market.delivered.get(Config.Res.TIMBER) == float(market_cost[Config.Res.TIMBER])
+			and market.delivered.get(Config.Res.STONE) == float(market_cost[Config.Res.STONE]),
 			"haulers and builders complete the market with actual timber and stone")
 	_check(market.workers.size() == 2 and market.inventory[Config.Res.FOOD] > 0.0,
 			"two employed vendors physically stock the completed market")
@@ -258,9 +260,10 @@ func _fort_upgrade() -> void:
 	_check(not sim.can_upgrade(hut).ok, "fort upgrade requires researched fortification")
 	sim.research.restore({"completed": ["civic_building", "fortification"],
 		"active": "", "remaining_days": 0.0})
-	sim.keep.inventory[Config.Res.TIMBER] = 80.0
-	sim.keep.inventory[Config.Res.STONE] = 80.0
-	sim.keep.inventory[Config.Res.TOOLS] = 20.0
+	var fort_cost: Dictionary = BuildingDefs.get_def("supply_hut").upgrade_cost
+	sim.keep.inventory[Config.Res.TIMBER] = float(fort_cost[Config.Res.TIMBER]) + 20.0
+	sim.keep.inventory[Config.Res.STONE] = float(fort_cost[Config.Res.STONE]) + 20.0
+	sim.keep.inventory[Config.Res.TOOLS] = float(fort_cost[Config.Res.TOOLS]) + 12.0
 	hut.inventory[Config.Res.FOOD] = 30.0
 	hut.apply_damage(36.0)
 	sim.stores.refresh_totals(sim.citizens, sim.buildings)
@@ -273,9 +276,10 @@ func _fort_upgrade() -> void:
 		await _advance_day(game)
 		if not hut.under_construction:
 			break
-	_check(not hut.under_construction and hut.delivered.get(Config.Res.TIMBER) == 45.0
-			and hut.delivered.get(Config.Res.STONE) == 35.0
-			and hut.delivered.get(Config.Res.TOOLS) == 8.0,
+	_check(not hut.under_construction
+			and hut.delivered.get(Config.Res.TIMBER) == float(fort_cost[Config.Res.TIMBER])
+			and hut.delivered.get(Config.Res.STONE) == float(fort_cost[Config.Res.STONE])
+			and hut.delivered.get(Config.Res.TOOLS) == float(fort_cost[Config.Res.TOOLS]),
 			"fort is completed through actual delivery of timber, stone and tools")
 	_check(hut.max_health() == 600.0 and hut.capacity() == 180.0
 			and hut.food_stock_target() == 120,

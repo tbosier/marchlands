@@ -181,11 +181,11 @@ static func _build() -> void:
 		"role": Role.HOUSING,
 		"description": "One room for five people. Settlers will not come without room. "
 				+ "After Civic building research, upgrade it to a cottage for eight.",
-		"cost": {Config.Res.TIMBER: 16, Config.Res.STONE: 6},
+		"cost": {Config.Res.TIMBER: 32, Config.Res.STONE: 12},
 		"build_time": 22.0,
 		"houses": 5,
 		"upgrades_to": "cottage",
-		"upgrade_cost": {Config.Res.TIMBER: 24, Config.Res.STONE: 14},
+		"upgrade_cost": {Config.Res.TIMBER: 48, Config.Res.STONE: 28},
 		"upgrade_time": 28.0,
 	})
 	_add({
@@ -204,7 +204,7 @@ static func _build() -> void:
 		"display_name": "Well",
 		"role": Role.WELL,
 		"description": "A replenishing water source for drinking and firefighting. Keep its water clean.",
-		"cost": {Config.Res.TIMBER: 12, Config.Res.STONE: 20},
+		"cost": {Config.Res.TIMBER: 24, Config.Res.STONE: 40},
 		"build_time": 24.0,
 	})
 	_add({
@@ -213,7 +213,7 @@ static func _build() -> void:
 		"display_name": "Stockpile",
 		"role": Role.STORAGE,
 		"description": "An open goods yard. Haulers deliver here.",
-		"cost": {Config.Res.TIMBER: 12},
+		"cost": {Config.Res.TIMBER: 24},
 		"build_time": 12.0,
 		"storage": 250.0,
 		"stores": [Config.Res.FOOD, Config.Res.TIMBER, Config.Res.STONE,
@@ -227,7 +227,7 @@ static func _build() -> void:
 		"profession": "vendor",
 		"description": "Two vendors bring food to nearby homes. Choose a stocking "
 				+ "target to balance local supplies against food kept elsewhere.",
-		"cost": {Config.Res.TIMBER: 24, Config.Res.STONE: 8},
+		"cost": {Config.Res.TIMBER: 48, Config.Res.STONE: 16},
 		"build_time": 24.0,
 		"worker_slots": 2,
 		"storage": 120.0,
@@ -242,13 +242,13 @@ static func _build() -> void:
 		"profession": "quartermaster",
 		"description": "Two quartermasters carry food forward from stores and "
 				+ "markets. Holds sixty rations close to travelling troops.",
-		"cost": {Config.Res.TIMBER: 30, Config.Res.STONE: 12},
+		"cost": {Config.Res.TIMBER: 60, Config.Res.STONE: 24},
 		"build_time": 28.0,
 		"worker_slots": 2,
 		"storage": 80.0,
 		"stores": [Config.Res.FOOD],
 		"upgrades_to": "fort",
-		"upgrade_cost": {Config.Res.TIMBER: 45, Config.Res.STONE: 35, Config.Res.TOOLS: 8},
+		"upgrade_cost": {Config.Res.TIMBER: 90, Config.Res.STONE: 70, Config.Res.TOOLS: 12},
 		"upgrade_time": 40.0,
 		"max_health": 180.0,
 	})
@@ -282,7 +282,7 @@ static func _build() -> void:
 		"description": "Muster a militia here, drilling against straw dummies. "
 				+ "Soldiers need real food from a market, supply hut or another "
 				+ "reachable store.",
-		"cost": {Config.Res.TIMBER: 40},
+		"cost": {Config.Res.TIMBER: 80},
 		"build_time": 32.0,
 		"max_health": 300.0,
 		"min_height": 5.0,
@@ -291,7 +291,7 @@ static func _build() -> void:
 		"type_id": "scout_lodge", "asset": "logging_camp",
 		"display_name": "Scout Lodge", "role": Role.SCOUT_LODGE,
 		"description": "Train existing residents in fieldcraft. Each scout collects eight food and two tools before half a day of training, then explores on foot.",
-		"cost": {Config.Res.TIMBER: 24, Config.Res.STONE: 8}, "build_time": 24.0,
+		"cost": {Config.Res.TIMBER: 48, Config.Res.STONE: 16}, "build_time": 24.0,
 	})
 	_add({
 		"type_id": "logging_camp",
@@ -300,7 +300,7 @@ static func _build() -> void:
 		"role": Role.GATHER_WOOD,
 		"profession": "woodcutter",
 		"description": "Woodcutters fell nearby trees and carry timber home.",
-		"cost": {Config.Res.TIMBER: 15},
+		"cost": {Config.Res.TIMBER: 30},
 		"build_time": 18.0,
 		"worker_slots": 3,
 		"storage": 60.0,
@@ -316,7 +316,7 @@ static func _build() -> void:
 		"role": Role.GATHER_STONE,
 		"profession": "quarrier",
 		"description": "Cuts stone from nearby outcrops.",
-		"cost": {Config.Res.TIMBER: 18, Config.Res.STONE: 6},
+		"cost": {Config.Res.TIMBER: 36, Config.Res.STONE: 12},
 		"build_time": 24.0,
 		"worker_slots": 3,
 		"storage": 60.0,
@@ -332,7 +332,7 @@ static func _build() -> void:
 		"role": Role.FARM,
 		"profession": "farmer",
 		"description": "Works the fields around it. Yields at harvest.",
-		"cost": {Config.Res.TIMBER: 22, Config.Res.STONE: 6},
+		"cost": {Config.Res.TIMBER: 44, Config.Res.STONE: 12},
 		"build_time": 22.0,
 		"worker_slots": 3,
 		"houses": 2,
@@ -349,7 +349,7 @@ static func _build() -> void:
 		"role": Role.GATHER_IRON,
 		"profession": "miner",
 		"description": "Works an ore outcrop for iron.",
-		"cost": {Config.Res.TIMBER: 24, Config.Res.STONE: 10},
+		"cost": {Config.Res.TIMBER: 48, Config.Res.STONE: 20},
 		"build_time": 26.0,
 		"worker_slots": 3,
 		"storage": 60.0,
@@ -366,7 +366,7 @@ static func _build() -> void:
 		"profession": "smith",
 		"description": "Works iron and timber into tools. Tools speed every "
 				+ "trade in the march.",
-		"cost": {Config.Res.TIMBER: 28, Config.Res.STONE: 16},
+		"cost": {Config.Res.TIMBER: 56, Config.Res.STONE: 32},
 		"build_time": 30.0,
 		"worker_slots": 2,
 		"storage": 90.0,
@@ -375,7 +375,10 @@ static func _build() -> void:
 		"consumes": {Config.Res.IRON: 2.0, Config.Res.TIMBER: 1.0},
 		"work_radius": 12.0,
 		"upgrades_to": "forge",
-		"upgrade_cost": {Config.Res.TIMBER: 30, Config.Res.STONE: 40,
+		# Timber and stone doubled with every other price; iron did not. It is
+		# mined ore the smithy is also turning into tools, and at 20 a march
+		# rarely held that much free at once.
+		"upgrade_cost": {Config.Res.TIMBER: 60, Config.Res.STONE: 80,
 						 Config.Res.IRON: 10},
 		"upgrade_time": 40.0,
 	})
@@ -402,14 +405,14 @@ static func _build() -> void:
 		"display_name": "Granary",
 		"role": Role.GRANARY,
 		"description": "Keeps grain dry and close to the people who eat it.",
-		"cost": {Config.Res.TIMBER: 26, Config.Res.STONE: 14},
+		"cost": {Config.Res.TIMBER: 52, Config.Res.STONE: 28},
 		"build_time": 28.0,
 		"storage": 500.0,
 		"stores": [Config.Res.FOOD],
 		# The granary keepers live over the store.
 		"houses": 2,
 		"upgrades_to": "grain_warehouse",
-		"upgrade_cost": {Config.Res.TIMBER: 40, Config.Res.STONE: 24},
+		"upgrade_cost": {Config.Res.TIMBER: 80, Config.Res.STONE: 48},
 		"upgrade_time": 36.0,
 	})
 	_add({
@@ -430,7 +433,7 @@ static func _build() -> void:
 		"role": Role.RANCH, "profession": "rancher",
 		"description": "Two ranchers tame wild cattle and lead them home. Research ranching "
 				+ "to breed a herd and turn surplus adult cattle into food and hides.",
-		"cost": {Config.Res.TIMBER: 24, Config.Res.STONE: 8}, "build_time": 24.0,
+		"cost": {Config.Res.TIMBER: 48, Config.Res.STONE: 16}, "build_time": 24.0,
 		"worker_slots": 2, "storage": 100.0,
 		"stores": [Config.Res.FOOD, Config.Res.HIDES], "produces": Config.Res.HIDES,
 		"work_radius": 240.0,
@@ -440,7 +443,7 @@ static func _build() -> void:
 		"role": Role.WORKSHOP, "profession": "tanner",
 		"description": "After leatherworking research, two tanners cure real hides with bark "
 				+ "from timber into leather for armour.",
-		"cost": {Config.Res.TIMBER: 24, Config.Res.STONE: 10}, "build_time": 26.0,
+		"cost": {Config.Res.TIMBER: 48, Config.Res.STONE: 20}, "build_time": 26.0,
 		"worker_slots": 2, "storage": 80.0,
 		"stores": [Config.Res.HIDES, Config.Res.TIMBER, Config.Res.LEATHER],
 		"produces": Config.Res.LEATHER,

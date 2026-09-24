@@ -181,10 +181,16 @@ func command(id: int, destination: Vector3) -> String:
 	if sim.campaign != null and sim.campaign.defeated: return "The settlement has fallen."
 	var scout: Scout = scouts.get(id)
 	if scout == null: return "Select a scout."
-	if scout.state not in ["ready","exploring","visiting"]: return "Complete training before exploring."
-	if scout.food < 1: return "The scout needs to return for supplies."
+	var training: bool = scout.state in ["food","tools","lodge","training"]
+	if not training and scout.state not in ["ready","exploring","visiting"]: return "The scout is on the way back for supplies."
+	if not training and scout.food < 1: return "The scout needs to return for supplies."
 	if not TradeRoutes._position(destination,world_size) or not world.nav.can_reach(scout.person.global_position,destination): return "No traversable route to that location."
 	scout.destination = destination
+	if training:
+		# Held until training ends, rather than refused: the player said where.
+		scout.orders_waiting = true
+		scout.status = "Will set out once trained"
+		return ""
 	scout.state = "exploring"
 	scout.status = "Exploring"
 	scout.person.clear_goal()
@@ -195,6 +201,11 @@ func visit_city(id: int) -> String:
 	if sim.campaign == null or sim.campaign.at_war or sim.campaign.conquered: return "The ruler is not receiving visitors."
 	var keep := _rival_keep()
 	if keep == null: return "The town has no standing keep."
+	# `command` holds a trainee's order rather than refusing it; a visit is not
+	# one to hold, since setting "visiting" below would skip the training.
+	var trainee: Scout = scouts.get(id)
+	if trainee != null and trainee.state in ["food","tools","lodge","training"]:
+		return "Complete training before visiting the ruler."
 	var error := command(id,sim.campaign._door(keep))
 	if error != "": return error
 	scouts[id].state = "visiting"
@@ -219,6 +230,7 @@ func recall(id: int) -> String:
 	var scout: Scout = scouts.get(id)
 	if scout == null: return "Select an active scout."
 	_release(scout)
+	scout.orders_waiting = false
 	scout.state = "return"
 	scout.status = "Returning home"
 	scout.person.clear_goal()
@@ -256,7 +268,8 @@ func tick(delta: float) -> void:
 				if _move(scout,sim.entrance_of(_lodge(scout.lodge_id),"att_entrance"),delta):
 					scout.tools -= TOOL_COST
 					scout.state = "training"
-					scout.status = "Learning fieldcraft at the lodge"
+					scout.status = "Learning fieldcraft at the lodge" + (
+							" — will set out once trained" if scout.orders_waiting else "")
 			"training":
 				if c is Soldier and c.incapacitated(): continue
 				scout.training_left = maxf(0,scout.training_left-delta)
@@ -265,6 +278,11 @@ func tick(delta: float) -> void:
 					if c is Soldier: c.practice("scouting",10.0)
 					scout.state = "ready"
 					scout.status = "Ready for orders"
+					if scout.orders_waiting:
+						scout.orders_waiting = false
+						scout.state = "exploring"
+						scout.status = "Exploring"
+						c.clear_goal()
 			"exploring", "visiting":
 				if _move(scout,scout.destination,delta):
 					if scout.state == "visiting": _interview(scout)
@@ -441,7 +459,8 @@ func restore(data: Variant) -> String:
 		add_child(scout)
 		scout.setup(entry.id,c)
 		for key in scout.record():
-			if key not in ["id","citizen"]: scout.set(key,entry[key])
+			# `orders_waiting` is newer than some saves; they had no queued order.
+			if key not in ["id","citizen"]: scout.set(key,entry.get(key, false) if key == "orders_waiting" else entry[key])
 		scouts[scout.id] = scout
 		for item in [[scout.food_reserved,scout.food_source,Config.Res.FOOD,FOOD_PACK],[scout.tools_reserved,scout.tool_source,Config.Res.TOOLS,TOOL_COST]]:
 			var b: Building = sim.buildings_by_id.get(item[1])
@@ -484,6 +503,8 @@ static func validate(data: Variant, size_m: float, buildings: Variant = null) ->
 		error = SaveGame.Validation._fields(entry,{"id":TYPE_INT,"citizen":TYPE_DICTIONARY,"lodge_id":TYPE_INT,"state":TYPE_STRING,"status":TYPE_STRING,
 			"food_source":TYPE_INT,"tool_source":TYPE_INT,"food_reserved":TYPE_BOOL,"tools_reserved":TYPE_BOOL,
 			"food":TYPE_FLOAT,"tools":TYPE_FLOAT,"training_left":TYPE_FLOAT,"destination":TYPE_VECTOR3,"health":TYPE_FLOAT},"scout")
+		if error != "": return error
+		error = SaveGame.Validation._fields(entry,{"orders_waiting":TYPE_BOOL},"scout",true)
 		if error != "": return error
 		if entry.id < 1 or entry.id >= data.next_id or ids.has(entry.id): return "duplicate or invalid scout id"
 		ids[entry.id] = true

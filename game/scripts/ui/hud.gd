@@ -22,6 +22,7 @@ signal speed_requested(index: int)
 signal upgrade_route_requested()
 signal road_scope_requested(scope: String)
 signal research_open_requested()
+signal tips_toggle_requested()
 ## A tile in the unit grid was clicked: select just that soldier, or with
 ## Shift held, drop him from the selection.
 signal unit_pick_requested(unit_id: int, remove: bool)
@@ -149,6 +150,7 @@ var _primary_actions: Array[Button] = []
 ## The build tray's category tabs, shown in place of the primary actions while
 ## the tray is open, and which one is showing.
 var _tray_tabs: Dictionary = {}
+var _tips_button: Button
 var _tray_category := ""
 var _world_dialog: ConfirmationDialog
 var _world_size_choice: OptionButton
@@ -319,6 +321,7 @@ func _relayout(rect: Vector2) -> void:
 
 	_hint_room = width >= 1180.0
 	_apply_hint_visibility()
+	_apply_tips_button_visibility()
 	_layout_tray_cards()
 
 	if _selection_panel:
@@ -698,6 +701,17 @@ func _build_bottom_bar() -> void:
 		action.pressed.connect(func(): entry[1].emit())
 		row.add_child(action)
 		_primary_actions.append(action)
+	_tips_button = Button.new()
+	_tips_button.text = "Tips"
+	_tips_button.toggle_mode = true
+	_tips_button.focus_mode = Control.FOCUS_NONE
+	_tips_button.tooltip_text = "Show advice for new players"
+	_tips_button.custom_minimum_size = Vector2(46, 32)
+	_tips_button.add_theme_font_size_override("font_size", F_SMALL)
+	_tips_button.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_style_button(_tips_button)
+	_tips_button.pressed.connect(func(): tips_toggle_requested.emit())
+	row.add_child(_tips_button)
 	var world_button := Button.new()
 	world_button.text = "World"
 	world_button.custom_minimum_size = Vector2(58, 32)
@@ -878,6 +892,7 @@ func _fit_label(label: Label, available: float, sizes: Array) -> void:
 func _on_build_tray_toggled(pressed: bool) -> void:
 	for action in _primary_actions:
 		action.visible = not pressed
+	_apply_tips_button_visibility()
 	for tab in _tray_tabs.values():
 		tab.visible = pressed
 	_build_tray.visible = pressed
@@ -1268,11 +1283,28 @@ func _build_unit_grid() -> void:
 ## Show `units` (Soldier nodes, the player's own) in the grid, or hide it when
 ## there are none. Tiles are rebuilt only when the set of men changes; their
 ## readings are refreshed on every call.
-func show_unit_grid(units: Array) -> void:
+## The Tips toggle is the first thing to go on a narrow window: at 640 px it
+## pushed World off the end of the bar. It hides with the other actions while
+## the tray is open.
+func _apply_tips_button_visibility() -> void:
+	if _tips_button == null:
+		return
+	var open := _build_toggle != null and _build_toggle.button_pressed
+	_tips_button.visible = not open and size.x >= 800.0
+
+
+func set_tips_on(on: bool) -> void:
+	if _tips_button != null:
+		_tips_button.set_pressed_no_signal(on)
+
+
+func show_unit_grid(units: Array, total: int = -1) -> void:
 	if units.is_empty():
 		_unit_grid_panel.visible = false
 		_unit_grid_ids.clear()
 		return
+	if total < 0:
+		total = units.size()
 	var shown := units.slice(0, UNIT_GRID_MAX)
 	var ids: Array[int] = []
 	for unit in shown:
@@ -1308,8 +1340,8 @@ func show_unit_grid(units: Array) -> void:
 				int(round(unit.hydration * 100.0)), String(unit.armor_tier)]
 		var colour := INK if health >= 70 else (WARN if health >= 35 else Color(0.86, 0.42, 0.36))
 		tile.add_theme_color_override("font_color", colour)
-	_unit_grid_more.visible = units.size() > shown.size()
-	_unit_grid_more.text = "+%d more" % (units.size() - shown.size())
+	_unit_grid_more.visible = total > shown.size()
+	_unit_grid_more.text = "+%d more" % (total - shown.size())
 	_unit_grid_panel.visible = true
 
 

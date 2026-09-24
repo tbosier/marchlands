@@ -15,6 +15,9 @@ var food := 0.0
 var tools := 0.0
 var training_left := 0.0
 var destination := Vector3.ZERO
+## An order given while still in training: `destination` holds it, and the
+## scout sets out the moment training ends.
+var orders_waiting := false
 var health: float:
 	get: return person.service_health if person != null else 100.0
 	set(value):
@@ -37,4 +40,4 @@ func record() -> Dictionary:
 		"state": state, "status": status, "food_source": food_source, "tool_source": tool_source,
 		"food_reserved": food_reserved, "tools_reserved": tools_reserved,
 		"food": food, "tools": tools, "training_left": training_left,
-		"destination": destination, "health": health}
+		"destination": destination, "health": health, "orders_waiting": orders_waiting}
