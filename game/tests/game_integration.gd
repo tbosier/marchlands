@@ -642,8 +642,10 @@ func _playtest_fixes() -> void:
 	sim._eat_meal(sim.citizens[0])
 	_check(sim.ledger.used_per_day(Config.Res.FOOD) >= Config.MEAL_FOOD * 0.99,
 			"a meal is recorded as food used")
+	var eaten: Array = sim.ledger.sources(Config.Res.FOOD, false)
+	_check(not eaten.is_empty() and eaten[0][0] == "Meals", "and named as meals in the breakdown")
 	game.hud.refresh()
-	_check(game.hud._res_labels[Config.Res.FOOD].tooltip_text.contains("used"),
+	_check(game.hud._res_labels[Config.Res.FOOD].get_tooltip(Vector2.ZERO).contains("used"),
 			"hovering food shows what is produced and used")
 
 	var lodge := sim.place_building("scout_lodge",
@@ -813,7 +815,145 @@ func _camera_keys() -> void:
 	await process_frame
 
 
+## The second playtest's list.
+func _second_playtest() -> void:
+	var game := _new_game(42)
+	var sim := game.sim
+	game.dev_mode = true
+	game._dev_command("scout")
+	game._dev_command("soldier")
+	game.dev_mode = false
+	var scout: Scout = sim.scouting.scouts.values()[0]
+
+	# In the field, a thirsty soldier drinks from his skin instead of walking home.
+	var soldier: Soldier = sim.campaign.units[sim.campaign.friendly_ids()[0]]
+	soldier.position = sim.campaign.rival_position.lerp(sim.keep.position, 0.4)
+	soldier.hydration = 0.2
+	sim.water.tick(0.25)
+	_check(not sim.water.handles(soldier) and soldier.hydration > 0.9,
+			"a soldier far from any well drinks from his water skin, not a trek home")
+
+	# Near one of the settlement's wells, a dry well means a thirsty soldier.
+	var home_well: Building = null
+	for b in sim.buildings:
+		if b.type_id == "well": home_well = b
+	soldier.position = sim.entrance_of(home_well, "att_entrance") + Vector3(6, 0, 0)
+	for id in sim.water.wells: sim.water.wells[id].water = 0.0
+	soldier.hydration = 0.2
+	sim.water.tick(0.25)
+	_check(soldier.hydration < 0.5, "beside a dry well the soldier's skin does not save him")
+	for id in sim.water.wells: sim.water.wells[id].water = WaterSystem.CAPACITY
+
+	# Out of food, the scout restocks and carries on rather than retiring.
+	var far: Vector3 = scout.person.global_position + Vector3(40, 0, 30)
+	far.y = game.world.heightmap.height_at(far.x, far.z)
+	_check(sim.scouting.command(scout.id, far) == "", "the scout is sent out")
+	scout.food = 0.5
+	sim.scouting.tick(0.1)
+	_check(scout.state == "restock" and scout.orders_waiting,
+			"a scout low on food goes to restock, keeping the order (%s)" % scout.state)
+	for i in 4000:
+		sim.scouting.tick(0.25)
+		if scout.state != "restock": break
+	_check(sim.scouting.scouts.has(scout.id) and scout.state == "exploring"
+			and scout.food >= Scouting.FOOD_PACK - 0.01,
+			"then sets out again with a full pack, still a scout (%s, %.1f food)" % [scout.state, scout.food])
+	var saved := SaveGame.capture(game)
+	_check(SaveGame.validate(saved, game.registry) == "", "a march with a restocking-capable scout saves")
+
+	# A store demolished mid-restock re-routes without losing the order, and a
+	# visit that stopped for food is still a visit when it resumes.
+	# A second store with food, so there is somewhere to re-route to.
+	var granary := sim.place_building("granary", sim.keep.global_position + Vector3(-40, 0, 36), 0.0, true)
+	granary.add(Config.Res.FOOD, 60.0)
+	sim.stores.refresh_totals(sim.population_members(), sim.buildings)
+	var keep_door: Vector3 = sim.campaign._door(sim.scouting._rival_keep())
+	scout.destination = keep_door
+	scout.state = "visiting"
+	scout.person.global_position = far
+	scout.food = 0.5
+	sim.scouting.tick(0.1)
+	var first_store: Building = sim.buildings_by_id.get(scout.food_source)
+	_check(scout.state == "restock" and scout.orders_waiting, "a visiting scout stops to restock")
+	first_store.under_construction = true
+	sim.scouting.tick(0.1)
+	first_store.under_construction = false
+	_check(scout.state == "restock" and scout.orders_waiting,
+			"losing the chosen store re-routes the restock and keeps the order")
+	for i in 4000:
+		sim.scouting.tick(0.25)
+		if scout.state != "restock": break
+	_check(scout.state == "visiting", "the resumed trip is still a visit to the ruler (%s)" % scout.state)
+	var food_reserved := 0.0
+	for b in sim.buildings:
+		food_reserved += b.reserved[Config.Res.FOOD]
+	_check(food_reserved < 0.01, "and no food is left set aside (%.1f)" % food_reserved)
+	scout.state = "ready"
+
+	# Training shows how far along it is.
+	scout.state = "training"
+	# Half-way, against the refresher's quarter-length course: this scout
+	# has trained before.
+	var course := Scouting.TRAIN_SECONDS * (0.25 if sim.scouting._trained.has(scout.person.id) else 1.0)
+	scout.training_left = course * 0.5
+	var row: Dictionary = sim.scouting.info().scouts[0]
+	_check(absf(float(row.training_progress) - 0.5) < 0.01, "training reports its progress (%.2f)" % float(row.training_progress))
+	scout.state = "ready"
+	scout.training_left = 0.0
+
+	# A rival building once seen stays on the map, and a scout can be sent to it.
+	var fog: FogOfWar = game.world.fog
+	var well: Building = null
+	for b in sim.campaign.enemy_buildings.values():
+		if b.type_id == "well": well = b
+	scout.person.global_position = well.global_position + Vector3(20, 0, 0)
+	sim.scouting.refresh_visibility()
+	fog.refresh_entities()
+	scout.person.global_position = sim.keep.global_position
+	sim.scouting.refresh_visibility()
+	fog.refresh_entities()
+	_check(fog.remembers(well) and well.visible and not sim.scouting.visibility_at(well.global_position),
+			"a rival well seen once stays drawn under the fog")
+	_check(sim.water.poison(scout.id, well.id) == "" and sim.water.poisoning(scout.id),
+			"a scout can be sent to sabotage a remembered well")
+	var pick_layers := 0
+	for body in well.find_children("*", "CollisionObject3D", true, false):
+		pick_layers |= body.collision_layer
+	_check(pick_layers == 0, "a remembered building under the fog does not catch clicks")
+	scout.food = 0.5
+	sim.scouting.tick(0.1)
+	_check(scout.state != "restock" and not scout.food_reserved,
+			"a scout on a sabotage run finishes it before restocking")
+	sim.water.cancel_poison(scout.id)
+	scout.food = Scouting.FOOD_PACK
+
+	# The order marker shows through the fog.
+	var marker := game.show_order_marker(well.global_position, false)
+	fog.refresh_entities()
+	_check(marker != null and marker.visible, "the order marker shows even under the fog")
+
+	# The idle button walks the idle civilians.
+	for c in sim.citizens:
+		c.job = null
+		c.state = Citizen.State.IDLE
+	game._focus_next_idle()
+	var first: Citizen = game.selected_citizen
+	game._focus_next_idle()
+	_check(first != null and game.selected_citizen != null and game.selected_citizen != first,
+			"the idle button selects one idle civilian, then the next")
+
+	# A refused placement says why.
+	for b in sim.buildings:
+		if b.def.is_storage(): b.reserved[Config.Res.TIMBER] = b.inventory[Config.Res.TIMBER]
+	var why := sim.stores.shortfall_text(BuildingDefs.get_def("granary").cost)
+	_check(why.contains("set aside for building sites"),
+			"an unaffordable building explains that the stock is promised: " + why)
+	game.free()
+	await process_frame
+
+
 func _run() -> void:
+	await _second_playtest()
 	await _camera_keys()
 	await _tips()
 	await _scout_right_click()

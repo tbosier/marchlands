@@ -37,7 +37,7 @@ func _topbar(game: SeededGame, dimensions: Vector2i) -> void:
 		_check(bounds.position.x >= 0 and bounds.end.x <= dimensions.x
 				and bounds.position.y >= 0 and bounds.end.y <= HUD.TOP_BAR_H,
 				"speed %s remains fully visible at %s" % [button.text, dimensions])
-	_check(hud._pop_label.tooltip_text.contains("%d civilians and %d soldiers" % [
+	_check(hud._pop_label.get_tooltip(Vector2.ZERO).contains("%d civilians and %d soldiers" % [
 			game.sim.citizens.size(), game.sim.campaign.friendly_ids().size()]),
 			"population tooltip identifies civilians and soldiers at %s" % dimensions)
 
@@ -192,7 +192,7 @@ func _run() -> void:
 	game.hud.refresh()
 	await _click(_button(game.hud, "Army"))
 	_check(game.hud._selection_body.text.contains("Civilians: %d · Soldiers: 0" % opening_people)
-			and game.hud._pop_label.tooltip_text.contains("%d civilians and 0 soldiers" % opening_people),
+			and game.hud._pop_label.get_tooltip(Vector2.ZERO).contains("%d civilians and 0 soldiers" % opening_people),
 			"Army and population readouts update after discharge")
 	await _shot("discharged")
 	game.free()

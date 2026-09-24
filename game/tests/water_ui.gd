@@ -49,7 +49,7 @@ func _run() -> void:
 	_check(game.sim.water.carriers.size() == 1 and game.sim.population_members().size() == population,
 		"fire response button assigns an existing resident without losing population")
 	game.hud.refresh()
-	_check(game.hud._pop_label.tooltip_text.contains("1 bucket carriers"), "population distinguishes the worker carrying water")
+	_check(game.hud._pop_label.get_tooltip(Vector2.ZERO).contains("1 bucket carriers"), "population distinguishes the worker carrying water")
 	await _shot("fire_response")
 	var carrier: Citizen = game.sim.water.carriers.values()[0].person
 	_check(carrier.water_bucket == 0, "responding worker has no water until reaching the well")

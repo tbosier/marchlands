@@ -79,6 +79,7 @@ back to `tools/vendor/` so a checkout can carry its own toolchain.
 | left click | select a building, citizen, soldier, cow, resource deposit, or route |
 | click a soldier | selects his whole company · `Alt`-click just him · `Shift`-click adds to the selection |
 | `G` | form the selected soldiers into a company, split them off, or merge companies |
+| `N idle` (top bar) | jump to the next idle civilian |
 | unit grid | selected soldiers appear as tiles along the bottom: click one to pick him out, `Shift`-click to drop him |
 | right click | order selected scouts to explore, or soldiers to move/attack; otherwise cancel selection |
 | `Space` | pause / resume at the rate you were at |
@@ -101,8 +102,15 @@ For a fresh generated landscape at launch, use
 
 Build a **Scout lodge**, train a resident through **Scouts**, select that person
 (click them on the map, or pick them from the Scouts panel), and right-click to
-explore. An order given while the scout is still training is held and carried
-out as soon as training ends. Unknown ground is obscured; remembered terrain is
+explore. Right-click the rival's keep to visit the ruler, or one of their wells
+to sabotage it. An order given while the scout is still training is held and
+carried out as soon as training ends. A scout who runs short of food restocks at
+the nearest store and resumes the order; they come home only when recalled, or
+when no store can spare a pack. Rival buildings your people have seen stay on
+the map, dimmed, where they stood (one destroyed out of sight does disappear).
+Soldiers, scouts and merchants more than 80 m from any of your wells drink from
+water skins rather than walking home; near a well they drink there.
+Sabotaging a well is an act of war. Unknown ground is obscured; remembered terrain is
 dimmed. Discovered towns leave dated reports. **Visit known castle** sends a
 scout to seek the ruler's account; ordinary observations are estimates. Merchants
 can bring observations from established routes, but cannot explore on command.

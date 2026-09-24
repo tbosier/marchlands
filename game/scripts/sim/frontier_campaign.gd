@@ -401,7 +401,8 @@ func recruit(citizen_id: int = -1) -> String:
 	var cost := _recruit_cost(citizen)
 	if not sim.stores.try_spend(cost): return "Recruitment needs 5 available tools and supplies for training and a four-day pack."
 	# Training eats six; the rest is the pack, recorded as it is eaten below.
-	sim.ledger.unused(Config.Res.FOOD, float(cost.get(Config.Res.FOOD, 0.0)) - 6.0)
+	sim.ledger.unused(Config.Res.FOOD, float(cost.get(Config.Res.FOOD, 0.0)) - 6.0,
+			sim.stores.spend_source)
 	var identity := SaveGame._capture_citizen(citizen)
 	identity.workplace_id = -1
 	sim.detach_for_service(citizen)
@@ -988,7 +989,7 @@ func tick(delta: float) -> void:
 			continue
 		if u.faction == 0 and not sim.buildings_by_id.has(u.home_id):
 			u.home_id = -1
-		if u.faction == 0: sim.ledger.used(Config.Res.FOOD, minf(u.rations, delta/Config.DAY_LENGTH))
+		if u.faction == 0: sim.ledger.used(Config.Res.FOOD, minf(u.rations, delta/Config.DAY_LENGTH), "Soldiers' rations")
 		u.rations = maxf(0.0,u.rations-delta/Config.DAY_LENGTH)
 		_refill(u)
 		u.speed_modifier = 0.65 if u.rations <= 0 else 1.0

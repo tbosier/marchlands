@@ -289,7 +289,7 @@ func tick_job(c: Citizen, delta: float) -> void:
 	var room := maxf(0, float(record.cost[job.res]) - float(record.delivered.get(job.res, 0.0)))
 	var accepted := minf(amount, room)
 	record.delivered[job.res] = float(record.delivered.get(job.res, 0.0)) + accepted
-	sim.ledger.used(job.res, accepted)
+	sim.ledger.used(job.res, accepted, "Bridges")
 	if amount - accepted > 0.01:
 		c.pick_up(job.res, amount - accepted, registry)
 	release_reservations(job)

@@ -445,8 +445,8 @@ func _tick_butcher(worker: Citizen, ranch: Building, delta: float) -> void:
 		return
 	ranch.add(Config.Res.FOOD, FOOD_YIELD)
 	ranch.add(Config.Res.HIDES, HIDE_YIELD)
-	sim.ledger.made(Config.Res.FOOD, FOOD_YIELD)
-	sim.ledger.made(Config.Res.HIDES, HIDE_YIELD)
+	sim.ledger.made(Config.Res.FOOD, FOOD_YIELD, "Ranches")
+	sim.ledger.made(Config.Res.HIDES, HIDE_YIELD, "Ranches")
 	cows.erase(cow.id)
 	cow.queue_free()
 	sim.jobs.complete(job)

@@ -36,8 +36,8 @@ func _run() -> void:
 	_check(game.sim.scouting.scouts.size() == 1 and game.sim.citizens.size() == population - 1
 		and game.sim.population_members().size() == population, "training click reassigns one real resident")
 	game.hud.refresh()
-	_check(game.hud._pop_label.tooltip_text.contains("%d people" % population)
-		and game.hud._pop_label.tooltip_text.contains("1 scouts"), "population readout includes the scout away from local work")
+	_check(game.hud._pop_label.get_tooltip(Vector2.ZERO).contains("%d people" % population)
+		and game.hud._pop_label.get_tooltip(Vector2.ZERO).contains("1 scouts"), "population readout includes the scout away from local work")
 	if game.sim.scouting.scouts.is_empty():
 		game.free()
 		quit(1)

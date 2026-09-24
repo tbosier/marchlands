@@ -18,6 +18,13 @@ const DRINK_MIN := 1.0
 ## well with a drink or two in it draws one or two people, not every thirsty
 ## person in the march at once.
 const DRINK_PLEDGE := 1.1
+## People on service — soldiers, scouts, merchants — carry water skins for
+## when they are away from every well. Within this distance of one of their
+## own wells they drink there like anybody else, and go thirsty with everybody
+## else when it is dry or scrubbed out; beyond it, the skin keeps them. Walking
+## home to the settlement's wells, however far away they were, pulled a scout
+## off the enemy's well and a company off the field every day and a half.
+const FIELD_WELL_RANGE := 80.0
 ## How many people one well keeps in water at the steady rate.
 const SERVES := REFILL_PER_DAY / (2.0 * THIRST_PER_DAY)
 ## Residents this dry are suffering for it; a fifth of the march that dry, or
@@ -156,6 +163,26 @@ func _people() -> Dictionary:
 		for u in sim.campaign.units.values():
 			if u.faction == 1: out[_key(u)] = u
 	return out
+
+## No finished well of this faction within FIELD_WELL_RANGE, full or not.
+func _far_from_wells(c: Citizen, faction: int) -> bool:
+	var buildings := _buildings()
+	var enemy_buildings: Dictionary = sim.campaign.enemy_buildings if sim.campaign != null else {}
+	var reach := FIELD_WELL_RANGE * FIELD_WELL_RANGE
+	for id in wells:
+		var b: Building = buildings.get(id)
+		if b == null or b.under_construction or int(enemy_buildings.has(id)) != faction: continue
+		if c.global_position.distance_squared_to(sim.entrance_of(b,"att_entrance")) <= reach:
+			return false
+	return true
+
+
+## One of the player's people away on service, rather than a resident at home
+## or a bucket carrier: they drink from what they carry when no well is near.
+func _in_field(c: Citizen, key: int) -> bool:
+	return _faction_of(key) == 0 and sim.citizens_by_id.get(c.id) != c \
+			and not carriers.has(c.id)
+
 
 func handles(c: Citizen) -> bool:
 	# One key per call. Every campaign unit and every citizen asks this once a
@@ -307,6 +334,9 @@ func _tick(delta: float) -> void:
 		if c.hydration <= 0: _damage(c,delta*0.03)
 		if c.hydration <= SEEK_AT and not drinkers.has(key):
 			var well := _well_for(c,_faction_of(key))
+			if _in_field(c, key) and _far_from_wells(c, _faction_of(key)):
+				c.hydration = 1.0
+				continue
 			if well != null:
 				# A loaded delivery owns its destination's reserved room. Keep
 				# that job through the drinking trip, just as through a meal;
@@ -855,7 +885,9 @@ func _purge_tick(id: int, job: Dictionary, c: Citizen, key: int, delta: float, b
 	wells[well.id].poison_days = 0.0
 	_finish_carrier(id)
 
-func poison_quote(scout_id: int) -> Dictionary:
+## `well_id` picks the well; -1 takes the first one in sight. A picked well
+## need only be known — seen once and remembered — not in sight right now.
+func poison_quote(scout_id: int, well_id: int = -1) -> Dictionary:
 	var q := {"can_poison":false,"reason":"Select a trained scout.","cost":{Config.Res.TOOLS:1},"target_id":-1,"source_id":-1}
 	if sim.scouting == null or sim.campaign == null or sim.campaign.defeated: return q
 	var scout: Scout = sim.scouting.scouts.get(scout_id)
@@ -865,8 +897,15 @@ func poison_quote(scout_id: int) -> Dictionary:
 	if handles(scout.person): return q
 	q.reason = "Bring the enemy well into sight before targeting it."
 	var target: Building
-	for b in sim.campaign.enemy_buildings.values():
-		if b.type_id == "well" and not b.under_construction and sim.scouting.visibility_at(b.global_position): target = b; break
+	if well_id >= 0:
+		var picked: Building = sim.campaign.enemy_buildings.get(well_id)
+		if picked != null and picked.type_id == "well" and not picked.under_construction \
+				and (sim.scouting.visibility_at(picked.global_position)
+				or (world.fog is FogOfWar and (world.fog as FogOfWar).remembers(picked))):
+			target = picked
+	else:
+		for b in sim.campaign.enemy_buildings.values():
+			if b.type_id == "well" and not b.under_construction and sim.scouting.visibility_at(b.global_position): target = b; break
 	if target == null: return q
 	q.target_id = target.id
 	q.reason = "The scout needs food for the journey."
@@ -881,8 +920,8 @@ func poison_quote(scout_id: int) -> Dictionary:
 	q.can_poison = true
 	return q
 
-func poison(scout_id: int) -> String:
-	var q := poison_quote(scout_id)
+func poison(scout_id: int, well_id: int = -1) -> String:
+	var q := poison_quote(scout_id, well_id)
 	if not q.can_poison: return q.reason
 	var scout: Scout = sim.scouting.scouts[scout_id]
 	var source: Building = sim.buildings_by_id[q.source_id]

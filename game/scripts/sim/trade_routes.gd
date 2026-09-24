@@ -283,7 +283,7 @@ func _feed(route: Caravan, delta: float) -> void:
 		need -= eaten
 		if c.carrying_amount <= 0.00001: c.drop()
 	var ration := delta / Config.DAY_LENGTH * Config.HUNGER_PER_DAY
-	sim.ledger.used(Config.Res.FOOD, ration - need)
+	sim.ledger.used(Config.Res.FOOD, ration - need, "Merchants' provisions")
 	c.hunger = Config.travel_hunger(c.hunger, need, ration)
 	if c.hunger >= 1.0:
 		if c is Soldier: c.apply_damage(delta * 0.15)
@@ -340,8 +340,8 @@ func _exchange(route: Caravan) -> void:
 		_return(route, reason)
 		return
 	route.promised = false
-	sim.ledger.used(EXPORT, route.export_amount)
-	sim.ledger.made(IMPORT, route.import_amount)
+	sim.ledger.used(EXPORT, route.export_amount, "Trade")
+	sim.ledger.made(IMPORT, route.import_amount, "Trade")
 	route.cargo_res = IMPORT
 	route.cargo_amount = route.import_amount
 	route.cart.load_goods(IMPORT)

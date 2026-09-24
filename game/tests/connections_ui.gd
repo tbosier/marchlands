@@ -101,7 +101,7 @@ func _trade_controls(game: SeededGame) -> void:
 	if game.sim.trade.caravans.is_empty(): return
 	var route: Caravan = game.sim.trade.caravans.values()[0]
 	var readout: String = game.hud._pop_label.text
-	var legend: String = game.hud._pop_label.tooltip_text
+	var legend: String = game.hud._pop_label.get_tooltip(Vector2.ZERO)
 	_check((readout.contains("C%d" % (population - 1)) and readout.contains("M1")
 		or readout.contains("1 merchants")) and legend.contains("%d civilians" % (population - 1))
 		and legend.contains("1 merchants"),

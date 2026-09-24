@@ -266,7 +266,7 @@ func _daily(elapsed_days: float) -> void:
 ## A citizen sits down to a meal: `Citizen.take_meal` plus the food it cost,
 ## for the ledger. Every meal path in this file comes through here.
 func _eat_meal(c: Citizen) -> void:
-	ledger.used(Config.Res.FOOD, Config.MEAL_FOOD)
+	ledger.used(Config.Res.FOOD, Config.MEAL_FOOD, "Meals")
 	c.take_meal(day)
 
 
@@ -282,7 +282,7 @@ func _consume_tools(elapsed_days: float) -> void:
 		return
 	var wanted := workers * Config.TOOLS_PER_WORKER_DAY * elapsed_days
 	var short := stores.consume(Config.Res.TOOLS, wanted)
-	ledger.used(Config.Res.TOOLS, wanted - short)
+	ledger.used(Config.Res.TOOLS, wanted - short, "Tool wear")
 	tools_bonus = 1.0 + Config.TOOLS_WORK_BONUS * (
 			0.0 if wanted <= 0.0 else clampf(1.0 - short / wanted, 0.0, 1.0))
 
@@ -297,6 +297,13 @@ func water_room() -> int:
 		if b.def.role == BuildingDefs.Role.WELL and not b.under_construction:
 			wells += 1
 	return maxi(0, int(float(wells) * WaterSystem.SERVES) - population_members().size())
+
+
+## Standing about with nothing to do: no job, awake, not eating, not on the
+## way in from the map edge. `stat_idle` counts the same, settlers included.
+func is_idle(c: Citizen) -> bool:
+	return c.job == null and not c.immigrant and c.state != Citizen.State.SLEEPING \
+			and c.state != Citizen.State.EATING
 
 
 ## What is holding newcomers back, in a sentence, or "" when nothing is — the
@@ -726,7 +733,7 @@ func _tick_haul(c: Citizen, delta: float) -> void:
 	var left := 0.0
 	if dst.under_construction:
 		left = dst.deliver_material(job.res, amount)
-		ledger.used(job.res, amount - left)
+		ledger.used(job.res, amount - left, "Building sites")
 	else:
 		left = amount - dst.add(job.res, amount)
 	if left > 0.01:
@@ -779,7 +786,7 @@ func _tick_gather(c: Citizen, delta: float) -> void:
 			c.update_animation(delta, 0.0)
 			return
 		var taken := world.nodes.harvest(node, Config.CARRY_CAPACITY, day)
-		ledger.made(job.res, taken)
+		ledger.made(job.res, taken, site.def.display_name + "s")
 		node.reserved_by = -1
 		if taken <= 0.01:
 			_retire_job(c)
@@ -883,7 +890,7 @@ func _tick_harvest(c: Citizen, delta: float) -> void:
 			c.update_animation(delta, 0.0)
 			return
 		var yield_amount := Config.harvest_load(farm.crop_growth)
-		ledger.made(Config.Res.FOOD, yield_amount)
+		ledger.made(Config.Res.FOOD, yield_amount, "Farms")
 		c.pick_up(Config.Res.FOOD, yield_amount, registry)
 		c.state = Citizen.State.TRAVELLING
 		c.task_label = "carrying grain"
@@ -996,8 +1003,9 @@ func _tick_craft(c: Citizen, delta: float) -> void:
 		c.update_animation(delta, 0.0)
 		return
 	for res in shop.def.consumes:
-		ledger.used(int(res), float(shop.def.consumes[res]) * Config.CRAFT_BATCH)
-	ledger.made(shop.def.produces, shop.craft())
+		ledger.used(int(res), float(shop.def.consumes[res]) * Config.CRAFT_BATCH,
+				shop.def.display_name + "s")
+	ledger.made(shop.def.produces, shop.craft(), shop.def.display_name + "s")
 	jobs.complete(job)
 	_go_idle(c)
 
@@ -1028,7 +1036,7 @@ func _tick_fell(c: Citizen, delta: float) -> void:
 			c.update_animation(delta, 0.0)
 			return
 		var taken := world.nodes.fell(node, Config.CARRY_CAPACITY)
-		ledger.made(Config.Res.TIMBER, taken)
+		ledger.made(Config.Res.TIMBER, taken, "Clearing ground")
 		if taken <= 0.01:
 			node.reserved_by = -1
 			_retire_job(c)

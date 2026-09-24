@@ -227,6 +227,7 @@ func _ready() -> void:
 		if sim.campaign.disband_company(company_id):
 			_on_alert("%s disbanded; its soldiers march loose." % name_of.get("name", "The company"), camera.focus)
 		_refresh_selection())
+	hud.idle_focus_requested.connect(_focus_next_idle)
 	hud.unit_pick_requested.connect(func(unit_id: int, remove: bool):
 		if remove:
 			selected_units.erase(unit_id)
@@ -927,10 +928,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				var ray := camera.screen_ray(mb.position)
 				var hit := world.terrain.raycast(ray.origin, ray.direction)
 				if hit.hit:
-					var error: String = sim.scouting.command(selected_scout, hit.position)
-					if error != "": _on_alert(error, hit.position)
-					else: show_order_marker(hit.position, false)
-					_refresh_selection()
+					_order_scout(mb.position, hit.position)
 			else:
 				_clear_selection()
 
@@ -1387,6 +1385,9 @@ func _show_placement_tooltip(check: Dictionary, affordable: bool,
 				% check["reason"])
 	elif not affordable:
 		lines.append("[color=#d97368]Cannot afford[/color]")
+		var why := sim.stores.shortfall_text(cost)
+		if why != "":
+			lines.append("[color=#a9a49b]%s[/color]" % why)
 
 	hud.show_cursor_tooltip(lines, mouse)
 
@@ -1849,6 +1850,93 @@ func _tips_allowed() -> bool:
 			return false
 	# Nor under a test script that loads the main scene directly.
 	return not OS.get_cmdline_args().has("--script")
+
+
+## Select the next idle civilian after the one last shown, and look at them.
+var _last_idle_id := -1
+
+func _focus_next_idle() -> void:
+	var idle: Array[Citizen] = []
+	for c in sim.citizens:
+		if sim.is_idle(c):
+			idle.append(c)
+	if idle.is_empty():
+		return
+	idle.sort_custom(func(a: Citizen, b: Citizen) -> bool: return a.id < b.id)
+	var next: Citizen = idle[0]
+	for c in idle:
+		if c.id > _last_idle_id:
+			next = c
+			break
+	_last_idle_id = next.id
+	_cancel_placement()
+	_clear_selection()
+	selected_citizen = next
+	camera.focus_on(next.global_position, 30.0)
+	_refresh_selection()
+
+
+## A right-click with a scout selected. On the rival's keep it is a visit to
+## the ruler; on one of their wells, a sabotage run; anywhere else, a journey.
+## The building only has to have been seen once — it is remembered under the
+## fog — which is what lets a scout be sent back to a castle he has left.
+func _order_scout(screen_pos: Vector2, ground: Vector3) -> void:
+	var building := _rival_building_at(screen_pos)
+	var error := ""
+	var attack := false
+	if building != null and building.type_id == "keep":
+		error = sim.scouting.visit_city(selected_scout)
+	elif building != null and building.type_id == "well" and sim.water != null:
+		error = sim.water.poison(selected_scout, building.id)
+		attack = true
+		if error == "":
+			_on_alert("Scout sent to sabotage the well. This is an act of war: the "
+					+ "town will be at war once the scout is near, and its guards can "
+					+ "stop the attempt.", building.global_position)
+	else:
+		error = sim.scouting.command(selected_scout, ground)
+	if error != "" and building != null:
+		# Refused as a visit or a sabotage run — at war, no tool, no food — the
+		# scout still goes where the player pointed, and is told why.
+		var reason := error
+		error = sim.scouting.command(selected_scout, ground)
+		_on_alert(reason + (" The scout goes there instead." if error == "" else ""), ground)
+		attack = false
+		building = null
+	elif error != "":
+		_on_alert(error, ground)
+	if error == "":
+		show_order_marker(building.global_position if building != null else ground, attack)
+	_refresh_selection()
+
+
+## The rival building under the cursor, if the player's people have seen it.
+## One in sight is found by its collider. One remembered under the fog has
+## none — clicks pass through it — so it is found by the ground under the
+## cursor falling inside its footprint.
+func _rival_building_at(screen_pos: Vector2) -> Building:
+	if sim.campaign == null:
+		return null
+	var ray := camera.screen_ray(screen_pos)
+	var query := PhysicsRayQueryParameters3D.create(ray.origin,
+			ray.origin + ray.direction * 3000.0, 2 | 4 | 8 | 16 | 32 | 64)
+	query.collide_with_areas = true
+	var hit := get_world_3d().direct_space_state.intersect_ray(query)
+	if not hit.is_empty() and hit.collider.has_meta("rival_building_id"):
+		var seen: Building = sim.campaign.enemy_buildings.get(int(hit.collider.get_meta("rival_building_id")))
+		if seen != null and sim.scouting.visibility_at(seen.global_position):
+			return seen
+	var ground := world.terrain.raycast(ray.origin, ray.direction)
+	if not ground.hit or not world.fog is FogOfWar:
+		return null
+	for b: Building in sim.campaign.enemy_buildings.values():
+		if not (world.fog as FogOfWar).remembers(b):
+			continue
+		var plan := b.plan_footprint()
+		if absf(ground.position.x - b.position.x) <= plan.x * 0.5 \
+				and absf(ground.position.z - b.position.z) <= plan.y * 0.5:
+			return b
+	return null
 
 
 ## The bottom grid of the player's own selected men; empty hides it.
@@ -2607,6 +2695,7 @@ func show_order_marker(at: Vector3, attack: bool) -> MeshInstance3D:
 		return null
 	var marker := MeshInstance3D.new()
 	marker.name = "order_marker"
+	marker.set_meta(&"fog_exempt", true)
 	var mesh := TorusMesh.new()
 	mesh.inner_radius = 1.1
 	mesh.outer_radius = 1.4

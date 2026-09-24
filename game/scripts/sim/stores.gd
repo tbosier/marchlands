@@ -121,6 +121,31 @@ func spendable(res: int) -> float:
 		stock += b.available(res)
 	return stock
 
+## What is physically on the shelves of the settlement's stores, free or not.
+func in_stores(res: int) -> float:
+	return _totals[res]
+
+
+## Why a cost cannot be met, resource by resource: what is free against what
+## is needed, and how much of the rest is set aside — for building sites,
+## workshop inputs, caravans, scouts' packs.
+## The top bar counts everything held, so "346 timber" and "cannot afford 52"
+## read as a bug unless the promise is spelled out. Empty when affordable.
+func shortfall_text(cost: Dictionary) -> String:
+	var parts: Array[String] = []
+	for res in cost:
+		var free := spendable(res)
+		if free >= float(cost[res]):
+			continue
+		var promised := maxf(0.0, _totals[res] - free)
+		var line := "%s: %d free of %d needed" % [Res.display(res), int(free), int(cost[res])]
+		if promised >= 1.0:
+			line += " (%d more in store, already set aside for building sites, " % int(promised) \
+					+ "workshops or other orders)"
+		parts.append(line)
+	return "\n".join(parts)
+
+
 func can_afford(cost: Dictionary) -> bool:
 	for res in cost:
 		if spendable(res) < float(cost[res]):
@@ -138,6 +163,11 @@ func try_spend(cost: Dictionary) -> bool:
 
 ## Written by `spend`, when the simulation hands one over. See ResourceLedger.
 var ledger: ResourceLedger
+
+
+## What the next `spend` is for, as the resource tooltip names it. Callers that
+## know set it; the rest are research, recruiting, armour, roads and seed.
+var spend_source := "Research, recruits and orders"
 
 
 ## Take `cost` out of the settlement's stores, nearest-to-dearest order
@@ -161,7 +191,7 @@ func spend(cost: Dictionary) -> void:
 			remaining -= b.remove(res, minf(remaining, b.available(res)))
 		_totals[res] = maxf(0.0, _totals[res] - (float(cost[res]) - remaining))
 		if ledger != null:
-			ledger.used(int(res), float(cost[res]) - remaining)
+			ledger.used(int(res), float(cost[res]) - remaining, spend_source)
 
 
 # --- Lookup -----------------------------------------------------------------

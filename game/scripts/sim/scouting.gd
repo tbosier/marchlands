@@ -7,7 +7,10 @@ const FOG_CELL := 32.0
 const TRAIN_SECONDS := Config.DAY_LENGTH * 0.5
 const FOOD_PACK := 8.0
 const TOOL_COST := 2.0
-const STATES := ["food", "tools", "lodge", "training", "ready", "exploring", "visiting", "return", "unloading"]
+const STATES := ["food", "tools", "lodge", "training", "ready", "exploring", "visiting", "return", "unloading", "restock"]
+## Phases in which an order is held rather than acted on at once: training,
+## and a trip back for food. The scout sets out when the phase ends.
+const HOLDING := ["food", "tools", "lodge", "training", "restock"]
 var sim: Simulation
 var world: World
 var registry: AssetRegistry
@@ -149,9 +152,22 @@ func info() -> Dictionary:
 	for scout in scouts.values():
 		rows.append({"id": scout.id, "name": scout.person.given_name, "status": scout.status,
 			"position": scout.person.global_position, "training": scout.state in ["food","tools","lodge","training"],
-			"can_explore": scout.state in ["ready","exploring","visiting"] and scout.food >= 1,
+			"training_progress": _training_progress(scout),
+			"can_explore": scout.state in ["ready","exploring","visiting","restock"]
+					and (scout.food >= 1 or scout.state == "restock"),
 			"trained": _trained.has(scout.person.id)})
 	return {"scouts": rows, "can_train": reason == "", "lodge_id": lodge.id if lodge != null else -1, "reason": reason}
+
+## How far through training a scout is, 0..1: nothing while still fetching the
+## supplies and walking to the lodge, then the timed drill itself.
+func _training_progress(scout: Scout) -> float:
+	match scout.state:
+		"food", "tools", "lodge": return 0.0
+		"training":
+			var total := TRAIN_SECONDS * (0.25 if _trained.has(scout.person.id) else 1.0)
+			return clampf(1.0 - scout.training_left / total, 0.0, 1.0)
+	return 1.0
+
 
 func train(lodge_id: int, citizen_id: int = -1) -> String:
 	var lodge := _lodge(lodge_id)
@@ -181,7 +197,7 @@ func command(id: int, destination: Vector3) -> String:
 	if sim.campaign != null and sim.campaign.defeated: return "The settlement has fallen."
 	var scout: Scout = scouts.get(id)
 	if scout == null: return "Select a scout."
-	var training: bool = scout.state in ["food","tools","lodge","training"]
+	var training: bool = scout.state in HOLDING
 	if not training and scout.state not in ["ready","exploring","visiting"]: return "The scout is on the way back for supplies."
 	if not training and scout.food < 1: return "The scout needs to return for supplies."
 	if not TradeRoutes._position(destination,world_size) or not world.nav.can_reach(scout.person.global_position,destination): return "No traversable route to that location."
@@ -189,7 +205,8 @@ func command(id: int, destination: Vector3) -> String:
 	if training:
 		# Held until training ends, rather than refused: the player said where.
 		scout.orders_waiting = true
-		scout.status = "Will set out once trained"
+		scout.status = "Will set out once trained" if scout.state != "restock" \
+				else "Restocking food, then setting out"
 		return ""
 	scout.state = "exploring"
 	scout.status = "Exploring"
@@ -204,8 +221,8 @@ func visit_city(id: int) -> String:
 	# `command` holds a trainee's order rather than refusing it; a visit is not
 	# one to hold, since setting "visiting" below would skip the training.
 	var trainee: Scout = scouts.get(id)
-	if trainee != null and trainee.state in ["food","tools","lodge","training"]:
-		return "Complete training before visiting the ruler."
+	if trainee != null and trainee.state in HOLDING:
+		return "The scout must finish training and restocking before visiting the ruler."
 	var error := command(id,sim.campaign._door(keep))
 	if error != "": return error
 	scouts[id].state = "visiting"
@@ -283,6 +300,7 @@ func tick(delta: float) -> void:
 						scout.state = "exploring"
 						scout.status = "Exploring"
 						c.clear_goal()
+			"restock": _tick_restock(scout,delta)
 			"exploring", "visiting":
 				if _move(scout,scout.destination,delta):
 					if scout.state == "visiting": _interview(scout)
@@ -320,13 +338,17 @@ func _feed(scout: Scout, delta: float) -> void:
 			need -= b.remove(Config.Res.FOOD,minf(need,b.available(Config.Res.FOOD)))
 			if need <= 0: break
 	var ration := delta / Config.DAY_LENGTH * Config.HUNGER_PER_DAY
-	sim.ledger.used(Config.Res.FOOD, ration - need)
+	sim.ledger.used(Config.Res.FOOD, ration - need, "Scouts' packs")
 	c.hunger = Config.travel_hunger(c.hunger, need, ration)
 	c.next_meal = Config.next_meal_after(sim.day)
 	if c.hunger >= 1:
 		if c is Soldier: c.apply_damage(delta*0.15)
 		else: scout.health = maxf(0,scout.health-delta*0.15)
-	if scout.food < 1 and scout.state in ["ready","exploring","visiting"]: recall(scout.id)
+	# Not in the middle of a sabotage run: that mission owns the scout until it
+	# ends, and restocking under it left a food reservation nobody released.
+	if scout.food < 1 and scout.state in ["ready","exploring","visiting"] \
+			and not (sim.water != null and sim.water.poisoning(scout.id)):
+		_restock(scout)
 
 func _danger(scout: Scout, _delta: float) -> void:
 	if sim.campaign == null or not sim.campaign.at_war: return
@@ -339,6 +361,57 @@ func _danger(scout: Scout, _delta: float) -> void:
 		u.cooldown = 1.0
 		if scout.person is Soldier: scout.person.receive_hit("torso","slash",7.0)
 		else: scout.health = maxf(0,scout.health-7.0)
+
+## Out of food in the field: fetch a fresh pack from the nearest store and
+## carry on, rather than going home and back to civilian life. Only the
+## player's Recall does that now; it used to happen every eight days on its
+## own, in the middle of whatever the scout had been sent to do. With no store
+## able to spare a pack, the scout does come home.
+func _restock(scout: Scout) -> void:
+	var store := _source(Config.Res.FOOD, FOOD_PACK, scout.person.global_position)
+	if store == null:
+		sim.alert.emit("%s has run out of food and no store can spare a pack, so is coming home."
+				% scout.person.given_name, scout.person.global_position)
+		recall(scout.id)
+		return
+	store.reserved[Config.Res.FOOD] += FOOD_PACK
+	scout.food_source = store.id
+	scout.food_reserved = true
+	# Whatever the scout was doing is picked up again afterwards: `destination`
+	# still holds it, and the held-order flag sends them back out. Kept, not
+	# recomputed, when a restock is re-routed because its store went.
+	scout.orders_waiting = scout.orders_waiting or scout.state in ["exploring", "visiting"]
+	scout.state = "restock"
+	scout.status = "Restocking food" + (", then setting out again" if scout.orders_waiting else "")
+	scout.person.clear_goal()
+
+
+func _tick_restock(scout: Scout, delta: float) -> void:
+	var b: Building = sim.buildings_by_id.get(scout.food_source)
+	if b == null or b.under_construction:
+		_release(scout)
+		_restock(scout)
+		return
+	if not _move(scout,sim.entrance_of(b,"att_entrance"),delta): return
+	var wanted := maxf(0.0, FOOD_PACK - scout.food)
+	b.reserved[Config.Res.FOOD] = maxf(0,b.reserved[Config.Res.FOOD]-FOOD_PACK)
+	scout.food_reserved = false
+	scout.food += b.remove(Config.Res.FOOD, wanted)
+	scout.person.clear_goal()
+	if scout.orders_waiting:
+		scout.orders_waiting = false
+		# A visit to the ruler that stopped for food is still a visit: its
+		# destination is the keep's door, and only "visiting" interviews him.
+		var keep := _rival_keep()
+		var visiting := keep != null and scout.destination.distance_to(
+				sim.campaign._door(keep)) < 1.0
+		scout.state = "visiting" if visiting else "exploring"
+		scout.status = "Visiting the ruler" if visiting else "Exploring"
+	else:
+		scout.state = "ready"
+		scout.status = "Ready for orders"
+	changed.emit()
+
 
 func _collect(scout: Scout, delta: float) -> void:
 	var is_food := scout.state == "food"
@@ -526,12 +599,12 @@ static func validate(data: Variant, size_m: float, buildings: Variant = null) ->
 		if not TradeRoutes._number(entry.food,0,FOOD_PACK) or not TradeRoutes._number(entry.tools,0,TOOL_COST) or not TradeRoutes._number(entry.training_left,0,TRAIN_SECONDS) or not TradeRoutes._number(entry.health,0,100): return "invalid scout supplies or training"
 		if not is_equal_approx(entry.health,entry.citizen.get("service_health",100.0)): return "scout health differs from resident health"
 		if entry.food + entry.tools + entry.citizen.carrying_amount + entry.citizen.get("veteran_rations",0.0) > Config.CARRY_CAPACITY + 0.001: return "overloaded scout"
-		if entry.food_reserved != (entry.state == "food") or entry.tools_reserved != (entry.state in ["food","tools"]): return "scout reservation does not match phase"
+		if entry.food_reserved != (entry.state in ["food","restock"]) or entry.tools_reserved != (entry.state in ["food","tools"]): return "scout reservation does not match phase"
 		if entry.state == "food" and entry.food > 0: return "scout has uncollected provisions"
 		if entry.state in ["food","tools"] and entry.tools > 0: return "scout has uncollected tools"
 		if entry.state == "lodge" and entry.tools != TOOL_COST: return "scout lacks training tools"
-		if entry.state in ["training","ready","exploring","visiting"] and entry.tools != 0: return "trained scout retains consumed tools"
-		if entry.state in ["ready","exploring","visiting"] and (entry.training_left != 0 or not data.trained.has(entry.citizen.id)): return "scout is active without completed training"
+		if entry.state in ["training","ready","exploring","visiting","restock"] and entry.tools != 0: return "trained scout retains consumed tools"
+		if entry.state in ["ready","exploring","visiting","restock"] and (entry.training_left != 0 or not data.trained.has(entry.citizen.id)): return "scout is active without completed training"
 		if buildings != null:
 			for item in [[entry.food_reserved,entry.food_source,Config.Res.FOOD,FOOD_PACK],[entry.tools_reserved,entry.tool_source,Config.Res.TOOLS,TOOL_COST]]:
 				var b: Variant = buildings.get(item[1])

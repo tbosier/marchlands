@@ -23,6 +23,7 @@ signal upgrade_route_requested()
 signal road_scope_requested(scope: String)
 signal research_open_requested()
 signal tips_toggle_requested()
+signal idle_focus_requested()
 ## A tile in the unit grid was clicked: select just that soldier, or with
 ## Shift held, drop him from the selection.
 signal unit_pick_requested(unit_id: int, remove: bool)
@@ -150,6 +151,11 @@ var _primary_actions: Array[Button] = []
 ## The build tray's category tabs, shown in place of the primary actions while
 ## the tray is open, and which one is showing.
 var _tray_tabs: Dictionary = {}
+## What the resource and population tooltips say, rebuilt each refresh and read
+## by LiveTipLabel when a tooltip opens.
+var _res_tips: Array[String] = []
+var _pop_tip := ""
+var _idle_button: Button
 var _tips_button: Button
 var _tray_category := ""
 var _world_dialog: ConfirmationDialog
@@ -474,6 +480,27 @@ func _panel(color: Color) -> StyleBoxFlat:
 	return sb
 
 
+## A label whose tooltip is asked for when it is about to show, rather than
+## rewritten into `tooltip_text` on every quarter-second refresh.
+class LiveTipLabel extends Label:
+	var source: Callable
+
+	func _get_tooltip(_at: Vector2) -> String:
+		return String(source.call()) if source.is_valid() else tooltip_text
+
+
+func _make_live_label(text: String, size: int, color: Color, source: Callable) -> Label:
+	var l := LiveTipLabel.new()
+	l.text = text
+	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_color_override("font_color", color)
+	l.source = source
+	# Non-empty, so the viewport knows there is a tooltip to ask for.
+	l.tooltip_text = " "
+	l.mouse_filter = Control.MOUSE_FILTER_STOP
+	return l
+
+
 func _make_label(text: String, size: int, color: Color) -> Label:
 	var l := Label.new()
 	l.text = text
@@ -551,16 +578,27 @@ func _build_top_bar() -> void:
 	_top_row.add_child(_title_label)
 	_top_row.add_child(_rule())
 
+	_res_tips.resize(Config.RES_COUNT)
 	for i in Config.RES_COUNT:
 		_top_row.add_child(_build_resource_chip(i))
 
 	_top_row.add_child(_rule())
-	_pop_label = _make_label("Population 0", F_BODY, INK)
+	_pop_label = _make_live_label("Population 0", F_BODY, INK, func() -> String: return _pop_tip)
 	_pop_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	# Labels ignore the mouse by default, which quietly meant the tooltip
 	# explaining *why* nobody is working never appeared.
 	_pop_label.mouse_filter = Control.MOUSE_FILTER_STOP
 	_top_row.add_child(_pop_label)
+	# Who is idle, one click at a time — the RTS idle-worker button.
+	_idle_button = Button.new()
+	_idle_button.flat = true
+	_idle_button.focus_mode = Control.FOCUS_NONE
+	_idle_button.add_theme_font_size_override("font_size", F_SMALL)
+	_idle_button.add_theme_color_override("font_color", WARN)
+	_idle_button.tooltip_text = "Show the next idle civilian"
+	_idle_button.visible = false
+	_idle_button.pressed.connect(func(): idle_focus_requested.emit())
+	_top_row.add_child(_idle_button)
 
 	_controls_row = HBoxContainer.new()
 	_controls_row.name = "controls"
@@ -640,16 +678,15 @@ func _build_resource_chip(index: int) -> Control:
 	tick.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(tick)
 
-	var name_label := _make_label(Res.display(index), F_SMALL, INK_DIM)
-	name_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	# Hovering the name shows the same rates as hovering the number.
-	name_label.mouse_filter = Control.MOUSE_FILTER_STOP
+	var name_label := _make_live_label(Res.display(index), F_SMALL, INK_DIM,
+			func() -> String: return _res_tips[index])
+	name_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	row.add_child(name_label)
 	_res_name_labels.append(name_label)
 
-	var value := _make_label("0", F_BODY, INK)
+	var value := _make_live_label("0", F_BODY, INK, func() -> String: return _res_tips[index])
 	value.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	value.mouse_filter = Control.MOUSE_FILTER_STOP
 	row.add_child(value)
 	_res_labels.append(value)
 	return row
@@ -1137,16 +1174,24 @@ func _refresh_readouts() -> void:
 		_res_labels[i].text = "%d" % int(amount)
 		var made := _sim.ledger.made_per_day(i)
 		var used := _sim.ledger.used_per_day(i)
-		_res_labels[i].tooltip_text = ("%s: %d\nProduced %.1f a day · used %.1f a day · net %+.1f\n"
+		var tip := "%s: %d\nProduced %.1f a day · used %.1f a day · net %+.1f" \
 				% [Res.display(i), int(amount), made, used, made - used]
-				+ "At %s: +%.1f / −%.1f a minute\n(averaged over the last day or so)"
-				% ["this speed" if scale != 1.0 else "1x", made * per_minute, used * per_minute])
+		# Where it comes from and where it goes, largest first.
+		for side in [[true, "From"], [false, "To"]]:
+			var rows: Array = _sim.ledger.sources(i, side[0])
+			if rows.is_empty():
+				continue
+			var parts: Array[String] = []
+			for row in rows.slice(0, 4):
+				parts.append("%s %.1f" % [row[0], row[1]])
+			tip += "\n%s: %s" % [side[1], ", ".join(parts)]
+		tip += "\nAt %s: +%.1f / −%.1f a minute · averaged over the last day or so" \
+				% ["this speed" if scale != 1.0 else "1x", made * per_minute, used * per_minute]
+		_res_tips[i] = tip
 
 	var bonus := _sim.tools_bonus
-	_res_labels[Config.Res.TOOLS].tooltip_text += ("\n\nTools in store make every "
+	_res_tips[Config.Res.TOOLS] += ("\n\nTools in store make every "
 			+ "trade faster. Current work rate: %d%%" % int(bonus * 100.0))
-	for i in Config.RES_COUNT:
-		_res_name_labels[i].tooltip_text = _res_labels[i].tooltip_text
 	_res_labels[Config.Res.TOOLS].add_theme_color_override("font_color",
 			INK if bonus > 1.01 else INK_DIM)
 
@@ -1180,14 +1225,25 @@ func _refresh_readouts() -> void:
 
 	# Idle people are a symptom; the tooltip carries the diagnosis.
 	var reason := _sim.idle_diagnosis()
-	_pop_label.tooltip_text = "%d people: %d civilians and %d soldiers; %d merchants; %d scouts. People away on service do not produce locally.\n" % [civilians + soldiers + merchants + scouts, civilians, soldiers, merchants, scouts] + (reason if reason != ""
+	_pop_tip = "%d people: %d civilians and %d soldiers; %d merchants; %d scouts. People away on service do not produce locally.\n" % [civilians + soldiers + merchants + scouts, civilians, soldiers, merchants, scouts] + (reason if reason != ""
 			else "%d of %d at work" % [_sim.stat_population - _sim.stat_idle,
 					_sim.stat_population])
 	if responders > 0:
-		_pop_label.tooltip_text = "%d people: %d civilians, %d soldiers, %d merchants, %d scouts, %d bucket carriers. Responders leave production to carry water." % [civilians + soldiers + merchants + scouts + responders, civilians, soldiers, merchants, scouts, responders]
+		_pop_tip = "%d people: %d civilians, %d soldiers, %d merchants, %d scouts, %d bucket carriers. Responders leave production to carry water." % [civilians + soldiers + merchants + scouts + responders, civilians, soldiers, merchants, scouts, responders]
+	var idle_names: Array[String] = []
+	for c in _sim.citizens:
+		if _sim.is_idle(c):
+			idle_names.append(c.given_name)
+	if _idle_button != null:
+		_idle_button.visible = not idle_names.is_empty() and not _compact
+		_idle_button.text = "%d idle" % idle_names.size()
+	if not idle_names.is_empty():
+		_pop_tip += "\nIdle: " + ", ".join(idle_names.slice(0, 8)) \
+				+ (" and %d more" % (idle_names.size() - 8) if idle_names.size() > 8 else "") \
+				+ " — click the idle count to find them."
 	var blocker := _sim.immigration_blocker()
 	if blocker != "":
-		_pop_label.tooltip_text += "\n" + blocker
+		_pop_tip += "\n" + blocker
 	var staffing: Dictionary = _sim.staffing_summary()
 	if staffing.open_places > 0:
 		var empty: Array = staffing.empty
@@ -1203,9 +1259,9 @@ func _refresh_readouts() -> void:
 			text += " · no workers at: " + ", ".join(named)
 		if staffing.short > 0:
 			text += " · %d more short-handed" % staffing.short
-		_pop_label.tooltip_text += text
+		_pop_tip += text
 	else:
-		_pop_label.tooltip_text += "\nEvery workplace is fully staffed."
+		_pop_tip += "\nEvery workplace is fully staffed."
 	if reason != "":
 		_pop_label.add_theme_color_override("font_color", WARN)
 		_idle_reason = reason
@@ -1866,7 +1922,10 @@ func show_scouts(info: Dictionary, selected_id: int = -1) -> void:
 	if not info.get("can_train", false): lines.append("\n" + str(info.get("reason", "Build a scout lodge to train residents.")))
 	for row in rows:
 		if selected_id >= 0 and row.id != selected_id: continue
-		lines.append("\n[b]%s[/b]\n%s" % [row.name, row.status])
+		var progress := ""
+		if row.training:
+			progress = " · training %d%%" % int(float(row.get("training_progress", 0.0)) * 100.0)
+		lines.append("\n[b]%s[/b]\n%s%s" % [row.name, row.status, progress])
 		var scout: Scout = _sim.scouting.scouts.get(row.id)
 		if scout != null: lines.append("Hydration %d%% · food %.1f days" % [roundi(scout.person.hydration * 100.0), scout.food])
 	_selection_body.text = "\n".join(lines)
