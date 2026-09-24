@@ -723,6 +723,9 @@ func _scout_right_click() -> void:
 			"right-clicking the ground sends the selected scout there (%s, %.1f m off)"
 			% [scout.state, scout.destination.distance_to(target)])
 	_check(game.selected_scout == scout.id, "and the scout stays selected for the next order")
+	var markers := game.world.effects_root.find_children("order_marker", "", false, false)
+	_check(markers.size() == 1 and (markers[0] as Node3D).global_position.distance_to(target) < 6.0,
+			"the right-click leaves a marker on the ground where the order went")
 	# An order given during training is kept, not refused, and carried out
 	# the moment training ends.
 	scout.state = "training"
@@ -780,7 +783,38 @@ func _tips() -> void:
 	await process_frame
 
 
+## WASD keeps working: through a Ctrl the window never saw released, and after
+## a dialog's text field has closed with the focus still on it.
+func _camera_keys() -> void:
+	var game := _new_game(42)
+	var camera: RTSCamera = game.camera
+	var moved := func() -> float:
+		var before: Vector3 = camera._target_focus
+		Input.action_press("pan_forward")
+		camera._process(0.1)
+		Input.action_release("pan_forward")
+		return camera._target_focus.distance_to(before)
+	_check(moved.call() > 0.0, "W pans the camera")
+	var ctrl := InputEventKey.new()
+	ctrl.keycode = KEY_CTRL
+	ctrl.pressed = true
+	camera._input(ctrl)
+	_check(is_zero_approx(moved.call()), "holding Ctrl (for Ctrl+S) does not pan")
+	camera._notification(Node.NOTIFICATION_APPLICATION_FOCUS_OUT)
+	_check(moved.call() > 0.0, "a Ctrl released while the window was away does not freeze the camera")
+	var field := LineEdit.new()
+	game.hud.add_child(field)
+	field.grab_focus()
+	_check(is_zero_approx(moved.call()), "typing in a visible text field does not pan")
+	field.visible = false
+	_check(moved.call() > 0.0, "a hidden text field left holding focus does not freeze the camera")
+	field.queue_free()
+	game.free()
+	await process_frame
+
+
 func _run() -> void:
+	await _camera_keys()
 	await _tips()
 	await _scout_right_click()
 	await _playtest_fixes()

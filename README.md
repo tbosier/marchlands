@@ -471,7 +471,8 @@ After the four setup stages, the rest run in parallel — about a third of the
 machine's threads, up to eight at once, slowest first. On a 12-core, 24-thread
 machine that took the full gate from about 35 minutes (measured 2,059 and
 2,156 s serially) to about 8 (467–523 s in parallel). A 4-thread CI runner
-still runs one stage at a time. Each parallel stage
+still runs one stage at a time. Wall-clock budgets live in their own stage
+(`tests/perf_budgets.gd`), which runs alone after the parallel ones. Each parallel stage
 gets its own save directory and its own Xvfb display, and timeouts are widened
 for the shared CPU. `--jobs 1` runs everything one after another as before.
 

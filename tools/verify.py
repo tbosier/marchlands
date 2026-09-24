@@ -120,6 +120,8 @@ class Stage:
     success: tuple[str, ...] = ()
     timeout: float = 180
     expected_decoders: bool = False
+    # Wall-clock budgets: run alone, after the parallel stages, unscaled.
+    exclusive: bool = False
 
 
 def diagnostics(output: str, expected_decoders: bool = False) -> list[str]:
@@ -256,6 +258,8 @@ def plan(headless: bool, skip_long_run: bool) -> list[Stage]:
         stages.append(Stage(name, headless_godot + ["--script", f"res://tests/{name}.gd"],
                             (marker,), timeout=300 if name in ("spawn_layouts", "campaign") else 180,
                             expected_decoders=name == "save_validation"))
+    stages.append(Stage("perf_budgets", headless_godot + ["--script", "res://tests/perf_budgets.gd"],
+                        (r"^Performance budget failures: 0$",), exclusive=True))
     for name in SCENARIOS:
         stages.append(Stage(name, headless_godot + ["--fixed-fps", "60", "--",
                             f"--harness=tools/scenes/{name}.json"],
@@ -348,6 +352,8 @@ def run_rest(stages: list[Stage], jobs: int, output_dir: Path, env: dict[str, st
             save()
             report(result)
         return
+    alone = [stage for stage in stages if stage.exclusive]
+    stages = [stage for stage in stages if not stage.exclusive]
     expected = _expected_seconds()
     stages = sorted(stages, key=lambda stage: -expected.get(stage.name, 60.0))
     scale = min(2.5, 1.0 + 0.25 * (jobs - 1))
@@ -388,6 +394,13 @@ def run_rest(stages: list[Stage], jobs: int, output_dir: Path, env: dict[str, st
         stop_active()
         raise
     pool.shutdown(wait=True)
+    for stage in alone:
+        print(f"RUN  {stage.name} alone (timeout {stage.timeout:g}s)", flush=True)
+        result = run_stage(stage, output_dir, {**env, "MARCHLANDS_GODOT_HOME":
+                                               str(state_dir / "parallel" / stage.name)})
+        results.append(result)
+        save()
+        report(result)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -76,6 +76,23 @@ func focus_on(p: Vector3, dist: float = -1.0) -> void:
 		_target_distance = clampf(dist, MIN_DIST, MAX_DIST)
 
 
+## Ctrl as the key events report it, not as `Input.is_key_pressed` polls it.
+## The polled state sticks when the key comes up while the window is not
+## focused — Ctrl+Alt to change workspace, say — and a stuck Ctrl froze the
+## camera until the player happened to press and release it again.
+var _ctrl_held := false
+
+
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.keycode == KEY_CTRL:
+		_ctrl_held = event.pressed
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_APPLICATION_FOCUS_OUT or what == NOTIFICATION_WM_WINDOW_FOCUS_OUT:
+		_ctrl_held = false
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		var mb: InputEventMouseButton = event
@@ -110,10 +127,13 @@ func _process(delta: float) -> void:
 	var move := Vector2.ZERO
 	# Keys held for something else are not camera keys: Ctrl+S saves rather
 	# than also nudging the view back, and letters typed into a text field (the
-	# World dialog's seed) are not WASD.
+	# World dialog's seed) are not WASD. Only a field still on screen counts: a
+	# closed dialog can leave its hidden field holding focus, which stopped the
+	# camera for good.
 	var typing_in := get_viewport().gui_get_focus_owner()
-	var keys_free := not (typing_in is LineEdit or typing_in is TextEdit) \
-			and not Input.is_key_pressed(KEY_CTRL) and not Input.is_key_pressed(KEY_META)
+	var typing := (typing_in is LineEdit or typing_in is TextEdit) \
+			and typing_in.is_visible_in_tree()
+	var keys_free := not typing and not _ctrl_held
 	if keys_free:
 		if Input.is_action_pressed("pan_left"):
 			move.x -= 1.0

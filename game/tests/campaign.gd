@@ -743,18 +743,13 @@ func _companies_at_scale() -> void:
 			"a 400-man single file is 798 m deep on a 768 m map: it folds into further files rather than running off the edge or dragging the column back from the click")
 
 	campaign.form_company(army)
-	var best := INF
-	for attempt in 3:
-		game.selected_units.clear()
-		var started := Time.get_ticks_usec()
-		game._select_unit(army[0], false, false)
-		best = minf(best, float(Time.get_ticks_usec() - started) / 1000.0)
-	# A budget, not a benchmark. The build this replaced asked `Array.has` and
-	# `Array.erase` per id, which measured 11.3 ms here against 3.3 ms for the
-	# set; 8 ms sits clear of both, and the best of three keeps a scheduling
-	# spike from deciding it.
-	_check(game.selected_units.size() == army.size() and best < 8.0,
-			"one click takes the whole 2,000-man company in %.2f ms, inside the 8 ms budget" % best)
+	game.selected_units.clear()
+	game._select_unit(army[0], false, false)
+	# How long that click takes is held to a budget in tests/perf_budgets.gd,
+	# which the gate runs alone: a wall-clock limit means nothing while seven
+	# other stages share the CPU.
+	_check(game.selected_units.size() == army.size(),
+			"one click takes the whole 2,000-man company")
 
 	# The cost here is allocation, so the guard counts allocations rather than
 	# milliseconds: one mesh for 2,000 rings instead of 2,000. The material

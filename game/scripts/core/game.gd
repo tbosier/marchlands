@@ -929,6 +929,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				if hit.hit:
 					var error: String = sim.scouting.command(selected_scout, hit.position)
 					if error != "": _on_alert(error, hit.position)
+					else: show_order_marker(hit.position, false)
 					_refresh_selection()
 			else:
 				_clear_selection()
@@ -1887,6 +1888,7 @@ func _order_units(screen_pos: Vector2) -> void:
 	if not hit.hit: return
 	var target: Dictionary = sim.campaign.pick_target(ray.origin, ray.direction)
 	sim.campaign.command(selected_units, hit.position, target)
+	show_order_marker(hit.position, not target.is_empty())
 	# Say what the order became. A click that missed its target used to march
 	# the men to the ground under it with no word, which reads as "nothing".
 	var what := "Marching to the marked ground"
@@ -2593,6 +2595,41 @@ func _save_screenshot(tag: String) -> String:
 ## and StandardMaterial3D inside the loop below: 39 ms to raise the rings of a
 ## 2,000-man company against 10 ms sharing one, and 2,000 unique resources left
 ## alive for as long as the army was.
+## Where an order was given: a ring on the ground at the click that opens out
+## and fades over a second — green for a march, red for an attack — so a
+## right-click visibly landed somewhere. Real time, not game time: it answers
+## the click, and must show even while the march is paused.
+const ORDER_MARKER_SECONDS := 1.1
+
+
+func show_order_marker(at: Vector3, attack: bool) -> MeshInstance3D:
+	if world == null or not is_instance_valid(world.effects_root):
+		return null
+	var marker := MeshInstance3D.new()
+	marker.name = "order_marker"
+	var mesh := TorusMesh.new()
+	mesh.inner_radius = 1.1
+	mesh.outer_radius = 1.4
+	mesh.rings = 24
+	mesh.ring_segments = 4
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.no_depth_test = true
+	mat.albedo_color = Color(0.86, 0.30, 0.25) if attack else Color(0.45, 0.86, 0.45)
+	mesh.material = mat
+	marker.mesh = mesh
+	marker.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	world.effects_root.add_child(marker)
+	marker.global_position = Vector3(at.x, world.heightmap.height_at(at.x, at.z) + 0.15, at.z)
+	marker.scale = Vector3(0.6, 0.2, 0.6)
+	var tween := marker.create_tween().set_parallel()
+	tween.tween_property(marker, "scale", Vector3(1.4, 0.2, 1.4), ORDER_MARKER_SECONDS)
+	tween.tween_property(mat, "albedo_color:a", 0.0, ORDER_MARKER_SECONDS)
+	tween.chain().tween_callback(marker.queue_free)
+	return marker
+
+
 func _ring_prototype() -> Mesh:
 	if _ring_mesh != null: return _ring_mesh
 	var mesh := TorusMesh.new()
