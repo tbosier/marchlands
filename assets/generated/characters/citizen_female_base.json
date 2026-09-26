@@ -2,28 +2,28 @@
   "asset_id": "citizen_female_base",
   "category": "character",
   "footprint_m": [
-    0.5,
-    0.4
+    0.6,
+    0.5
   ],
   "bounds_min": [
-    -0.229,
-    -0.1152,
+    -0.295,
+    -0.1652,
     0.0
   ],
   "bounds_max": [
-    0.229,
-    0.1152,
-    1.79
+    0.295,
+    0.1652,
+    1.7552
   ],
-  "height_m": 1.79,
+  "height_m": 1.755,
   "materials": [
-    "timber_dark",
     "brick_red",
+    "timber_dark",
     "fabric_muted",
     "skin_mid"
   ],
   "triangles": {
-    "parts": 220
+    "parts": 248
   },
   "triangle_budget": 1400,
   "parts": [

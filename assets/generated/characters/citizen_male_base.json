@@ -2,28 +2,28 @@
   "asset_id": "citizen_male_base",
   "category": "character",
   "footprint_m": [
-    0.5,
-    0.4
+    0.6,
+    0.5
   ],
   "bounds_min": [
-    -0.254,
-    -0.1308,
+    -0.325,
+    -0.1656,
     0.0
   ],
   "bounds_max": [
-    0.254,
-    0.1308,
-    1.815
+    0.325,
+    0.1656,
+    1.7803
   ],
-  "height_m": 1.815,
+  "height_m": 1.78,
   "materials": [
-    "timber_dark",
     "fabric_muted",
+    "timber_dark",
     "timber_light",
     "skin_light"
   ],
   "triangles": {
-    "parts": 232
+    "parts": 248
   },
   "triangle_budget": 1400,
   "parts": [

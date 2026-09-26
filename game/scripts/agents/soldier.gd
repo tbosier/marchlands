@@ -283,24 +283,41 @@ func _equipment_mesh(parent: Node3D, mesh: Mesh, at: Vector3,
 	return item
 
 
+## A limb's shape in its own space, from the mesh the character asset gave
+## it: the pivot is at the joint, the limb hangs down -Y, and the front is -Z,
+## the way a person walks. Armour, marks and equipment are fitted to this
+## rather than to numbers measured off one body, so they follow the model when
+## it changes.
+func _part_bounds(location: String) -> AABB:
+	var part: Node = _parts.get(location)
+	if part is MeshInstance3D and (part as MeshInstance3D).mesh != null:
+		return (part as MeshInstance3D).mesh.get_aabb()
+	return AABB(Vector3(-0.08, -0.6, -0.08), Vector3(0.16, 0.6, 0.16))
+
+
 func _equip() -> void:
 	var sword_arm: Node3D = _parts.get("arm_r", _unit_visual)
 	_sword = Node3D.new()
 	_sword.name = "sword"
 	sword_arm.add_child(_sword)
+	# Held in the fist, blade hanging down past it.
+	var hand := _part_bounds("arm_r")
+	var grip := hand.position.y + 0.05
 	var blade := BoxMesh.new()
-	blade.size = Vector3(0.075, 0.72, 0.035)
-	_equipment_mesh(_sword, blade, Vector3(0, -0.85, -0.08), Color(0.62, 0.66, 0.69), 0.8)
+	blade.size = Vector3(0.06, 0.72, 0.03)
+	_equipment_mesh(_sword, blade, Vector3(0, grip - 0.40, hand.position.z - 0.02), Color(0.62, 0.66, 0.69), 0.8)
 	var guard := BoxMesh.new()
-	guard.size = Vector3(0.24, 0.045, 0.065)
-	_equipment_mesh(_sword, guard, Vector3(0, -0.47, -0.08), Color(0.25, 0.24, 0.19), 0.6)
+	guard.size = Vector3(0.22, 0.04, 0.06)
+	_equipment_mesh(_sword, guard, Vector3(0, grip - 0.04, hand.position.z - 0.02), Color(0.25, 0.24, 0.19), 0.6)
 	var shield_arm: Node3D = _parts.get("arm_l", _unit_visual)
 	var shield := CylinderMesh.new()
 	shield.top_radius = 0.34
 	shield.bottom_radius = 0.34
 	shield.height = 0.07
 	shield.radial_segments = 10
-	var held := _equipment_mesh(shield_arm, shield, Vector3(0, -0.30, -0.20), _faction_color())
+	var forearm := _part_bounds("arm_l")
+	var held := _equipment_mesh(shield_arm, shield,
+			Vector3(0, forearm.position.y * 0.55, forearm.position.z - 0.06), _faction_color())
 	_shield = held
 	held.name = "shield"
 	held.rotation.x = PI * 0.5
@@ -669,26 +686,30 @@ func _rebuild_armor() -> void:
 		_armor_visuals.append(armor)
 		var metal := armor_tier != "leather"
 		var color := Color(0.31, 0.20, 0.12) if not metal else Color(0.29, 0.33, 0.37)
+		# Fitted to the part it covers: the body from belt to shoulder (not the
+		# skirt below), the crown of the head, the upper two-thirds of a limb.
+		var fit := _part_bounds(location)
 		var box := BoxMesh.new()
-		var at := Vector3.ZERO
+		var at := fit.get_center()
 		if location == "torso":
-			box.size = Vector3(0.455, 0.49, 0.30)
-			at.y = 0.36
+			var top := fit.end.y
+			box.size = Vector3(fit.size.x * 1.08, top * 0.95, fit.size.z * 1.12)
+			at = Vector3(0, top * 0.5, fit.get_center().z)
 		elif location == "head":
-			box.size = Vector3(0.225, 0.15, 0.235)
-			at.y = 0.235
-		elif location.begins_with("arm"):
-			box.size = Vector3(0.115, 0.46, 0.115)
-			at.y = -0.28
+			var crown := fit.end.y
+			box.size = Vector3(fit.size.x * 1.1, crown * 0.42, fit.size.z * 1.12)
+			at = Vector3(0, crown * 0.8, fit.get_center().z)
 		else:
-			box.size = Vector3(0.13, 0.40, 0.14)
-			at.y = -0.26
+			var reach := -fit.position.y
+			box.size = Vector3(fit.size.x * 1.12, reach * 0.62, fit.size.z * 1.12)
+			at = Vector3(fit.get_center().x, -reach * 0.33, fit.get_center().z)
 		_equipment_mesh(armor, box, at, color, 0.55 if metal else 0.0)
 		if metal and location == "torso":
 			for row in 5:
 				var links := BoxMesh.new()
-				links.size = Vector3(0.445, 0.014, 0.012)
-				_equipment_mesh(armor, links, Vector3(0, 0.16 + row * 0.085, -0.158), Color(0.49, 0.53, 0.55), 0.6)
+				links.size = Vector3(box.size.x * 0.98, 0.014, 0.012)
+				_equipment_mesh(armor, links, Vector3(0, box.size.y * (0.2 + row * 0.16),
+						at.z - box.size.z * 0.5 - 0.004), Color(0.49, 0.53, 0.55), 0.6)
 		if armor_tier == "plate":
 			var plate := BoxMesh.new()
 			plate.size = box.size * Vector3(1.06, 0.76, 1.07)
@@ -697,7 +718,7 @@ func _rebuild_armor() -> void:
 			if location == "torso":
 				var badge := BoxMesh.new()
 				badge.size = Vector3(0.10, 0.17, 0.02)
-				_equipment_mesh(armor, badge, at + Vector3(0, 0.04, -0.19), _faction_color())
+				_equipment_mesh(armor, badge, at + Vector3(0, 0.04, -plate.size.z * 0.5 - 0.02), _faction_color())
 
 
 func _refresh_condition(play_effects: bool) -> void:
@@ -746,9 +767,12 @@ func _refresh_injury_marks() -> void:
 		return
 	_marks_drawn = _marks_version
 	var treatments := {}
+	var splints := {}
 	for wound in _body_state.wounds:
 		if wound.bandaged or wound.splinted:
 			treatments[wound.region] = true
+		if wound.splinted:
+			splints[wound.region] = true
 	for visual in _injury_visuals:
 		visual.free()
 	_injury_visuals.clear()
@@ -772,28 +796,57 @@ func _refresh_injury_marks() -> void:
 			_equipment_mesh(mark, cap, Vector3.ZERO, Color(0.72, 0.69, 0.57))
 		else:
 			part.add_child(mark)
-			var at := Vector3(0, -0.32, -0.076)
+			var fit := _part_bounds(group)
+			# How far down the part the injury sits, as a share of it: a limb
+			# hangs from its pivot, the torso and head rise from theirs.
+			var along := 0.3
+			if location.begins_with("hand"): along = 0.9
+			elif location.begins_with("foot"): along = 0.95
+			elif location.begins_with("lower"): along = 0.62
+			var at := Vector3(0, fit.position.y * along, fit.position.z - 0.004)
+			var across := fit.size.x
 			if group == "torso":
-				at = Vector3(0.06, 0.43 if location == "chest" else 0.22, -0.17)
+				at.y = fit.end.y * (0.72 if location == "chest" else 0.36)
+				at.x = 0.06
+				across = fit.size.x * 0.5
 			elif location == "head":
-				at = Vector3(0, 0.23, -0.125)
+				at.y = fit.end.y * 0.6
 			elif location == "neck":
-				at = Vector3(0, 0.03, -0.12)
-			elif location.begins_with("hand"):
-				at.y = -0.59
-			elif location.begins_with("foot"):
-				at.y = -0.72
-			elif location.begins_with("lower"):
-				at.y = -0.48
+				at.y = fit.end.y * 0.08
+			var treated := treatments.has(location)
+			var bleeding: bool = injury.cut > 0.0 or injury.puncture > 0.0
+			if treated:
+				# A bandage wrapped round the part — or, on a break, a splint
+				# bound to it — not a sticker on its front.
+				var wrap := BoxMesh.new()
+				wrap.size = Vector3(fit.size.x * 1.12, 0.055, fit.size.z * 1.12)
+				_equipment_mesh(mark, wrap, Vector3(fit.get_center().x, at.y, fit.get_center().z),
+						Color(0.84, 0.81, 0.70))
+				if splints.has(location) and group != "torso":
+					var splint := BoxMesh.new()
+					splint.size = Vector3(0.025, absf(fit.position.y) * 0.45, 0.025)
+					_equipment_mesh(mark, splint, Vector3(fit.end.x + 0.01, at.y, fit.get_center().z),
+							Color(0.55, 0.42, 0.26))
 			else:
-				at.y = -0.18
-			var color := Color(0.79, 0.75, 0.62) if treatments.has(location) else (
-					Color(0.49, 0.08, 0.06) if injury.cut > 0.0 or injury.puncture > 0.0 else Color(0.36, 0.22, 0.28))
-			for strip in 2:
-				var bandage := BoxMesh.new()
-				bandage.size = Vector3(0.115, 0.024, 0.013)
-				var mesh := _equipment_mesh(mark, bandage, at, color)
-				mesh.rotation.z = 0.6 if strip == 0 else -0.6
+				# A stain on the cloth where the wound is: blood for a cut or a
+				# stab, running down from it; a dark bruise for a blow.
+				# Overlapping blotches turned against each other, so it reads as
+				# a splash rather than a square — two crossed strips, which is
+				# what this used to be, read as a red X.
+				var color := Color(0.40, 0.03, 0.03) if bleeding else Color(0.27, 0.17, 0.24)
+				var size := minf(0.10, across * 0.7)
+				for blot in [[Vector2(0, 0), 1.0, 0.0], [Vector2(0.028, -0.018), 0.62, 0.55],
+						[Vector2(-0.03, 0.012), 0.45, -0.4]]:
+					var stain := BoxMesh.new()
+					stain.size = Vector3(size * blot[1], size * blot[1] * 0.8, 0.006)
+					var piece := _equipment_mesh(mark, stain,
+							at + Vector3(blot[0].x, blot[0].y, 0), color)
+					piece.rotation.z = blot[2]
+				if bleeding:
+					# And a thin run beneath, the way blood goes.
+					var drip := BoxMesh.new()
+					drip.size = Vector3(0.013, size * 0.9, 0.006)
+					_equipment_mesh(mark, drip, at + Vector3(-0.012, -size * 0.7, 0), color)
 
 
 func _drop_equipment(equipment: Node3D) -> void:
