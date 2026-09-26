@@ -116,6 +116,13 @@ func _notification(what: int) -> void:
 			part.set_surface_override_material(surface, null)
 
 
+## The character bodies a citizen can be given. Saves and the campaign's
+## validators accept exactly these.
+const BODIES_MALE := ["citizen_male_base", "citizen_male_02", "citizen_male_03"]
+const BODIES_FEMALE := ["citizen_female_base", "citizen_female_02", "citizen_female_03"]
+const BODIES := BODIES_MALE + BODIES_FEMALE
+
+
 func setup(citizen_id: int, registry: AssetRegistry,
 		   rng: RandomNumberGenerator, forced_asset: String = "") -> void:
 	id = citizen_id
@@ -126,8 +133,12 @@ func setup(citizen_id: int, registry: AssetRegistry,
 	# The draw happens either way, so that a restored citizen consumes the same
 	# amount of the sequence as a newly born one and the rest of the crowd is
 	# not re-rolled behind them.
-	var rolled := "citizen_male_base" if rng.randf() < 0.5 \
-			else "citizen_female_base"
+	# One draw picks both: under a half is a man and over it a woman, and
+	# where in that half it fell picks which of the three. A second draw would
+	# have shifted everything the crowd rolls after it.
+	var draw := rng.randf()
+	var pool: Array = BODIES_MALE if draw < 0.5 else BODIES_FEMALE
+	var rolled: String = pool[mini(pool.size() - 1, int(fposmod(draw, 0.5) * 2.0 * pool.size()))]
 	asset_id = forced_asset if forced_asset != "" else rolled
 	var visual := registry.instantiate(asset_id, 0)
 	add_child(visual)
@@ -207,6 +218,10 @@ func _make_name(rng: RandomNumberGenerator) -> String:
 					  LAST[rng.randi() % LAST.size()]]
 
 
+## The library materials the character generator uses for clothing.
+const CLOTH_MATERIALS := ["fabric_muted", "brick_red", "timber_light"]
+
+
 func _tint(visual: Node3D, rng: RandomNumberGenerator) -> void:
 	## Randomised clothing keeps a shared base mesh from reading as clones
 	## (design doc 27: simple shared rigs and randomised clothing).
@@ -222,8 +237,10 @@ func _tint(visual: Node3D, rng: RandomNumberGenerator) -> void:
 				continue
 			var mat: StandardMaterial3D = base.duplicate()
 			var c := mat.albedo_color
-			# Leave skin alone; only recolour cloth.
-			if c.r > 0.55 and c.g > 0.4 and c.b > 0.3 and c.r > c.b * 1.25:
+			# Only cloth is recoloured, picked out by the library material it
+			# was made from. Skin, hair, eyes and boots keep their colour: a
+			# hue shift that suits a tunic turned blond hair lime green.
+			if not CLOTH_MATERIALS.has(String(base.resource_name)):
 				mi.set_surface_override_material(s, mat)
 				continue
 			c.h = fposmod(c.h + hue_shift, 1.0)

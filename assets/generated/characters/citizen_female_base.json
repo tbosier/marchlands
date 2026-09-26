@@ -6,24 +6,25 @@
     0.5
   ],
   "bounds_min": [
-    -0.295,
-    -0.1652,
+    -0.2601,
+    -0.203,
     0.0
   ],
   "bounds_max": [
-    0.295,
-    0.1652,
-    1.7552
+    0.2601,
+    0.203,
+    1.7478
   ],
-  "height_m": 1.755,
+  "height_m": 1.748,
   "materials": [
     "brick_red",
     "timber_dark",
-    "fabric_muted",
-    "skin_mid"
+    "iron_dark",
+    "skin_mid",
+    "fabric_muted"
   ],
   "triangles": {
-    "parts": 248
+    "parts": 1192
   },
   "triangle_budget": 1400,
   "parts": [

@@ -387,7 +387,7 @@ static func _citizen(c: Variant, registry: AssetRegistry, world_size: float = Co
 			or not _position(c.get("immigrant_target", Vector3.ZERO), 0.0, world_size):
 		return "invalid citizen id or position"
 	var asset: String = c.get("asset_id", "")
-	if asset != "" and asset not in ["citizen_male_base", "citizen_female_base"]:
+	if asset != "" and asset not in Citizen.BODIES:
 		return "unknown citizen asset '%s'" % asset
 	if registry != null and asset != "" and not registry.has(asset):
 		return "missing citizen asset '%s'" % asset

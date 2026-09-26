@@ -1,0 +1,39 @@
+{
+  "asset_id": "citizen_male_03",
+  "category": "character",
+  "footprint_m": [
+    0.6,
+    0.5
+  ],
+  "bounds_min": [
+    -0.2791,
+    -0.1569,
+    0.0
+  ],
+  "bounds_max": [
+    0.2791,
+    0.1569,
+    1.7603
+  ],
+  "height_m": 1.76,
+  "materials": [
+    "timber_light",
+    "timber_dark",
+    "iron_dark",
+    "skin_light",
+    "fabric_muted"
+  ],
+  "triangles": {
+    "parts": 1132
+  },
+  "triangle_budget": 1400,
+  "parts": [
+    "citizen_male_03_torso",
+    "citizen_male_03_head",
+    "citizen_male_03_arm_l",
+    "citizen_male_03_arm_r",
+    "citizen_male_03_leg_l",
+    "citizen_male_03_leg_r"
+  ],
+  "attachments": {}
+}

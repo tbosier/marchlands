@@ -2139,7 +2139,7 @@ static func validate(data: Variant, friendly_buildings: Variant = null, world_si
 			return "invalid soldier allegiance or position"
 		if not u.get("name", "") is String or not u.get("age", 24) is int \
 				or not _number(u.get("age", 24), 0, 120) \
-				or u.get("asset_id", "citizen_male_base") not in ["citizen_male_base", "citizen_female_base"]:
+				or u.get("asset_id", "citizen_male_base") not in Citizen.BODIES:
 			return "invalid soldier identity"
 		if not u.get("carrying_res", -1) is int or u.get("carrying_res", -1) < -1 \
 				or u.get("carrying_res", -1) >= Config.RES_COUNT \
@@ -2232,7 +2232,7 @@ static func validate(data: Variant, friendly_buildings: Variant = null, world_si
 			return "invalid rival worker state"
 		if (c.leg == 1) != (c.carried > 0.0):
 			return "rival worker load disagrees with its delivery leg"
-		if not c.get("asset_id", "citizen_male_base") is String or c.get("asset_id", "citizen_male_base") not in ["citizen_male_base", "citizen_female_base"]:
+		if not c.get("asset_id", "citizen_male_base") is String or c.get("asset_id", "citizen_male_base") not in Citizen.BODIES:
 			return "invalid rival worker appearance"
 		if not c.get("name", "") is String or not c.get("age", 24) is int \
 				or not _number(c.get("age", 24), 0, 120):
